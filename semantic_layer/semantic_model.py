@@ -2,8 +2,8 @@
 # ----------------------------------------------------------------
 # BSI Fraud Investigation Platform — Canonical Entity Model
 #
-# This file is the SINGLE SOURCE OF TRUTH for every data entity
-# that flows through the system.
+# SINGLE SOURCE OF TRUTH for every data entity that flows
+# through the system.
 #
 # DESIGN PRINCIPLE (Anti-Corruption Layer):
 #   AppWorks speaks its own language — raw HTTP responses with
@@ -20,11 +20,26 @@
 #   changes a field name or returns a null, a ValidationError
 #   is raised here — not silently passed to the LLM as garbage.
 #
-# ADDING A NEW TOOL:
-#   1. Define its return entity here
-#   2. Map it in appworks_services.py
-#   3. Add to manifest.yaml
-#   Nothing else changes.
+# ADDING A NEW TOOL — THREE FILES ONLY:
+#   1. Add a new Pydantic class here
+#   2. Add a new service function in appworks_services.py
+#      calling _validate(YourNewClass, raw, fn_name)
+#   3. Add the tool entry in manifest.yaml
+#
+#   No registry to update. No second place to maintain tool names.
+#   manifest.yaml is the single authority on what tools exist.
+#   Each entity class is referenced only inside its own service
+#   function — the only place that ever needs to know it.
+#
+# WHY THERE IS NO ENTITY_REGISTRY:
+#   An ENTITY_REGISTRY dict was considered and removed. It would
+#   have mapped tool names to entity classes, duplicating a
+#   relationship already expressed by each service function
+#   calling _validate() with its own class directly. Maintaining
+#   it in sync with manifest.yaml would create extra overhead
+#   with no architectural benefit. Tool names have one authority:
+#   manifest.yaml. Entity classes have one reference point: the
+#   service function that uses them.
 # ----------------------------------------------------------------
 
 from pydantic import BaseModel, Field
@@ -33,11 +48,24 @@ from typing   import Optional
 
 # ================================================================
 # SHARED / PRIMITIVE ENTITIES
+# Nested structures that appear inside tool result entities.
+# Define these first — tool entities reference them below.
 # ================================================================
 
 class AddressEntry(BaseModel):
-    """A single address record from subject history."""
-    address: str
+    """
+    A single address record from subject history.
+
+    NOTE on field aliases:
+      AppWorks uses 'from' and 'to' as field names.
+      Both are reserved Python keywords and cannot be used
+      as attribute names. Field aliases handle the translation
+      transparently — the rest of the system uses from_date
+      and to_date and never sees the keyword conflict.
+      populate_by_name=True allows either name during construction
+      so both the AppWorks format and the internal format work.
+    """
+    address:   str
     from_date: str = Field(alias="from")
     to_date:   str = Field(alias="to")
 
@@ -81,7 +109,7 @@ class EvidenceItem(BaseModel):
 
 
 class SimilarCaseMatch(BaseModel):
-    """A single match from the vector similarity search."""
+    """A single similar case match from the vector search."""
     case_id:          str
     similarity_score: float
     fraud_type:       str
@@ -91,41 +119,36 @@ class SimilarCaseMatch(BaseModel):
 
 # ================================================================
 # TOOL 1 — verify_case_intake
-# Agent: Complaint Intelligence Agent
+# Agent:    Complaint Intelligence Agent
+# Produced: appworks_services.get_case_header()
+# Consumed: LLM context (CS-2), CS-4 complaint_intelligence tab
+#
+# Critical fields used downstream by other tools:
+#   subject_primary_id    → input to Tool 2 and Tool 4
+#   fraud_type_classified → input to Tool 5
+#   complaint_description → input to Tool 3
 # ================================================================
 
 class CaseHeader(BaseModel):
-    """
-    Canonical entity for the case header returned by AppWorks.
-    Produced by: appworks_services.get_case_header()
-    Consumed by: LLM (Tool 1 result), CS-4 complaint_intelligence section
-    Fields used downstream:
-      - subject_primary_id → required by Tool 2 and Tool 4
-      - fraud_type_classified → required by Tool 5
-      - complaint_description → required by Tool 3
-    """
-    case_id:                str
-    complainant_name:       str
-    subject_primary:        str
-    subject_primary_id:     str
-    subject_secondary:      Optional[str]  = None
-    complaint_description:  str
-    fraud_type_classified:  str
-    intake_date:            str
-    status:                 str
+    case_id:               str
+    complainant_name:      str
+    subject_primary:       str
+    subject_primary_id:    str
+    subject_secondary:     Optional[str] = None   # not always present
+    complaint_description: str
+    fraud_type_classified: str
+    intake_date:           str
+    status:                str
 
 
 # ================================================================
 # TOOL 2 — fetch_subject_history
-# Agent: Context Enrichment Agent
+# Agent:    Context Enrichment Agent
+# Produced: appworks_services.get_enriched_subject_profile()
+# Consumed: LLM context (CS-2), CS-4 context_enrichment tab
 # ================================================================
 
 class SubjectProfile(BaseModel):
-    """
-    Canonical entity for the enriched subject profile from AppWorks.
-    Produced by: appworks_services.get_enriched_subject_profile()
-    Consumed by: LLM (Tool 2 result), CS-4 context_enrichment section
-    """
     subject_id:       str
     full_name:        str
     dob:              str
@@ -137,69 +160,63 @@ class SubjectProfile(BaseModel):
 
 # ================================================================
 # TOOL 3 — search_similar_cases
-# Agent: Similar Case Retrieval Agent
+# Agent:    Similar Case Retrieval Agent
+# Produced: appworks_services.vector_search_cases()
+# Consumed: LLM context (CS-2), CS-4 similar_cases tab
 # ================================================================
 
 class SimilarCasesResult(BaseModel):
-    """
-    Canonical entity for the vector similarity search result.
-    Produced by: appworks_services.vector_search_cases()
-    Consumed by: LLM (Tool 3 result), CS-4 similar_cases section
-    """
-    query_summary:   str
-    matches:         list[SimilarCaseMatch]
-    top_n_returned:  int
+    query_summary:  str
+    matches:        list[SimilarCaseMatch]
+    top_n_returned: int
 
 
 # ================================================================
 # TOOL 4 — calculate_risk_metrics
-# Agent: Fraud Risk Assessment Agent
+# Agent:    Fraud Risk Assessment Agent
+# Produced: appworks_services.get_risk_measures()
+# Consumed: LLM context (CS-2), CS-4 risk_assessment tab
+#
+# Critical fields used downstream by other tools:
+#   risk_tier → input to Tool 5 (get_investigation_playbook)
 # ================================================================
 
 class RiskAssessment(BaseModel):
-    """
-    Canonical entity for the risk assessment result.
-    Produced by: appworks_services.get_risk_measures()
-    Consumed by: LLM (Tool 4 result), CS-4 risk_assessment section
-    Fields used downstream:
-      - risk_tier → required by Tool 5 (get_investigation_playbook)
-    """
-    case_id:               str
-    subject_id:            str
-    risk_score:            float
-    risk_tier:             str                  # LOW / MEDIUM / HIGH / CRITICAL
-    triggered_rules:       list[TriggeredRule]
-    billing_anomaly_flag:  bool
-    prior_case_count:      int
-    recommendation:        str
+    case_id:              str
+    subject_id:           str
+    risk_score:           float
+    risk_tier:            str          # LOW / MEDIUM / HIGH / CRITICAL
+    triggered_rules:      list[TriggeredRule]
+    billing_anomaly_flag: bool
+    prior_case_count:     int
+    recommendation:       str
 
 
 # ================================================================
 # TOOL 5 — get_investigation_playbook
-# Agent: Case Strategy Agent
+# Agent:    Case Strategy Agent
+# Produced: appworks_services.get_playbook_by_type()
+# Consumed: LLM context (CS-2), CS-4 investigation_playbook tab
 # ================================================================
 
 class InvestigationPlaybook(BaseModel):
-    """
-    Canonical entity for the investigation playbook from AppWorks.
-    Produced by: appworks_services.get_playbook_by_type()
-    Consumed by: LLM (Tool 5 result), CS-4 investigation_playbook section
-    """
-    playbook_id:           str
-    fraud_type:            str
-    risk_level:            str
-    investigation_steps:   list[InvestigationStep]
-    evidence_checklist:    list[EvidenceItem]
-    escalation_required:   bool
+    playbook_id:         str
+    fraud_type:          str
+    risk_level:          str
+    investigation_steps: list[InvestigationStep]
+    evidence_checklist:  list[EvidenceItem]
+    escalation_required: bool
 
 
 # ================================================================
 # TOOL 6 — generate_final_report
-# Agent: Report Generation Agent
+# Agent:    Report Generation Agent
+# Produced: appworks_services.compile_and_render_report()
+# Consumed: LLM context (CS-2), CS-4 final_report tab
 # ================================================================
 
 class ReportSections(BaseModel):
-    """The named sections inside the final investigation report."""
+    """Named sections inside the final investigation report."""
     case_summary:        str
     subject_history:     str
     similar_cases:       str
@@ -209,47 +226,8 @@ class ReportSections(BaseModel):
 
 
 class FinalReport(BaseModel):
-    """
-    Canonical entity for the compiled investigation report.
-    Produced by: appworks_services.compile_and_render_report()
-    Consumed by: LLM (Tool 6 result), CS-4 final_report section
-    """
     report_id:    str
     case_id:      str
     generated_at: str
     sections:     ReportSections
     status:       str
-
-
-# ================================================================
-# DISPATCHER ERROR ENTITY
-# Canonical shape for all error responses from the dispatcher.
-# ================================================================
-
-class DispatchError(BaseModel):
-    """
-    Canonical error entity returned by the dispatcher when
-    a gate fails or a service function raises an exception.
-    The LLM receives this and can reason over it — e.g. retry
-    with corrected params or report the error in its summary.
-    """
-    status:  str = "error"
-    tool:    Optional[str] = None
-    message: str
-
-
-# ================================================================
-# ENTITY REGISTRY
-# Maps tool names to their canonical return entity.
-# Used by dispatcher.py to know which model to validate against.
-# When a new tool is added, register it here.
-# ================================================================
-
-ENTITY_REGISTRY: dict[str, type[BaseModel]] = {
-    "verify_case_intake":           CaseHeader,
-    "fetch_subject_history":        SubjectProfile,
-    "search_similar_cases":         SimilarCasesResult,
-    "calculate_risk_metrics":       RiskAssessment,
-    "get_investigation_playbook":   InvestigationPlaybook,
-    "generate_final_report":        FinalReport,
-}

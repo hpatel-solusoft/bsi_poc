@@ -1,29 +1,37 @@
 # semantic_layer/appworks_services.py
 # ----------------------------------------------------------------
-# MOCK – Simulates AppWorks Web Service HTTP calls.
+# BSI Fraud Investigation Platform — AppWorks Service Layer
 #
-# ANTI-CORRUPTION LAYER:
-#   Every function validates its return data against the canonical
-#   entity model (semantic_model.py) before returning it.
-#   This is the boundary between AppWorks (external system) and
-#   your domain. Raw AppWorks data never passes this boundary
-#   unvalidated.
-#
-# HOW VALIDATION WORKS HERE:
-#   1. Raw dict is assembled (mock data, or real AppWorks response)
-#   2. Pydantic model is instantiated — ValidationError raised here
-#      if the data does not match the canonical schema
-#   3. .model_dump() converts back to dict for the dispatcher
-#      so the rest of the system works with clean, validated dicts
-#
-# IF APPWORKS CHANGES A FIELD:
-#   The ValidationError surfaces here — at the boundary — not
-#   silently downstream in the LLM context or CS-4 store.
+# MOCK — Simulates AppWorks Web Service HTTP calls.
+# Each function prints what the real call would do and
+# returns hardcoded realistic data.
 #
 # TO PRODUCTIONISE:
-#   Replace the _mock_http body of each function with a real
-#   requests.get/post to the AppWorks REST endpoint shown.
-#   The validation layer beneath it stays identical.
+#   Replace the mock body of each function with a real
+#   requests.get / requests.post to the AppWorks REST endpoint
+#   shown in each docstring. The _validate() call at the end
+#   of every function stays exactly as-is.
+#
+# ANTI-CORRUPTION LAYER:
+#   Every function validates its return data against the
+#   canonical entity model (semantic_model.py) before returning.
+#   This is the boundary between AppWorks (external system) and
+#   your domain. Raw AppWorks data never crosses this boundary
+#   unvalidated.
+#
+# HOW VALIDATION WORKS:
+#   1. Raw dict assembled (mock or real AppWorks response)
+#   2. _validate() instantiates the Pydantic model
+#      → ValidationError raised HERE if data does not match
+#   3. model_dump() returns a clean plain dict
+#      → rest of the system works with dicts, not Pydantic objects
+#
+# IF APPWORKS CHANGES A FIELD:
+#   ValidationError surfaces here — at the boundary — not
+#   silently downstream in the LLM context or CS-4 store.
+#   The dispatcher catches it and returns a structured error
+#   to the agent runner. The LLM includes it in its summary.
+#   The system does not crash.
 # ----------------------------------------------------------------
 
 import time
@@ -36,15 +44,40 @@ from semantic_model import (
     RiskAssessment,
     InvestigationPlaybook,
     FinalReport,
-    AddressEntry,
-    PriorCase,
-    KnownAssociate,
-    TriggeredRule,
-    InvestigationStep,
-    EvidenceItem,
-    SimilarCaseMatch,
     ReportSections,
 )
+
+
+# ── Anti-Corruption Layer enforcement point ───────────────────────
+
+def _validate(model_class, raw_data: dict, fn_name: str) -> dict:
+    """
+    Validates raw_data against the canonical Pydantic model.
+    Returns a clean validated dict on success.
+    Raises ValidationError on failure with context identifying
+    which function failed and which fields were invalid.
+
+    Called at the end of every service function — this is the
+    single point where AppWorks data is translated into the
+    system's canonical domain language.
+
+    Parameters:
+      model_class  — the Pydantic entity class to validate against
+                     e.g. CaseHeader, RiskAssessment
+      raw_data     — the raw dict from AppWorks (or mock)
+      fn_name      — calling function name for error context
+    """
+    try:
+        validated = model_class(**raw_data)
+        return validated.model_dump()
+    except ValidationError as e:
+        raise ValidationError(
+            f"[{fn_name}] AppWorks response failed canonical validation.\n"
+            f"This means AppWorks returned unexpected data — a field may have "
+            f"been renamed, removed, or changed type.\n"
+            f"Update semantic_model.py if the AppWorks API has changed.\n\n"
+            f"{e}"
+        )
 
 
 def _mock_http(method: str, endpoint: str, payload: dict = None):
@@ -55,34 +88,10 @@ def _mock_http(method: str, endpoint: str, payload: dict = None):
     time.sleep(0.3)
 
 
-def _validate(model_class, raw_data: dict, fn_name: str) -> dict:
-    """
-    Validates raw_data against the canonical Pydantic model.
-    Returns a clean validated dict on success.
-    Raises ValidationError on failure with a clear message
-    identifying which function and which fields failed.
-
-    This function is the Anti-Corruption Layer enforcement point.
-    It is called at the end of every service function.
-    """
-    try:
-        validated = model_class(**raw_data)
-        return validated.model_dump()
-    except ValidationError as e:
-        # Re-raise with context so the dispatcher can surface
-        # a clear error to the agent runner
-        raise ValidationError(
-            f"[{fn_name}] AppWorks response failed canonical validation.\n"
-            f"This means AppWorks returned unexpected data.\n"
-            f"Check the field errors below and update semantic_model.py "
-            f"if the AppWorks API has changed.\n\n{e}"
-        )
-
-
 # ----------------------------------------------------------------
-# AGENT: Complaint Intelligence Agent
-# Tool:  verify_case_intake
-# Model: CaseHeader
+# TOOL 1 — verify_case_intake
+# Agent:    Complaint Intelligence Agent
+# Entity:   CaseHeader
 # ----------------------------------------------------------------
 
 def get_case_header(case_id: str) -> dict:
@@ -96,8 +105,6 @@ def get_case_header(case_id: str) -> dict:
     print(f"\n      → Calling AppWorks: fetch case header for [{case_id}]")
     _mock_http("GET", f"/appworks/rest/v1/cases/{case_id}/header")
 
-    # Raw AppWorks response (mock)
-    # In production: raw = requests.get(...).json()
     raw_responses = {
         "BSI-2024-00421": {
             "case_id":                "BSI-2024-00421",
@@ -116,12 +123,11 @@ def get_case_header(case_id: str) -> dict:
         }
     }
 
-    raw = raw_responses.get(case_id, {"error": f"Case {case_id} not found"})
+    raw = raw_responses.get(case_id)
+    if not raw:
+        raise ValueError(f"Case {case_id} not found in AppWorks")
 
-    if "error" in raw:
-        raise ValueError(raw["error"])
-
-    # ── Anti-Corruption Layer: validate before returning ──────────
+    # ── Anti-Corruption Layer ─────────────────────────────────────
     validated = _validate(CaseHeader, raw, "get_case_header")
 
     print(f"      ← AppWorks returned: case [{case_id}], "
@@ -130,9 +136,9 @@ def get_case_header(case_id: str) -> dict:
 
 
 # ----------------------------------------------------------------
-# AGENT: Context Enrichment Agent
-# Tool:  fetch_subject_history
-# Model: SubjectProfile
+# TOOL 2 — fetch_subject_history
+# Agent:    Context Enrichment Agent
+# Entity:   SubjectProfile
 # ----------------------------------------------------------------
 
 def get_enriched_subject_profile(subject_id: str) -> dict:
@@ -157,8 +163,10 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
             "full_name":        "Dr. Amir Hosseini",
             "dob":              "1968-04-22",
             "address_history": [
-                {"address": "14 Beacon St, Boston MA", "from": "2021-01", "to": "present"},
-                {"address": "88 Elm Ave, Quincy MA",   "from": "2018-06", "to": "2020-12"}
+                {"address": "14 Beacon St, Boston MA",
+                 "from": "2021-01", "to": "present"},
+                {"address": "88 Elm Ave, Quincy MA",
+                 "from": "2018-06", "to": "2020-12"}
             ],
             "prior_cases": [
                 {"case_id": "BSI-2021-00188", "year": 2021,
@@ -168,9 +176,9 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
             ],
             "known_associates": [
                 {"name": "Sunrise Home Health LLC",
-                 "relationship": "Employer",     "subject_id": "SUBJ-9034"},
+                 "relationship": "Employer",      "subject_id": "SUBJ-9034"},
                 {"name": "Maria Hosseini",
-                 "relationship": "Co-signatory", "subject_id": "SUBJ-9201"}
+                 "relationship": "Co-signatory",  "subject_id": "SUBJ-9201"}
             ],
             "prior_case_count": 2
         }
@@ -181,7 +189,7 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
         raise ValueError(f"Subject {subject_id} not found in AppWorks")
 
     # ── Anti-Corruption Layer ─────────────────────────────────────
-    # Note: AddressEntry uses field aliases (from/to are Python keywords).
+    # Note: AddressEntry uses field aliases (from/to → from_date/to_date)
     # Pydantic handles this via populate_by_name=True in AddressEntry.
     validated = _validate(SubjectProfile, raw, "get_enriched_subject_profile")
 
@@ -191,9 +199,9 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
 
 
 # ----------------------------------------------------------------
-# AGENT: Similar Case Retrieval Agent
-# Tool:  search_similar_cases
-# Model: SimilarCasesResult
+# TOOL 3 — search_similar_cases
+# Agent:    Similar Case Retrieval Agent
+# Entity:   SimilarCasesResult
 # ----------------------------------------------------------------
 
 def vector_search_cases(complaint_text: str, top_n: int = 3) -> dict:
@@ -234,8 +242,8 @@ def vector_search_cases(complaint_text: str, top_n: int = 3) -> dict:
                 "similarity_score": 0.81,
                 "fraud_type":       "BILLING",
                 "outcome":          "REFERRED_TO_AG",
-                "summary":          "Home health agency billed for deceased patient "
-                                    "for 3 months post-death."
+                "summary":          "Home health agency billed for deceased "
+                                    "patient for 3 months post-death."
             }
         ][:top_n],
         "top_n_returned": min(top_n, 3)
@@ -250,9 +258,9 @@ def vector_search_cases(complaint_text: str, top_n: int = 3) -> dict:
 
 
 # ----------------------------------------------------------------
-# AGENT: Fraud Risk Assessment Agent
-# Tool:  calculate_risk_metrics
-# Model: RiskAssessment
+# TOOL 4 — calculate_risk_metrics
+# Agent:    Fraud Risk Assessment Agent
+# Entity:   RiskAssessment
 # ----------------------------------------------------------------
 
 def get_risk_measures(case_id: str, subject_id: str) -> dict:
@@ -265,8 +273,8 @@ def get_risk_measures(case_id: str, subject_id: str) -> dict:
     RETURNS: Validated RiskAssessment dict
     """
     print(f"\n      → Calling AppWorks: fetch billing summary + risk profile")
-    _mock_http("GET",  f"/appworks/rest/v1/cases/{case_id}/billing-summary")
-    _mock_http("GET",  f"/appworks/rest/v1/subjects/{subject_id}/risk-profile")
+    _mock_http("GET", f"/appworks/rest/v1/cases/{case_id}/billing-summary")
+    _mock_http("GET", f"/appworks/rest/v1/subjects/{subject_id}/risk-profile")
     print(f"      [Rules Engine] POST /rules-engine/evaluate")
     time.sleep(0.3)
 
@@ -277,16 +285,21 @@ def get_risk_measures(case_id: str, subject_id: str) -> dict:
         "risk_tier":  "HIGH",
         "triggered_rules": [
             {"rule_id": "R-101",
-             "rule_name": "Billing During Active Hospitalization",   "weight": 0.40},
+             "rule_name": "Billing During Active Hospitalization",
+             "weight": 0.40},
             {"rule_id": "R-205",
-             "rule_name": "Prior Substantiated Case Within 3 Years", "weight": 0.25},
+             "rule_name": "Prior Substantiated Case Within 3 Years",
+             "weight": 0.25},
             {"rule_id": "R-312",
-             "rule_name": "Claim Volume Spike (>40 claims / 6 mo)",  "weight": 0.22}
+             "rule_name": "Claim Volume Spike (>40 claims / 6 mo)",
+             "weight": 0.22}
         ],
         "billing_anomaly_flag": True,
         "prior_case_count":     2,
-        "recommendation":       "Escalate to Senior Investigator. "
-                                "Request full billing records subpoena."
+        "recommendation":       (
+            "Escalate to Senior Investigator. "
+            "Request full billing records subpoena."
+        )
     }
 
     # ── Anti-Corruption Layer ─────────────────────────────────────
@@ -299,9 +312,9 @@ def get_risk_measures(case_id: str, subject_id: str) -> dict:
 
 
 # ----------------------------------------------------------------
-# AGENT: Case Strategy Agent
-# Tool:  get_investigation_playbook
-# Model: InvestigationPlaybook
+# TOOL 5 — get_investigation_playbook
+# Agent:    Case Strategy Agent
+# Entity:   InvestigationPlaybook
 # ----------------------------------------------------------------
 
 def get_playbook_by_type(fraud_type: str, risk_level: str) -> dict:
@@ -325,27 +338,32 @@ def get_playbook_by_type(fraud_type: str, risk_level: str) -> dict:
             "risk_level":  "HIGH",
             "investigation_steps": [
                 {"step": 1,
-                 "action": "Pull complete billing history from MassHealth",
-                 "owner": "Analyst",      "deadline_days": 3},
+                 "action":        "Pull complete billing history from MassHealth",
+                 "owner":         "Analyst",
+                 "deadline_days": 3},
                 {"step": 2,
-                 "action": "Cross-reference claim dates with hospital records",
-                 "owner": "Analyst",      "deadline_days": 5},
+                 "action":        "Cross-reference claim dates with hospital records",
+                 "owner":         "Analyst",
+                 "deadline_days": 5},
                 {"step": 3,
-                 "action": "Issue subpoena for provider service logs",
-                 "owner": "Investigator", "deadline_days": 10},
+                 "action":        "Issue subpoena for provider service logs",
+                 "owner":         "Investigator",
+                 "deadline_days": 10},
                 {"step": 4,
-                 "action": "Interview patient and / or family members",
-                 "owner": "Investigator", "deadline_days": 14},
+                 "action":        "Interview patient and / or family members",
+                 "owner":         "Investigator",
+                 "deadline_days": 14},
                 {"step": 5,
-                 "action": "Prepare referral package for Attorney General",
-                 "owner": "Director",     "deadline_days": 21}
+                 "action":        "Prepare referral package for Attorney General",
+                 "owner":         "Director",
+                 "deadline_days": 21}
             ],
             "evidence_checklist": [
-                {"item": "MassHealth claims printout",          "mandatory": True},
-                {"item": "Hospital admission/discharge records", "mandatory": True},
-                {"item": "Provider service documentation",       "mandatory": True},
-                {"item": "Patient statement",                    "mandatory": False},
-                {"item": "Prior case file BSI-2021-00188",       "mandatory": False}
+                {"item": "MassHealth claims printout",           "mandatory": True},
+                {"item": "Hospital admission/discharge records",  "mandatory": True},
+                {"item": "Provider service documentation",        "mandatory": True},
+                {"item": "Patient statement",                     "mandatory": False},
+                {"item": "Prior case file BSI-2021-00188",        "mandatory": False}
             ],
             "escalation_required": True
         }
@@ -374,9 +392,9 @@ def get_playbook_by_type(fraud_type: str, risk_level: str) -> dict:
 
 
 # ----------------------------------------------------------------
-# AGENT: Report Generation Agent
-# Tool:  generate_final_report
-# Model: FinalReport
+# TOOL 6 — generate_final_report
+# Agent:    Report Generation Agent
+# Entity:   FinalReport
 # ----------------------------------------------------------------
 
 def compile_and_render_report(case_id: str) -> dict:
