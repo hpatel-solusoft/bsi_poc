@@ -1,317 +1,605 @@
-# api/webhook.py
-# ----------------------------------------------------------------
-# BSI Fraud Investigation Platform — FastAPI Webhook
-#
-# This is the ONLY entry point for the AI agentic workflow.
-# AppWorks (or Postman / browser for POC testing) submits a
-# complaint case_id here. The AI Agent takes it from there.
-#
-# WHY ONE ENDPOINT?
-# ─────────────────
-# The LLM receives the full tool catalogue from manifest.yaml
-# and autonomously decides which tools to call and in what order.
-# There is NO per-agent, per-tool, or per-tab endpoint.
-# The frontend reads named sections from the response to populate
-# UI tabs — it never triggers a specific agent directly.
-#
-# Endpoints:
-#   GET  /health      → Liveness check (testable in browser)
-#   POST /investigate → Trigger full agentic investigation loop
-#
-# Test with Postman:
-#   POST http://localhost:8000/investigate
-#   Body (JSON): { "case_id": "BSI-2024-00421" }
-#
-# Run server:
-#   uvicorn api.webhook:app --reload
-#   OR: python run_server.py
-# ----------------------------------------------------------------
-
+"""
+HTTP endpoints for the BSI Fraud Investigation Platform.
+Responsibilities: endpoints, CASE_STORE (CS-4), response shaping,
+provenance trail extraction and persistence.
+Outside its scope: calling appworks_services directly, knowing tool names
+beyond what TOOL_TO_SECTION provides.
+"""
 import json
 import os
-import sys
-import traceback
+import time
+import yaml
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
-# ── Resolve project root so imports work regardless of working directory ──
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+load_dotenv()
 
-from agent_service.agent_runner import BSIAgentRunner
+app = FastAPI(title="BSI Fraud Investigation Platform")
 
+# -----------------------------------------------------------------------
+# CS-4: Case session context — in-memory for POC with 15-minute TTL.
+# Falls back to ai_investigation_data sent in the request body when the
+# entry has expired or the server has restarted (stateless-session pattern).
+# -----------------------------------------------------------------------
 
-# ── FastAPI app ───────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title       = "BSI Fraud Investigation Webhook",
-    description = (
-        "Single-entry-point webhook that triggers the BSI AI Agentic "
-        "Investigation workflow. The LLM autonomously calls all tools "
-        "via the Semantic Dispatcher. No per-agent or per-tab endpoints."
-    ),
-    version     = "1.0-POC",
-    docs_url    = "/docs",      # Swagger UI — open in browser to test
-    redoc_url   = "/redoc"
-)
-
-# Allow browser-based frontends (AppWorks UI, local dev) to call this API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins     = ["*"],  # Tighten in production to AppWorks domain
-    allow_methods     = ["GET", "POST"],
-    allow_headers     = ["*"],
-)
+CASE_STORE_TTL_SECONDS = 15 * 60  # 15 minutes (CS-4 lifespan per spec)
 
 
-# ── Request / Response models ─────────────────────────────────────────────
-
-class InvestigateRequest(BaseModel):
+class _TTLStore:
     """
-    Payload sent by AppWorks when a complaint form is submitted.
-    In production: AppWorks triggers this webhook automatically.
-    For POC testing: send from Postman or the /docs Swagger UI.
-    """
-    case_id: str
+    Drop-in replacement for a plain dict that expires entries after a
+    configurable TTL (CS-4 Case Session Context).
 
-    model_config = {
-        "json_schema_extra": {
-            "examples": [{"case_id": "BSI-2024-00421"}]
-        }
+    Supports:   key in store  →  TTL-aware __contains__
+                store[key]    →  __getitem__ (raises KeyError on expiry)
+                store[key]=v  →  __setitem__ (resets TTL)
+                store.get()   →  None on miss/expiry
+    The stored dict is returned by reference — in-place .update() calls
+    mutate it correctly without requiring a separate setter.
+    """
+
+    def __init__(self, ttl_seconds: int):
+        self._data: Dict[str, Dict] = {}
+        self._ts:   Dict[str, float] = {}
+        self._ttl = ttl_seconds
+
+    # -- TTL helpers --------------------------------------------------
+
+    def _alive(self, key: str) -> bool:
+        return (
+            key in self._data
+            and (time.monotonic() - self._ts.get(key, 0.0)) < self._ttl
+        )
+
+    def _evict(self, key: str) -> None:
+        self._data.pop(key, None)
+        self._ts.pop(key, None)
+
+    def ttl_remaining(self, key: str) -> Optional[float]:
+        """Seconds remaining before key expires, or None if not present."""
+        if not self._alive(key):
+            return None
+        return max(0.0, self._ttl - (time.monotonic() - self._ts[key]))
+
+    # -- Mapping interface --------------------------------------------
+
+    def __contains__(self, key: str) -> bool:
+        if not self._alive(key):
+            self._evict(key)
+            return False
+        return True
+
+    def __getitem__(self, key: str) -> Dict:
+        if key not in self:          # triggers TTL check + eviction
+            raise KeyError(key)
+        return self._data[key]
+
+    def __setitem__(self, key: str, value: Dict) -> None:
+        self._data[key] = value
+        self._ts[key]   = time.monotonic()
+
+    def get(self, key: str, default=None):
+        if key not in self:
+            return default
+        return self._data[key]
+
+
+CASE_STORE: _TTLStore = _TTLStore(CASE_STORE_TTL_SECONDS)
+
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../config/manifest.yaml")
+
+
+def _build_tool_to_section() -> Dict[str, str]:
+    """Built dynamically from manifest at startup — never hardcoded."""
+    if not os.path.exists(MANIFEST_PATH):
+        return {}
+    with open(MANIFEST_PATH) as f:
+        manifest = yaml.safe_load(f)
+    return {
+        tool["name"]: tool["section"]
+        for tool in manifest.get("tools", [])
+        if "section" in tool
     }
 
 
-# ── Tool → UI section mapping ─────────────────────────────────────────────
-#
-# This is the ONLY place where tool names are mapped to UI section names.
-# Each section name corresponds to a tab in the BSI investigation screen.
-# The frontend reads response.investigation.<section_name> to populate
-# its tab — no tab ever calls a specific agent endpoint directly.
-#
-# Tab 1  → complaint_intelligence  (Complaint Details panel)
-# Tab 2  → context_enrichment      (Linked Entities / Prior Cases panel)
-# Tab 3  → similar_cases           (Similar Cases section)
-# Tab 4  → risk_assessment         (Risk Panel)
-# Tab 5  → investigation_playbook  (Suggested Strategy panel)
-# Tab 6  → final_report            (Generated Investigation Report)
-
-TOOL_TO_SECTION: dict[str, str] = {
-    "verify_case_intake":       "complaint_intelligence",
-    "fetch_subject_history":    "context_enrichment",
-    "search_similar_cases":     "similar_cases",
-    "calculate_risk_metrics":   "risk_assessment",
-    "get_investigation_playbook": "investigation_playbook",
-    "generate_final_report":    "final_report",
-}
+TOOL_TO_SECTION = _build_tool_to_section()
 
 
-# ── Message parsing helpers ───────────────────────────────────────────────
+# -----------------------------------------------------------------------
+# Internal helpers
+# -----------------------------------------------------------------------
+
+def _find_tool_name_by_call_id(messages: list, call_id: str) -> Optional[str]:
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                if tc.get("id") == call_id:
+                    return tc["function"]["name"]
+    return None
+
 
 def _extract_tool_results(messages: list) -> dict:
+    """CS-3: Build section dict from tool result messages.
+
+    Tool results are stored exactly as the LLM received them.
+    No fields are stripped — downstream endpoints (playbook, report,
+    copilot) and the investigator-visible summary all need the full data.
+
+    Two lightweight normalisations are applied:
+      • Empty DOB strings from AppWorks are converted to None.
+      • complaint_intelligence gets two convenience fields injected
+        (subject_primary_id, fraud_types) so downstream prompts can
+        reference them without parsing the nested subjects/allegations tree.
     """
-    Parses the agent conversation history returned by BSIAgentRunner
-    to extract each tool's result data into named sections.
-
-    How it works:
-      1. Scans assistant messages to build a map:
-             tool_call_id → tool_name
-      2. Scans role:"tool" messages to find each result by tool_call_id
-      3. Maps each tool_name to its UI section name via TOOL_TO_SECTION
-      4. Returns { section_name: result_data } for every tool called
-
-    The LLM decided which tools to call and in what order.
-    This function just harvests what was actually called.
-    """
-    # Step 1: Build tool_call_id → tool_name map from assistant messages
-    tool_call_id_to_name: dict[str, str] = {}
+    sections = {}
     for msg in messages:
-        # OpenAI SDK returns message objects (not dicts) for assistant turns
-        tool_calls = getattr(msg, "tool_calls", None)
-        if tool_calls:
-            for tc in tool_calls:
-                tool_call_id_to_name[tc.id] = tc.function.name
-
-    # Step 2: Extract tool result messages (appended as dicts by agent_runner)
-    sections: dict = {}
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "tool":
-            tool_call_id = msg.get("tool_call_id", "")
-            tool_name    = tool_call_id_to_name.get(tool_call_id)
-            if not tool_name:
-                continue
-            section_name = TOOL_TO_SECTION.get(tool_name, tool_name)
+        if msg.get("role") != "tool":
+            continue
+        tool_name = _find_tool_name_by_call_id(messages, msg["tool_call_id"])
+        if tool_name and tool_name in TOOL_TO_SECTION:
+            section = TOOL_TO_SECTION[tool_name]
             try:
-                sections[section_name] = json.loads(msg["content"])
-            except (json.JSONDecodeError, TypeError):
-                sections[section_name] = msg.get("content")
+                data = json.loads(msg["content"])
 
+                # Normalise empty DOB strings from AppWorks
+                if section == "context_enrichment" and isinstance(data, dict):
+                    if data.get("dob") == "":
+                        data["dob"] = None
+
+                # Inject convenience top-level fields for downstream prompts.
+                # subject_primary_id  — used by /playbook, /report, /copilot prompts.
+                # fraud_types         — flattened list for the same consumers.
+                # Both are derived from data already present in the result;
+                # nothing is fabricated.
+                if section == "complaint_intelligence" and isinstance(data, dict):
+                    if "subjects" in data and data["subjects"]:
+                        primary = next(
+                            (s for s in data["subjects"] if s.get("is_primary_subject")),
+                            data["subjects"][0],
+                        )
+                        data["subject_primary_id"] = primary.get("subject_id")
+
+                    if "allegations" in data and data["allegations"]:
+                        ft_set = set()
+                        for alg in data["allegations"]:
+                            desc = alg.get("allegation_type", {}).get("description")
+                            if desc:
+                                ft_set.add(desc)
+                        data["fraud_types"] = list(ft_set)
+
+                sections[section] = data
+            except (json.JSONDecodeError, TypeError):
+                sections[section] = msg["content"]
     return sections
 
 
 def _extract_agent_summary(messages: list) -> str:
-    """
-    Returns the final natural-language summary the LLM produced
-    after completing all tool calls (the last assistant message
-    with text content and no pending tool calls — finish_reason: stop).
-    """
+    """Return the final assistant text from the last stop turn."""
     for msg in reversed(messages):
-        role    = getattr(msg, "role",    None) or (msg.get("role")    if isinstance(msg, dict) else None)
-        content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else None)
-        # Skip tool result messages and empty assistant turns
-        if role == "assistant" and content and content.strip():
-            return content.strip()
+        if msg.get("role") == "assistant" and msg.get("content"):
+            return msg["content"]
     return ""
 
 
-def _count_tool_calls(messages: list) -> int:
-    """Counts how many tool calls the LLM made across all turns."""
-    count = 0
-    for msg in messages:
-        tool_calls = getattr(msg, "tool_calls", None)
-        if tool_calls:
-            count += len(tool_calls)
-    return count
+def _get_case_id_from_investigation_data(body_data: Optional[dict]) -> Optional[str]:
+    if not body_data or not isinstance(body_data, dict):
+        return None
+    complaint_section = body_data.get("complaint_intelligence")
+    if isinstance(complaint_section, dict):
+        return complaint_section.get("case_id")
+    return None
 
 
-def _resolve_manifest_path() -> str:
-    """
-    Finds manifest.yaml regardless of whether the project uses
-    the flat layout (manifest.yaml at root) or the spec layout
-    (config/manifest.yaml). Returns the first path that exists.
-    """
-    candidates = [
-        os.path.join(ROOT, "manifest.yaml"),
-        os.path.join(ROOT, "config", "manifest.yaml"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    raise FileNotFoundError(
-        f"manifest.yaml not found. Looked in: {candidates}"
+def _get_or_populate_case_store(case_id: Optional[str], body_data: Optional[dict]) -> tuple[str, dict]:
+    """CS-4 pattern: use store if present, fall back to request body."""
+    resolved_case_id = case_id or _get_case_id_from_investigation_data(body_data)
+    if resolved_case_id and resolved_case_id in CASE_STORE and CASE_STORE[resolved_case_id]:
+        return resolved_case_id, CASE_STORE[resolved_case_id]
+    if body_data:
+        if not resolved_case_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No case_id provided. Provide case_id either as a top-level field "
+                    "or inside ai_investigation_data.complaint_intelligence.case_id."
+                ),
+            )
+        CASE_STORE[resolved_case_id] = body_data
+        return resolved_case_id, body_data
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "No investigation data available for this case. "
+            "Run POST /investigate first, or provide ai_investigation_data in the request body."
+        ),
     )
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────
+def _risk_rule_lookup(case_data: dict) -> dict:
+    rules_section = case_data.get("risk_rules", {})
+    rules = rules_section.get("rules", []) if isinstance(rules_section, dict) else []
+    lookup = {}
+    for rule in rules:
+        desc = rule.get("description")
+        rule_id = rule.get("rule_id")
+        if desc:
+            lookup[desc] = rule
+        if rule_id:
+            lookup[rule_id] = rule
+    return lookup
 
-@app.get(
-    "/health",
-    summary     = "Liveness check",
-    description = "Returns 200 OK if the service is running. Testable directly in a browser.",
-    tags        = ["Monitoring"]
-)
+
+def _format_subjects_from_context(case_data: dict) -> str:
+    complaint = case_data.get("complaint_intelligence", {})
+    enrichment = case_data.get("context_enrichment", {})
+    subjects = complaint.get("subjects", []) if isinstance(complaint, dict) else []
+    prior_cases = enrichment.get("prior_cases", []) if isinstance(enrichment, dict) else []
+    prior_case_count = enrichment.get("prior_case_count", len(prior_cases))
+    primary_id = complaint.get("subject_primary_id") if isinstance(complaint, dict) else None
+
+    lines = []
+    for subject in subjects:
+        details = subject.get("details", {})
+        subject_id = subject.get("subject_id")
+        is_primary = subject.get("is_primary_subject") or subject_id == primary_id
+        label = "PRIMARY" if is_primary else "SECONDARY"
+        full_name = " ".join(
+            part for part in [
+                details.get("first_name"),
+                details.get("middle_initial"),
+                details.get("last_name"),
+            ]
+            if part
+        ) or details.get("identifier") or "Not recorded in AppWorks"
+        identifier = (
+            details.get("ssn")
+            or details.get("ein")
+            or details.get("identifier")
+            or "Not recorded in AppWorks"
+        )
+        dob = details.get("dob") or "Not recorded in AppWorks"
+        aliases = subject.get("alias_records") or details.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [a.strip() for a in aliases.split(",") if a.strip()]
+
+        address_parts = []
+        for address in subject.get("addresses", []):
+            address_parts.append(", ".join(
+                part for part in [
+                    address.get("address"),
+                    address.get("apt_suite"),
+                    address.get("city"),
+                    address.get("state"),
+                    address.get("zipcode"),
+                    address.get("county"),
+                ]
+                if part
+            ))
+
+        line = (
+            f"[{label}] {full_name} (Role: {subject.get('role') or 'Subject'}, "
+            f"Type: {subject.get('subject_type') or details.get('subject_type') or 'Not recorded in AppWorks'}, "
+            f"Subject ID: {subject_id or 'Not recorded in AppWorks'}). "
+            f"Identifier: {identifier}. DOB: {dob}. "
+            f"Addresses: {'; '.join(address_parts) if address_parts else 'Not recorded in AppWorks'}. "
+        )
+        if aliases:
+            line += f"Aliases: {', '.join(aliases)}. "
+        if is_primary:
+            case_refs = [
+                str(pc.get("mapping_title") or pc.get("workfolder_id"))
+                for pc in prior_cases
+                if pc.get("mapping_title") or pc.get("workfolder_id")
+            ]
+            line += (
+                f"Prior case count: {prior_case_count}. "
+                f"Prior case references: {'; '.join(case_refs) if case_refs else 'Not recorded in AppWorks'}."
+            )
+        lines.append(line)
+    return " | ".join(lines)
+
+
+def _format_risk_from_context(case_data: dict) -> str:
+    risk = case_data.get("risk_assessment", {})
+    lookup = _risk_rule_lookup(case_data)
+    triggered = risk.get("triggered_rules", []) if isinstance(risk, dict) else []
+    parts = []
+    for item in triggered:
+        key = item.get("rule_id") if isinstance(item, dict) else item
+        rule = lookup.get(key, {})
+        rule_id = rule.get("rule_id") or key
+        desc = rule.get("description")
+        if not desc and isinstance(item, dict):
+            desc = item.get("rule_name")
+        if not desc:
+            desc = key
+        condition = rule.get("condition")
+        parts.append(
+            f"{rule_id}: {desc}" + (f" ({condition})" if condition else "")
+        )
+    return (
+        f"Risk Score: {risk.get('risk_score')} | Risk Tier: {risk.get('risk_tier')} | "
+        f"Triggered Rules: {'; '.join(parts) if parts else 'None'} | "
+        "Computed by BSI configured rules evaluation."
+    )
+
+
+def _format_recommended_actions(case_data: dict, playbook_data: dict) -> str:
+    risk = case_data.get("risk_assessment", {})
+    recommendation = risk.get("recommendation") if isinstance(risk, dict) else None
+    steps = playbook_data.get("investigation_steps", []) if isinstance(playbook_data, dict) else []
+    escalation_required = playbook_data.get("escalation_required") if isinstance(playbook_data, dict) else False
+    action_bits = []
+    if recommendation:
+        action_bits.append(recommendation)
+    if escalation_required:
+        action_bits.append("Escalation is required by the investigation playbook.")
+    if steps:
+        action_bits.append("Next playbook actions: " + "; ".join(step.get("action", "") for step in steps[:3] if step.get("action")))
+    return " ".join(action_bits) or "No recommended actions recorded in the verified investigation context."
+
+
+def _enrich_final_report_from_context(
+    sections: dict,
+    case_data: dict,
+    playbook_data: dict,
+    analyst_decision: Optional[dict],
+) -> dict:
+    final_report = sections.get("final_report")
+    if not isinstance(final_report, dict):
+        return sections
+
+    report_sections = final_report.setdefault("sections", {})
+    subject_text = _format_subjects_from_context(case_data)
+    if subject_text:
+        report_sections["subject_history"] = subject_text
+    if case_data.get("risk_assessment"):
+        report_sections["risk_assessment"] = _format_risk_from_context(case_data)
+    report_sections["investigation_playbook_summary"] = {
+        "playbook_id": playbook_data.get("playbook_id"),
+        "risk_tier": playbook_data.get("risk_tier"),
+        "step_count": len(playbook_data.get("investigation_steps", [])),
+        "escalation_required": playbook_data.get("escalation_required", False),
+        "mandatory_evidence_count": len([
+            item for item in playbook_data.get("evidence_checklist", [])
+            if item.get("mandatory")
+        ]),
+    }
+    report_sections["analyst_decision"] = analyst_decision or {}
+    report_sections["recommended_actions"] = _format_recommended_actions(case_data, playbook_data)
+    return {"final_report": final_report}
+
+
+def _get_runner():
+    from agent_service.agent_runner import BSIAgentRunner
+    return BSIAgentRunner(MANIFEST_PATH)
+
+
+# -----------------------------------------------------------------------
+# Request / response models
+# -----------------------------------------------------------------------
+
+class InvestigateRequest(BaseModel):
+    case_id: str
+
+
+class PlaybookRequest(BaseModel):
+    case_id: Optional[str] = None
+    ai_investigation_data: Optional[Dict[str, Any]] = None
+
+
+class ReportRequest(BaseModel):
+    case_id: str
+    ai_case_summary: Optional[str] = None
+    ai_investigation_data: Optional[Dict[str, Any]] = None
+    ai_playbook: Optional[Dict[str, Any]] = None
+    analyst_decision: Optional[Dict[str, Any]] = None
+
+
+class CopilotRequest(BaseModel):
+    case_id: str
+    question: str
+    ai_investigation_data: Optional[Dict[str, Any]] = None
+    conversation_history: Optional[List[Dict[str, Any]]] = None
+
+
+# -----------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------
+
+@app.get("/health")
 def health():
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/investigate")
+def investigate(req: InvestigateRequest):
+    """
+    AUTO flow — runs tools 1-5 in dependency order.
+    Populates CS-4 CASE_STORE for all subsequent on-demand calls.
+    """
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    if not os.path.exists(MANIFEST_PATH):
+        raise HTTPException(status_code=500, detail="manifest.yaml not found")
+
+    start  = time.time()
+    runner = _get_runner()
+    messages, provenance_trail = runner.investigate(req.case_id)
+    duration = round(time.time() - start, 1)
+
+    sections      = _extract_tool_results(messages)
+    agent_summary = _extract_agent_summary(messages)
+
+    # CS-4: Populate store with all sections + provenance (TTL = 15 min)
+    CASE_STORE[req.case_id] = {
+        **sections,
+        "provenance_trail": provenance_trail,
+    }
+
     return {
-        "status":    "ok",
-        "service":   "BSI Fraud Investigation Webhook",
-        "version":   "1.0-POC",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "case_id":          req.case_id,
+        "status":           "completed",
+        # agent_summary is the LLM-generated narrative covering all 4 agents.
+        # This is the ONLY content shown to the investigator on screen.
+        "agent_summary":    agent_summary,
+        # investigation contains structured JSON sections — one per tool.
+        # NOT displayed directly; saved as ai_investigation_data and sent
+        # in request bodies to /playbook, /report, /copilot.
+        "investigation":    sections,
+        "provenance_trail": provenance_trail,
+        "meta": {
+            "tool_calls_made":  len(provenance_trail),
+            "duration_seconds": duration,
+            "cs4_ttl_seconds":  CASE_STORE_TTL_SECONDS,
+        },
     }
 
 
-@app.post(
-    "/investigate",
-    summary     = "Trigger AI investigation for a complaint case",
-    description = (
-        "Receives a case_id (from AppWorks complaint form submission) and runs "
-        "the full BSI AI Agentic Investigation workflow.\n\n"
-        "The LLM autonomously decides which tools to call and in what order. "
-        "No tool, agent, or tab is explicitly triggered from this endpoint.\n\n"
-        "The response contains named sections that map directly to UI tabs:\n"
-        "- `complaint_intelligence` → Complaint Details tab\n"
-        "- `context_enrichment`     → Linked Entities / Prior Cases tab\n"
-        "- `similar_cases`          → Similar Cases tab\n"
-        "- `risk_assessment`        → Risk Panel tab\n"
-        "- `investigation_playbook` → Suggested Strategy tab\n"
-        "- `final_report`           → Investigation Report tab\n\n"
-        "**Test with Postman:** `POST /investigate` body: `{ \"case_id\": \"BSI-2024-00421\" }`"
-    ),
-    tags        = ["Investigation"]
-)
-def investigate(request: InvestigateRequest):
+@app.post("/playbook")
+def playbook(req: PlaybookRequest):
     """
-    ┌─────────────────────────────────────────────────────────────────┐
-    │  AppWorks  ──POST {case_id}──►  webhook.py                      │
-    │                                    │                            │
-    │                               BSIAgentRunner                    │
-    │                                    │                            │
-    │                          LLM decides tool order                 │
-    │                                    │                            │
-    │                          SemanticDispatcher (gate)              │
-    │                                    │                            │
-    │                          appworks_services.py                   │
-    │                                    │                            │
-    │                          Structured JSON response               │
-    │                          with named sections per UI tab         │
-    └─────────────────────────────────────────────────────────────────┘
+    ON-DEMAND — calls get_investigation_playbook only.
+    Requires risk_tier from a prior /investigate run (via CS-4 or request body).
     """
+    from agent_service.agent_runner import build_playbook_prompt
 
-    # ── Validate environment ─────────────────────────────────────────
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code = 500,
-            detail      = "OPENAI_API_KEY is not set. Add it to your .env file."
-        )
+    case_id, case_data = _get_or_populate_case_store(req.case_id, req.ai_investigation_data)
+    runner    = _get_runner()
 
-    try:
-        manifest_path = _resolve_manifest_path()
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    messages, _ = runner.run_scoped(
+        system_prompt=build_playbook_prompt(case_data),
+        user_message=(
+            f"Retrieve the investigation playbook for case {case_id}. "
+            f"Extract fraud_types and risk_tier from the context provided in the system prompt "
+            f"and call get_investigation_playbook."
+        ),
+        allowed_tool_names=["get_investigation_playbook"],
+    )
 
-    # ── Run the agentic investigation loop ───────────────────────────
-    # BSIAgentRunner.investigate() returns the full message history.
-    # The LLM decides tool order — we never specify it here.
-    started_at = datetime.now(timezone.utc)
+    sections = _extract_tool_results(messages)
 
-    try:
-        runner   = BSIAgentRunner(manifest_path=manifest_path, api_key=api_key)
-        messages = runner.investigate(request.case_id)
-    except Exception as e:
-        raise HTTPException(
-            status_code = 500,
-            detail      = {
-                "error":   "Agent investigation failed",
-                "message": str(e),
-                "trace":   traceback.format_exc()
-            }
-        )
+    if case_id not in CASE_STORE:
+        CASE_STORE[case_id] = case_data
+    CASE_STORE[case_id].update(sections)
 
-    completed_at = datetime.now(timezone.utc)
-
-    # ── Parse message history into structured sections ───────────────
-    # Each section maps to a UI tab. The LLM decided what to call —
-    # we are only harvesting what was actually returned.
-    sections      = _extract_tool_results(messages)
-    agent_summary = _extract_agent_summary(messages)
-    tool_call_count = _count_tool_calls(messages)
-
-    # ── Return structured response ───────────────────────────────────
     return {
-        "case_id": request.case_id,
-        "status":  "completed",
-
-        # LLM's final plain-English summary of all findings
-        "agent_summary": agent_summary,
-
-        # Named sections — one per UI tab.
-        # The frontend reads the section it needs.
-        # No tab calls a specific agent endpoint.
+        "case_id":     case_id,
+        "status":      "completed",
         "investigation": sections,
+    }
 
-        # Metadata for observability and debugging
-        "meta": {
-            "manifest_path":       manifest_path,
-            "total_messages":      len(messages),
-            "tool_calls_made":     tool_call_count,
-            "sections_populated":  list(sections.keys()),
-            "started_at":          started_at.isoformat(),
-            "completed_at":        completed_at.isoformat(),
-            "duration_seconds":    round(
-                (completed_at - started_at).total_seconds(), 2
+
+@app.post("/report")
+def report(req: ReportRequest):
+    """
+    ON-DEMAND — calls generate_final_report only.
+    Requires: risk_assessment in case data, playbook, and analyst approval.
+    """
+    from agent_service.agent_runner import build_report_prompt
+
+    case_id, case_data = _get_or_populate_case_store(req.case_id, req.ai_investigation_data)
+
+    if "risk_assessment" not in case_data:
+        raise HTTPException(
+            status_code=400,
+            detail="risk_assessment section missing — run /investigate first.",
+        )
+
+    playbook_data = req.ai_playbook or case_data.get("investigation_playbook")
+    # Normalize: if ai_playbook is the full /playbook response, extract the playbook
+    if playbook_data and isinstance(playbook_data, dict) and "investigation" in playbook_data:
+        playbook_data = playbook_data["investigation"].get("investigation_playbook")
+
+    if not playbook_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Playbook required — run /playbook first.",
+        )
+
+    if not req.analyst_decision or req.analyst_decision.get("decision") != "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Report requires analyst approval. "
+                "analyst_decision.decision must be 'APPROVED'."
             ),
-        }
+        )
+
+    runner = _get_runner()
+
+    messages, _ = runner.run_scoped(
+        system_prompt=build_report_prompt(
+            case_data       = case_data,
+            ai_case_summary = req.ai_case_summary or "",
+            playbook_data   = playbook_data,
+            analyst_decision = req.analyst_decision,
+        ),
+        user_message=(
+            f"Generate the investigation summary report for case {case_id}. "
+            f"Call generate_final_report first, then synthesise all findings "
+            f"into the director-ready narrative as instructed."
+        ),
+        allowed_tool_names=["generate_final_report"],
+    )
+
+    sections = _extract_tool_results(messages)
+    sections = _enrich_final_report_from_context(
+        sections=sections,
+        case_data=case_data,
+        playbook_data=playbook_data,
+        analyst_decision=req.analyst_decision,
+    )
+
+    if case_id not in CASE_STORE:
+        CASE_STORE[case_id] = case_data
+    CASE_STORE[case_id].update(sections)
+
+    return {
+        "case_id":     case_id,
+        "status":      "completed",
+        "investigation": sections,
+    }
+
+
+@app.post("/copilot")
+def copilot(req: CopilotRequest):
+    """
+    ON-DEMAND — answers investigator questions grounded in case context.
+    Answers from CS-4 context first; falls back to tools only if needed.
+    """
+    from agent_service.agent_runner import build_copilot_prompt
+
+    case_id, case_data = _get_or_populate_case_store(req.case_id, req.ai_investigation_data)
+    runner    = _get_runner()
+
+    messages, provenance_trail = runner.run_scoped(
+        system_prompt=build_copilot_prompt(case_id, case_data),
+        user_message=req.question,
+        conversation_history=req.conversation_history or [],
+    )
+
+    answer = _extract_agent_summary(messages)
+
+    sources_cited = [
+        f"{p['tool']} — {p.get('computed_by', '')} — "
+        f"retrieved {p.get('retrieved_at', '')}"
+        for p in provenance_trail
+    ]
+
+    # CS-4: Update store if a tool was called
+    if provenance_trail:
+        new_sections = _extract_tool_results(messages)
+        if req.case_id not in CASE_STORE:
+            CASE_STORE[req.case_id] = case_data
+        CASE_STORE[req.case_id].update(new_sections)
+
+    return {
+        "answer":          answer,
+        "sources_cited":   sources_cited,
+        "tool_calls_made": len(provenance_trail),
     }
