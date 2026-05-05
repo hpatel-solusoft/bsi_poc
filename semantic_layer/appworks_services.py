@@ -1,446 +1,74 @@
-# semantic_layer/appworks_services.py
-# ----------------------------------------------------------------
-# BSI Fraud Investigation Platform — AppWorks Service Layer
-#
-# MOCK — Simulates AppWorks Web Service HTTP calls.
-# Each function prints what the real call would do and
-# returns hardcoded realistic data.
-#
-# TO PRODUCTIONISE:
-#   Replace the mock body of each function with a real
-#   requests.get / requests.post to the AppWorks REST endpoint
-#   shown in each docstring. The _validate() call at the end
-#   of every function stays exactly as-is.
-#
-# ANTI-CORRUPTION LAYER:
-#   Every function validates its return data against the
-#   canonical entity model (semantic_model.py) before returning.
-#   This is the boundary between AppWorks (external system) and
-#   your domain. Raw AppWorks data never crosses this boundary
-#   unvalidated.
-#
-# HOW VALIDATION WORKS:
-#   1. Raw dict assembled (mock or real AppWorks response)
-#   2. _validate() instantiates the Pydantic model
-#      → ValidationError raised HERE if data does not match
-#   3. model_dump() returns a clean plain dict
-#      → rest of the system works with dicts, not Pydantic objects
-#
-# IF APPWORKS CHANGES A FIELD:
-#   ValidationError surfaces here — at the boundary — not
-#   silently downstream in the LLM context or CS-4 store.
-#   The dispatcher catches it and returns a structured error
-#   to the agent runner. The LLM includes it in its summary.
-#   The system does not crash.
-# ----------------------------------------------------------------
+"""
+AppWorks Service Router.
+Dispatches calls to the underlying feature-specific service modules.
+Every function MUST return {"result": {...}, "provenance": {...}}.
+"""
+import semantic_layer.services.f1_intake_services as f1
+import semantic_layer.services.f2_enrichment_services as f2
+import semantic_layer.services.f3_case_retrieval_services as f3
+import semantic_layer.services.f4_risk_services as f4
+import semantic_layer.services.f5_strategy_services as f5
+import semantic_layer.services.f6_report_services as f6
 
-import time
-from pydantic import ValidationError
-
-from semantic_model import (
-    CaseHeader,
-    SubjectProfile,
-    SimilarCasesResult,
-    RiskAssessment,
-    InvestigationPlaybook,
-    FinalReport,
-    ReportSections,
-)
-
-
-# ── Anti-Corruption Layer enforcement point ───────────────────────
-
-def _validate(model_class, raw_data: dict, fn_name: str) -> dict:
-    """
-    Validates raw_data against the canonical Pydantic model.
-    Returns a clean validated dict on success.
-    Raises ValidationError on failure with context identifying
-    which function failed and which fields were invalid.
-
-    Called at the end of every service function — this is the
-    single point where AppWorks data is translated into the
-    system's canonical domain language.
-
-    Parameters:
-      model_class  — the Pydantic entity class to validate against
-                     e.g. CaseHeader, RiskAssessment
-      raw_data     — the raw dict from AppWorks (or mock)
-      fn_name      — calling function name for error context
-    """
-    try:
-        validated = model_class(**raw_data)
-        return validated.model_dump()
-    except ValidationError as e:
-        raise ValidationError(
-            f"[{fn_name}] AppWorks response failed canonical validation.\n"
-            f"This means AppWorks returned unexpected data — a field may have "
-            f"been renamed, removed, or changed type.\n"
-            f"Update semantic_model.py if the AppWorks API has changed.\n\n"
-            f"{e}"
-        )
-
-
-def _mock_http(method: str, endpoint: str, payload: dict = None):
-    """Simulates network latency and prints the would-be HTTP call."""
-    print(f"      [AppWorks HTTP] {method} {endpoint}")
-    if payload:
-        print(f"      [AppWorks HTTP] Payload: {payload}")
-    time.sleep(0.3)
-
-
-# ----------------------------------------------------------------
-# TOOL 1 — verify_case_intake
-# Agent:    Complaint Intelligence Agent
-# Entity:   CaseHeader
-# ----------------------------------------------------------------
 
 def get_case_header(case_id: str) -> dict:
-    """
-    PRODUCTION CALL:
-      GET /appworks/rest/v1/cases/{case_id}/header
-      Headers: Authorization: Bearer {session_token}
+    """Dispatched from 'verify_case_intake'"""
+    return f1.build_case_header_data(case_id)
 
-    RETURNS: Validated CaseHeader dict
-    """
-    print(f"\n      → Calling AppWorks: fetch case header for [{case_id}]")
-    _mock_http("GET", f"/appworks/rest/v1/cases/{case_id}/header")
-
-    raw_responses = {
-        "BSI-2024-00421": {
-            "case_id":                "BSI-2024-00421",
-            "complainant_name":       "MassHealth Audit Division",
-            "subject_primary":        "Dr. Amir Hosseini",
-            "subject_primary_id":     "SUBJ-7821",
-            "subject_secondary":      "Sunrise Home Health LLC",
-            "complaint_description":  (
-                "Subject billed for home health aide services on 47 dates "
-                "where the patient was confirmed hospitalized. Claims totaling "
-                "$84,200 submitted over 6 months with no supporting documentation."
-            ),
-            "fraud_type_classified":  "BILLING",
-            "intake_date":            "2024-03-15",
-            "status":                 "OPEN"
-        }
-    }
-
-    raw = raw_responses.get(case_id)
-    if not raw:
-        raise ValueError(f"Case {case_id} not found in AppWorks")
-
-    # ── Anti-Corruption Layer ─────────────────────────────────────
-    validated = _validate(CaseHeader, raw, "get_case_header")
-
-    print(f"      ← AppWorks returned: case [{case_id}], "
-          f"fraud type [{validated['fraud_type_classified']}] ✓ validated")
-    return validated
-
-
-# ----------------------------------------------------------------
-# TOOL 2 — fetch_subject_history
-# Agent:    Context Enrichment Agent
-# Entity:   SubjectProfile
-# ----------------------------------------------------------------
 
 def get_enriched_subject_profile(subject_id: str) -> dict:
-    """
-    PRODUCTION CALLS:
-      GET /appworks/rest/v1/subjects/{subject_id}
-      GET /appworks/rest/v1/subjects/{subject_id}/cases?years=5
-      GET /appworks/rest/v1/subjects/{subject_id}/addresses
-      GET /appworks/rest/v1/subjects/{subject_id}/associates
-
-    RETURNS: Validated SubjectProfile dict
-    """
-    print(f"\n      → Calling AppWorks: fetch enriched profile for [{subject_id}]")
-    _mock_http("GET", f"/appworks/rest/v1/subjects/{subject_id}")
-    _mock_http("GET", f"/appworks/rest/v1/subjects/{subject_id}/cases?years=5")
-    _mock_http("GET", f"/appworks/rest/v1/subjects/{subject_id}/addresses")
-    _mock_http("GET", f"/appworks/rest/v1/subjects/{subject_id}/associates")
-
-    raw_responses = {
-        "SUBJ-7821": {
-            "subject_id":       "SUBJ-7821",
-            "full_name":        "Dr. Amir Hosseini",
-            "dob":              "1968-04-22",
-            "address_history": [
-                {"address": "14 Beacon St, Boston MA",
-                 "from": "2021-01", "to": "present"},
-                {"address": "88 Elm Ave, Quincy MA",
-                 "from": "2018-06", "to": "2020-12"}
-            ],
-            "prior_cases": [
-                {"case_id": "BSI-2021-00188", "year": 2021,
-                 "fraud_type": "BILLING", "outcome": "SUBSTANTIATED"},
-                {"case_id": "BSI-2019-00044", "year": 2019,
-                 "fraud_type": "BILLING", "outcome": "UNSUBSTANTIATED"}
-            ],
-            "known_associates": [
-                {"name": "Sunrise Home Health LLC",
-                 "relationship": "Employer",      "subject_id": "SUBJ-9034"},
-                {"name": "Maria Hosseini",
-                 "relationship": "Co-signatory",  "subject_id": "SUBJ-9201"}
-            ],
-            "prior_case_count": 2
-        }
-    }
-
-    raw = raw_responses.get(subject_id)
-    if not raw:
-        raise ValueError(f"Subject {subject_id} not found in AppWorks")
-
-    # ── Anti-Corruption Layer ─────────────────────────────────────
-    # Note: AddressEntry uses field aliases (from/to → from_date/to_date)
-    # Pydantic handles this via populate_by_name=True in AddressEntry.
-    validated = _validate(SubjectProfile, raw, "get_enriched_subject_profile")
-
-    print(f"      ← AppWorks returned: [{validated['prior_case_count']} prior cases], "
-          f"[{len(validated['known_associates'])} associates] ✓ validated")
-    return validated
+    """Dispatched from 'fetch_subject_history'"""
+    return f2.get_enriched_subject_profile(subject_id)
 
 
-# ----------------------------------------------------------------
-# TOOL 3 — search_similar_cases
-# Agent:    Similar Case Retrieval Agent
-# Entity:   SimilarCasesResult
-# ----------------------------------------------------------------
-
-def vector_search_cases(complaint_text: str, top_n: int = 3) -> dict:
-    """
-    PRODUCTION CALL:
-      POST /vector-service/search
-      Body: { "text": complaint_text, "top_n": top_n,
-              "collection": "bsi_cases" }
-
-    RETURNS: Validated SimilarCasesResult dict
-    """
-    print(f"\n      → Calling Vector DB: semantic search on complaint narrative")
-    print(f"      [Vector DB] POST /vector-service/search  top_n={top_n}")
-    print(f"      [Vector DB] Embedding: \"{complaint_text[:60]}...\"")
-    time.sleep(0.4)
-
-    raw = {
-        "query_summary": "Home health billing fraud – hospitalized patient overlap",
-        "matches": [
-            {
-                "case_id":          "BSI-2022-00317",
-                "similarity_score": 0.94,
-                "fraud_type":       "BILLING",
-                "outcome":          "SUBSTANTIATED",
-                "summary":          "Provider billed 38 days of home services "
-                                    "while patient was in ICU. $61,400 recovered."
-            },
-            {
-                "case_id":          "BSI-2021-00188",
-                "similarity_score": 0.89,
-                "fraud_type":       "BILLING",
-                "outcome":          "SUBSTANTIATED",
-                "summary":          "Same subject. Duplicate billing across two "
-                                    "provider entities. $29,000 overpayment."
-            },
-            {
-                "case_id":          "BSI-2020-00502",
-                "similarity_score": 0.81,
-                "fraud_type":       "BILLING",
-                "outcome":          "REFERRED_TO_AG",
-                "summary":          "Home health agency billed for deceased "
-                                    "patient for 3 months post-death."
-            }
-        ][:top_n],
-        "top_n_returned": min(top_n, 3)
-    }
-
-    # ── Anti-Corruption Layer ─────────────────────────────────────
-    validated = _validate(SimilarCasesResult, raw, "vector_search_cases")
-
-    print(f"      ← Vector DB returned: [{validated['top_n_returned']} matches], "
-          f"top score [{validated['matches'][0]['similarity_score']}] ✓ validated")
-    return validated
+def search_similar_cases(
+    fraud_types: list,
+    case_id: str = None,
+    complaint_description: str = None,
+) -> dict:
+    """Dispatched from 'search_similar_cases'"""
+    return f3.search_similar_cases(
+        fraud_types=fraud_types,
+        case_id=case_id,
+        complaint_description=complaint_description,
+    )
 
 
-# ----------------------------------------------------------------
-# TOOL 4 — calculate_risk_metrics
-# Agent:    Fraud Risk Assessment Agent
-# Entity:   RiskAssessment
-# ----------------------------------------------------------------
-
-def get_risk_measures(case_id: str, subject_id: str) -> dict:
-    """
-    PRODUCTION CALLS:
-      GET /appworks/rest/v1/cases/{case_id}/billing-summary
-      GET /appworks/rest/v1/subjects/{subject_id}/risk-profile
-      POST /rules-engine/evaluate  Body: { case_id, subject_id }
-
-    RETURNS: Validated RiskAssessment dict
-    """
-    print(f"\n      → Calling AppWorks: fetch billing summary + risk profile")
-    _mock_http("GET", f"/appworks/rest/v1/cases/{case_id}/billing-summary")
-    _mock_http("GET", f"/appworks/rest/v1/subjects/{subject_id}/risk-profile")
-    print(f"      [Rules Engine] POST /rules-engine/evaluate")
-    time.sleep(0.3)
-
-    raw = {
-        "case_id":    case_id,
-        "subject_id": subject_id,
-        "risk_score": 0.87,
-        "risk_tier":  "HIGH",
-        "triggered_rules": [
-            {"rule_id": "R-101",
-             "rule_name": "Billing During Active Hospitalization",
-             "weight": 0.40},
-            {"rule_id": "R-205",
-             "rule_name": "Prior Substantiated Case Within 3 Years",
-             "weight": 0.25},
-            {"rule_id": "R-312",
-             "rule_name": "Claim Volume Spike (>40 claims / 6 mo)",
-             "weight": 0.22}
-        ],
-        "billing_anomaly_flag": True,
-        "prior_case_count":     2,
-        "recommendation":       (
-            "Escalate to Senior Investigator. "
-            "Request full billing records subpoena."
-        )
-    }
-
-    # ── Anti-Corruption Layer ─────────────────────────────────────
-    validated = _validate(RiskAssessment, raw, "get_risk_measures")
-
-    print(f"      ← Rules Engine returned: score [{validated['risk_score']}], "
-          f"tier [{validated['risk_tier']}], "
-          f"[{len(validated['triggered_rules'])} rules triggered] ✓ validated")
-    return validated
+def get_risk_rules() -> dict:
+    """Dispatched from 'get_risk_rules'"""
+    return f4.get_risk_rules()
 
 
-# ----------------------------------------------------------------
-# TOOL 5 — get_investigation_playbook
-# Agent:    Case Strategy Agent
-# Entity:   InvestigationPlaybook
-# ----------------------------------------------------------------
-
-def get_playbook_by_type(fraud_type: str, risk_level: str) -> dict:
-    """
-    PRODUCTION CALL:
-      GET /appworks/rest/v1/playbooks
-          ?fraud_type={fraud_type}&risk_level={risk_level}
-
-    RETURNS: Validated InvestigationPlaybook dict
-    """
-    print(f"\n      → Calling AppWorks: fetch playbook "
-          f"[{fraud_type}] / [{risk_level}]")
-    _mock_http("GET",
-               f"/appworks/rest/v1/playbooks"
-               f"?fraud_type={fraud_type}&risk_level={risk_level}")
-
-    playbooks = {
-        ("BILLING", "HIGH"): {
-            "playbook_id": "PB-BILLING-HIGH-v3",
-            "fraud_type":  "BILLING",
-            "risk_level":  "HIGH",
-            "investigation_steps": [
-                {"step": 1,
-                 "action":        "Pull complete billing history from MassHealth",
-                 "owner":         "Analyst",
-                 "deadline_days": 3},
-                {"step": 2,
-                 "action":        "Cross-reference claim dates with hospital records",
-                 "owner":         "Analyst",
-                 "deadline_days": 5},
-                {"step": 3,
-                 "action":        "Issue subpoena for provider service logs",
-                 "owner":         "Investigator",
-                 "deadline_days": 10},
-                {"step": 4,
-                 "action":        "Interview patient and / or family members",
-                 "owner":         "Investigator",
-                 "deadline_days": 14},
-                {"step": 5,
-                 "action":        "Prepare referral package for Attorney General",
-                 "owner":         "Director",
-                 "deadline_days": 21}
-            ],
-            "evidence_checklist": [
-                {"item": "MassHealth claims printout",           "mandatory": True},
-                {"item": "Hospital admission/discharge records",  "mandatory": True},
-                {"item": "Provider service documentation",        "mandatory": True},
-                {"item": "Patient statement",                     "mandatory": False},
-                {"item": "Prior case file BSI-2021-00188",        "mandatory": False}
-            ],
-            "escalation_required": True
-        }
-    }
-
-    key = (fraud_type.upper(), risk_level.upper())
-    raw = playbooks.get(key, {
-        "playbook_id":         "PB-DEFAULT",
-        "fraud_type":          fraud_type,
-        "risk_level":          risk_level,
-        "investigation_steps": [
-            {"step": 1, "action": "Manual review required",
-             "owner": "Analyst", "deadline_days": 5}
-        ],
-        "evidence_checklist":  [],
-        "escalation_required": False
-    })
-
-    # ── Anti-Corruption Layer ─────────────────────────────────────
-    validated = _validate(InvestigationPlaybook, raw, "get_playbook_by_type")
-
-    print(f"      ← AppWorks returned: playbook [{validated['playbook_id']}], "
-          f"[{len(validated['investigation_steps'])} steps], "
-          f"escalation=[{validated['escalation_required']}] ✓ validated")
-    return validated
+def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: list) -> dict:
+    """Dispatched from 'calculate_risk_metrics'"""
+    return f4.calculate_risk_metrics(case_id, subject_id, fraud_types)
 
 
-# ----------------------------------------------------------------
-# TOOL 6 — generate_final_report
-# Agent:    Report Generation Agent
-# Entity:   FinalReport
-# ----------------------------------------------------------------
+def get_investigation_playbook(
+    fraud_types: list,
+    risk_tier: str,
+) -> dict:
+    """Dispatched from 'get_investigation_playbook'"""
+    return f5.get_investigation_playbook(
+        fraud_types=fraud_types,
+        risk_tier=risk_tier,
+    )
 
-def compile_and_render_report(case_id: str) -> dict:
-    """
-    PRODUCTION CALLS:
-      GET /appworks/rest/v1/cases/{case_id}/full-summary
-      POST /appworks/rest/v1/reports/render
-      Body: { case_id, template: "BSI_INVESTIGATION_REPORT_v2" }
 
-    RETURNS: Validated FinalReport dict
-    """
-    print(f"\n      → Calling AppWorks: compile and render report for [{case_id}]")
-    _mock_http("GET",  f"/appworks/rest/v1/cases/{case_id}/full-summary")
-    _mock_http("POST", "/appworks/rest/v1/reports/render",
-               {"case_id": case_id, "template": "BSI_INVESTIGATION_REPORT_v2"})
-
-    raw = {
-        "report_id":    f"RPT-{case_id}",
-        "case_id":      case_id,
-        "generated_at": "2024-03-15T14:32:00Z",
-        "sections": {
-            "case_summary":
-                "Billing fraud complaint against Dr. Amir Hosseini / "
-                "Sunrise Home Health LLC. Claims of $84,200 submitted for "
-                "dates patient was confirmed hospitalized.",
-            "subject_history":
-                "Subject has 2 prior BSI cases. BSI-2021-00188 substantiated "
-                "for billing fraud.",
-            "similar_cases":
-                "3 similar historical cases found. All substantiated. Pattern "
-                "consistent with hospitalization-overlap billing scheme.",
-            "risk_assessment":
-                "Risk Score: 0.87 (HIGH). Three rules triggered: "
-                "R-101, R-205, R-312.",
-            "recommended_actions":
-                "Escalate to Senior Investigator. Subpoena billing records. "
-                "Cross-reference MassHealth claims with hospital records.",
-            "analyst_notes":
-                "[Pending human-in-the-loop review and approval]"
-        },
-        "status": "DRAFT – PENDING ANALYST APPROVAL"
-    }
-
-    # ── Anti-Corruption Layer ─────────────────────────────────────
-    validated = _validate(FinalReport, raw, "compile_and_render_report")
-
-    print(f"      ← AppWorks returned: report [{validated['report_id']}], "
-          f"status [{validated['status']}] ✓ validated")
-    return validated
+def compile_and_render_report(
+    case_id: str,
+    subject_id: str,
+    fraud_types: list,
+    risk_score: float,
+    risk_tier: str,
+    triggered_rules: list,
+) -> dict:
+    """Dispatched from 'generate_final_report'"""
+    return f6.compile_and_render_report(
+        case_id=case_id,
+        subject_id=subject_id,
+        fraud_types=fraud_types,
+        risk_score=risk_score,
+        risk_tier=risk_tier,
+        triggered_rules=triggered_rules,
+    )

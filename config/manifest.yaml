@@ -1,0 +1,132 @@
+# ================================================================
+# BSI Fraud Investigation – Semantic Layer Manifest
+#
+# Design principle:
+# Tool descriptions define DATA CONTRACTS — what each tool
+# needs as input and what it produces as output.
+# The LLM infers call sequence from these dependencies.
+# No ordering instructions anywhere in this file.
+# ================================================================
+
+tools:
+  - name: "verify_case_intake"
+    section: "complaint_intelligence"
+    description: >
+      Reads and validates the submitted complaint form. Extracts key entities from the
+      complaint narrative. Returns structured case data including fraud_types (list),
+      subject_id, allegations, subjects, and case metadata. Requires: case_id.
+    python_function: "appworks_services.get_case_header"
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier from the AppWorks complaint form"
+
+  - name: "fetch_subject_history"
+    section: "context_enrichment"
+    description: >
+      Fetches the full history of the subject under investigation. Returns all prior cases,
+      prior_case_count, and subject profile. Requires: subject_id from verify_case_intake output.
+    python_function: "appworks_services.get_enriched_subject_profile"
+    required_params:
+      - name: "subject_id"
+        type: "string"
+        description: "Subject identifier from verify_case_intake output"
+
+  - name: "search_similar_cases"
+    section: "similar_cases"
+    description: >
+      Searches the AppWorks Allegations_All archive for records matching the provided fraud types.
+      Returns top archive matches with summaries grouped by fraud type.
+      Only fraud_types is required. Optionally pass case_id (from verify_case_intake) to exclude
+      the current case from results. Optionally pass complaint_description for keyword filtering.
+    python_function: "appworks_services.search_similar_cases"
+    required_params:
+      - name: "fraud_types"
+        type: "list[string]"
+        description: "List of fraud types from verify_case_intake — drives the similarity search"
+    optional_params:
+      - name: "case_id"
+        type: "string"
+        description: "Current case identifier — pass from verify_case_intake context to exclude it from results"
+      - name: "complaint_description"
+        type: "string"
+        description: "Optional complaint description text for additional keyword filtering of matches"
+    config:
+      similarity_lookback_years: 3
+      max_results_per_type: 3
+      required_status: "Closed"
+
+  - name: "get_risk_rules"
+    section: "risk_rules"
+    description: >
+      Fetches the active BSI fraud detection rules from the AppWorks configurable rules
+      table at runtime. Returns all active rule dimensions with rule_id, condition, weight,
+      and active flag. No parameters required.
+      This demonstrates that rules are fetched from AppWorks at runtime — BSI can modify
+      rules without a code change.
+    python_function: "appworks_services.get_risk_rules"
+    required_params: []
+
+  - name: "calculate_risk_metrics"
+    section: "risk_assessment"
+    description: >
+      Evaluates active BSI fraud detection rules across 5 dimensions against live case
+      and subject data. Returns risk_score (0-1), risk_tier (LOW/MEDIUM/HIGH/CRITICAL),
+      and triggered_rules with per-dimension scores.
+      Requires: case_id, subject_id, fraud_types. The score is computed deterministically
+      by the BSI rules engine — report it as-is.
+    python_function: "appworks_services.calculate_risk_metrics"
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+      - name: "subject_id"
+        type: "string"
+        description: "Subject identifier from verify_case_intake output"
+      - name: "fraud_types"
+        type: "list[string]"
+        description: "List of fraud types from verify_case_intake — determines which rule dimensions are evaluated"
+
+  - name: "get_investigation_playbook"
+    section: "investigation_playbook"
+    description: >
+      Retrieves the investigation playbook from AppWorks for the given fraud types and
+      risk tier. Returns ordered investigation steps and evidence checklist.
+      Requires: fraud_types list and risk_tier from calculate_risk_metrics output.
+    python_function: "appworks_services.get_investigation_playbook"
+    required_params:
+      - name: "fraud_types"
+        type: "list[string]"
+        description: "List of fraud types from verify_case_intake — playbook covers all types"
+      - name: "risk_tier"
+        type: "string"
+        description: "Risk tier from calculate_risk_metrics output: LOW/MEDIUM/HIGH/CRITICAL"
+
+  - name: "generate_final_report"
+    section: "final_report"
+    description: >
+      Compiles and renders the full investigation report from live AppWorks data,
+      enriched with validated risk context from prior tool calls.
+      Returns structured report sections for narrative synthesis.
+      Requires: case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules.
+      All these values come from prior tool call outputs — pass them explicitly.
+    python_function: "appworks_services.compile_and_render_report"
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier from verify_case_intake output"
+      - name: "subject_id"
+        type: "string"
+        description: "Primary subject identifier from verify_case_intake output"
+      - name: "fraud_types"
+        type: "list[string]"
+        description: "Final verified fraud types from verify_case_intake output"
+      - name: "risk_score"
+        type: "number"
+        description: "Numerical risk score (0.0 to 1.0) from calculate_risk_metrics output"
+      - name: "risk_tier"
+        type: "string"
+        description: "Risk tier (LOW/MEDIUM/HIGH/CRITICAL) from calculate_risk_metrics output"
+      - name: "triggered_rules"
+        type: "list[dict]"
+        description: "Full triggered rule objects from calculate_risk_metrics output"

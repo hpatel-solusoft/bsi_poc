@@ -42,9 +42,9 @@
 #   service function that uses them.
 # ----------------------------------------------------------------
 
-from pydantic import BaseModel, Field
-from typing   import Optional
-
+from pydantic import BaseModel, Field, field_validator
+from typing   import Optional, Any
+import re
 
 # ================================================================
 # SHARED / PRIMITIVE ENTITIES
@@ -68,9 +68,7 @@ class AddressEntry(BaseModel):
     address:   str
     from_date: str = Field(alias="from")
     to_date:   str = Field(alias="to")
-
     model_config = {"populate_by_name": True}
-
 
 class PriorCase(BaseModel):
     """A prior BSI case linked to a subject."""
@@ -79,20 +77,33 @@ class PriorCase(BaseModel):
     fraud_type: str
     outcome:    str
 
-
 class KnownAssociate(BaseModel):
     """A known associate of the primary subject."""
     name:         str
     relationship: str
     subject_id:   str
 
-
 class TriggeredRule(BaseModel):
     """A single BSI business rule triggered during risk assessment."""
     rule_id:   str
-    rule_name: str
-    weight:    float
+    rule_name: Optional[str] = Field(default=None, alias="description")
+    weight:    float = 0.0
 
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    @field_validator("rule_name", mode="before")
+    @classmethod
+    def ensure_rule_name(cls, v, info):
+        # If rule_name is missing, try to get it from the raw data description
+        return v or "Unspecified Rule"
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def parse_weight(cls, v):
+        if isinstance(v, str):
+            match = re.search(r"(\d+(\.\d+)?)", v)
+            return float(match.group(1)) if match else 0.0
+        return float(v) if v is not None else 0.0
 
 class InvestigationStep(BaseModel):
     """A single step in the investigation playbook."""
@@ -101,42 +112,31 @@ class InvestigationStep(BaseModel):
     owner:         str
     deadline_days: int
 
-
 class EvidenceItem(BaseModel):
     """A single item in the evidence checklist."""
     item:      str
     mandatory: bool
 
-
 class SimilarCaseMatch(BaseModel):
-    """A single similar case match from the vector search."""
-    case_id:          str
-    similarity_score: float
-    fraud_type:       str
-    outcome:          str
-    summary:          str
-
-
-# ================================================================
-# TOOL 1 — verify_case_intake
-# Agent:    Complaint Intelligence Agent
-# Produced: appworks_services.get_case_header()
-# Consumed: LLM context (CS-2), CS-4 complaint_intelligence tab
-#
-# Critical fields used downstream by other tools:
-#   subject_primary_id    → input to Tool 2 and Tool 4
-#   fraud_type_classified → input to Tool 5
-#   complaint_description → input to Tool 3
-# ================================================================
+    """A single similar case match from the archive search."""
+    case_id:              str   # Workfolder ID when available, otherwise allegation reference
+    allegation_id:        Optional[str] = None  # Raw allegation archive ID
+    similarity_score:     float
+    fraud_type:           str
+    outcome:              str
+    summary:              str
+    estimated_loss:       float = 0.0
+    financial_calculated: float = 0.0
 
 class CaseHeader(BaseModel):
     case_id:               str
     complainant_name:      str
     subject_primary:       str
     subject_primary_id:    str
-    subject_secondary:     Optional[str] = None   # not always present
+    subject_secondary:     Optional[str] = None
     complaint_description: str
-    fraud_type_classified: str
+    fraud_types:           list[str]
+    estimated_loss:        float = 0.0
     intake_date:           str
     status:                str
 
@@ -151,10 +151,10 @@ class CaseHeader(BaseModel):
 class SubjectProfile(BaseModel):
     subject_id:       str
     full_name:        str
-    dob:              str
+    dob:              Optional[str] = None
     address_history:  list[AddressEntry]
     prior_cases:      list[PriorCase]
-    known_associates: list[KnownAssociate]
+    known_associates: list[str]
     prior_case_count: int
 
 
@@ -185,8 +185,8 @@ class RiskAssessment(BaseModel):
     case_id:              str
     subject_id:           str
     risk_score:           float
-    risk_tier:            str          # LOW / MEDIUM / HIGH / CRITICAL
-    triggered_rules:      list[TriggeredRule]
+    risk_tier:            str
+    triggered_rules:      list  # Accepts both TriggeredRule dicts and plain dicts
     billing_anomaly_flag: bool
     prior_case_count:     int
     recommendation:       str
@@ -201,8 +201,8 @@ class RiskAssessment(BaseModel):
 
 class InvestigationPlaybook(BaseModel):
     playbook_id:         str
-    fraud_type:          str
-    risk_level:          str
+    fraud_types:         list[str]
+    risk_tier:           str
     investigation_steps: list[InvestigationStep]
     evidence_checklist:  list[EvidenceItem]
     escalation_required: bool
@@ -213,21 +213,35 @@ class InvestigationPlaybook(BaseModel):
 # Agent:    Report Generation Agent
 # Produced: appworks_services.compile_and_render_report()
 # Consumed: LLM context (CS-2), CS-4 final_report tab
+#
+# NOTE: FinalReport is intentionally relaxed — F6 does a live
+# AppWorks fetch and returns template data. Fields like
+# subject_id, fraud_types, risk_score etc. are NOT available
+# inside F6 (they come from other tools). The LLM weaves them
+# into the narrative from the scoped prompt context.
 # ================================================================
 
-class ReportSections(BaseModel):
-    """Named sections inside the final investigation report."""
-    case_summary:        str
-    subject_history:     str
-    similar_cases:       str
-    risk_assessment:     str
-    recommended_actions: str
-    analyst_notes:       str
-
-
 class FinalReport(BaseModel):
-    report_id:    str
-    case_id:      str
-    generated_at: str
-    sections:     ReportSections
-    status:       str
+    """The complete investigation report including both narrative and grounding data."""
+    report_id:       str
+    case_id:         str
+    generated_at:    str
+    sections:        dict  # Flexible dict — F6 builds plain-text sections
+    status:          str
+
+class RiskRuleDef(BaseModel):
+    rule_id: str
+    condition: str
+    weight: float
+    active: bool
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def parse_weight(cls, v):
+        if isinstance(v, str):
+            match = re.search(r"(\d+(\.\d+)?)", v)
+            return float(match.group(1)) if match else 0.0
+        return float(v) if v is not None else 0.0
+
+class RiskRulesResult(BaseModel):
+    rules: list[RiskRuleDef]

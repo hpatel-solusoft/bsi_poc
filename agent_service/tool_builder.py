@@ -1,38 +1,85 @@
-# agent_service/tool_builder.py
-# ----------------------------------------------------------------
-# Converts the SemanticDispatcher tool catalogue into the exact
-# format OpenAI's API expects for function/tool calling.
-#
-# This is the bridge between the semantic layer and the LLM.
-# ----------------------------------------------------------------
-
-import sys, os
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-from semantic_layer.dispatcher import SemanticDispatcher
+"""
+Converts the manifest tool catalogue into OpenAI function-calling schema.
+Intentionally generic — has no knowledge of specific tool names.
+"""
+from typing import List
 
 
-def build_openai_tools(dispatcher: SemanticDispatcher) -> list[dict]:
-    """
-    Takes the tool catalogue from the semantic layer and wraps
-    each entry in OpenAI's tool schema format.
+# Map manifest type strings to OpenAI JSON Schema types
+_TYPE_MAP = {
+    "string":  {"type": "string"},
+    "integer": {"type": "integer"},
+    "number":  {"type": "number"},
+}
 
-    OpenAI schema:
-      { type: "function", function: { name, description, parameters } }
 
-    The LLM only sees what the manifest allows — nothing more.
-    """
-    openai_tools = []
+def _param_schema(param: dict) -> dict:
+    """Builds an OpenAI-compatible JSON Schema entry for a single param."""
+    param_type = param.get("type", "string")
+    desc = param.get("description", "")
+
+    # list[string] → array of strings
+    if param_type == "list[string]":
+        return {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": desc,
+        }
+
+    # list[dict] → array of objects (free-form)
+    if param_type == "list[dict]":
+        return {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": desc,
+        }
+
+    # Any other list[*] variant
+    if "list" in param_type:
+        return {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": desc,
+        }
+
+    # Scalar types: string, integer, number
+    base = _TYPE_MAP.get(param_type, {"type": "string"})
+    return {**base, "description": desc}
+
+
+def build_openai_tools(dispatcher, allowed_tool_names: list[str] | None = None) -> List[dict]:
+    tools = []
+    allowed = set(allowed_tool_names or [])
     for tool in dispatcher.get_tool_catalogue():
-        openai_tools.append({
+        if allowed and tool["name"] not in allowed:
+            continue
+
+        properties = {}
+        required_names = []
+
+        # Required params — included in both properties and required list
+        for param in tool.get("required_params", []):
+            param_name = param["name"]
+            properties[param_name] = _param_schema(param)
+            required_names.append(param_name)
+
+        # Optional params — included in properties only (not required)
+        for param in tool.get("optional_params", []):
+            param_name = param["name"]
+            properties[param_name] = _param_schema(param)
+            # Not appended to required_names
+
+        tools.append({
             "type": "function",
             "function": {
-                "name":        tool["name"],
-                "description": tool["description"],
-                "parameters":  tool["parameters"]   # JSON Schema object, same structure
-            }
+                "name": tool["name"],
+                "description": tool["description"].strip(),
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required_names,
+                },
+            },
         })
-    return openai_tools
+
+    return tools
