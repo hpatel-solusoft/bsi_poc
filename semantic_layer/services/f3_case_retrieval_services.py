@@ -181,25 +181,28 @@ def _resolve_allegation_type_ids(
 
                 for alleg_item in alleg_items:
                     try:
+                        # Try to resolve type_id from links
+                        type_id = None
                         alleg_type_href = alleg_item.get("_links", {}).get(
                             "relationship:Allegations_AllegationsType", {}
                         ).get("href", "")
 
                         if not alleg_type_href:
-                            alleg_self = alleg_item.get("_links", {}).get("self", {}).get("href", "")
-                            if alleg_self:
-                                _, alleg_links = _fetch_props_links(alleg_self)
-                                alleg_type_href = alleg_links.get(
+                            # Try detail fetch if link missing in list
+                            item_href = alleg_item.get("_links", {}).get("self", {}).get("href", "")
+                            if item_href:
+                                item_res = _safe_fetch(item_href)
+                                alleg_type_href = item_res.get("_links", {}).get(
                                     "relationship:Allegations_AllegationsType", {}
                                 ).get("href", "")
 
-                        if not alleg_type_href:
-                            continue
-
-                        type_id = _extract_id(alleg_type_href)
+                        if alleg_type_href:
+                            type_id = _extract_id(alleg_type_href)
+                            
                         if not type_id or type_id in seen_type_ids:
                             continue
 
+                        # Fetch properties to match against fraud_types names
                         type_props, _ = _fetch_props_links(alleg_type_href)
                         desc = (
                             type_props.get("AllegationType_AllegationTypeDescription")
@@ -211,6 +214,7 @@ def _resolve_allegation_type_ids(
                         if any(f.upper() in desc_upper or desc_upper in f.upper() for f in fraud_types):
                             seen_type_ids.add(type_id)
                             allegation_types.append({"id": type_id, "description": desc})
+                            logger.info(f"  Matched Type: {desc} (ID: {type_id})")
 
                     except Exception as exc:
                         logger.warning(f"Failed processing allegation for type resolution: {exc}")
@@ -267,17 +271,26 @@ def search_similar_cases(
 ) -> dict:
     """
     Finds similar cases based on fraud types (AllegationType).
-
-    fraud_types is the only required argument.
-    case_id is optional — when provided, the current case is excluded from results.
-    complaint_description is optional — when provided, only archive entries whose
-    summary contains any keyword from the description are included.
-
-    Args:
-        fraud_types:           Fraud type names to search for.
-        case_id:               Current workfolder ID (excluded from results if provided).
-        complaint_description: Optional free-text for keyword-based result filtering.
     """
+    # Robust input handling for agentic flexibility
+    if isinstance(fraud_types, str):
+        fraud_types = [s.strip() for s in fraud_types.split(",") if s.strip()]
+    
+    if not fraud_types:
+        logger.warning("search_similar_cases called with empty fraud_types")
+        return {
+            "result": {
+                "query_summary": "No fraud types provided for search.",
+                "matches": [],
+                "top_n_returned": 0
+            },
+            "provenance": {
+                "sources": [],
+                "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                "computed_by": "System Early Return",
+            }
+        }
+
     cfg = _load_f3_config()
     max_per_type = int(cfg.get("max_results_per_type", 3))
 

@@ -6,6 +6,7 @@ Outside its scope: calling appworks_services directly, knowing tool names
 beyond what TOOL_TO_SECTION provides.
 """
 import json
+import logging
 import os
 import time
 import yaml
@@ -18,12 +19,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="BSI Fraud Investigation Platform")
 
 # -----------------------------------------------------------------------
 # CS-4: Case session context — in-memory for POC with 15-minute TTL.
-# Falls back to ai_investigation_data sent in the request body when the
-# entry has expired or the server has restarted (stateless-session pattern).
+# Falls back to ai_summary sent in the request body when the entry has
+# expired or the server has restarted (stateless-session pattern).
+# ai_summary is a REQUIRED field on all ON-DEMAND requests (v6 spec).
 # -----------------------------------------------------------------------
 
 CASE_STORE_TTL_SECONDS = 15 * 60  # 15 minutes (CS-4 lifespan per spec)
@@ -183,40 +187,6 @@ def _extract_agent_summary(messages: list) -> str:
         if msg.get("role") == "assistant" and msg.get("content"):
             return msg["content"]
     return ""
-
-
-def _get_case_id_from_investigation_data(body_data: Optional[dict]) -> Optional[str]:
-    if not body_data or not isinstance(body_data, dict):
-        return None
-    complaint_section = body_data.get("complaint_intelligence")
-    if isinstance(complaint_section, dict):
-        return complaint_section.get("case_id")
-    return None
-
-
-def _get_or_populate_case_store(case_id: Optional[str], body_data: Optional[dict]) -> tuple[str, dict]:
-    """CS-4 pattern: use store if present, fall back to request body."""
-    resolved_case_id = case_id or _get_case_id_from_investigation_data(body_data)
-    if resolved_case_id and resolved_case_id in CASE_STORE and CASE_STORE[resolved_case_id]:
-        return resolved_case_id, CASE_STORE[resolved_case_id]
-    if body_data:
-        if not resolved_case_id:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No case_id provided. Provide case_id either as a top-level field "
-                    "or inside ai_investigation_data.complaint_intelligence.case_id."
-                ),
-            )
-        CASE_STORE[resolved_case_id] = body_data
-        return resolved_case_id, body_data
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "No investigation data available for this case. "
-            "Run POST /investigate first, or provide ai_investigation_data in the request body."
-        ),
-    )
 
 
 def _risk_rule_lookup(case_data: dict) -> dict:
@@ -380,6 +350,56 @@ def _get_runner():
 
 
 # -----------------------------------------------------------------------
+# CS-4 RE-HYDRATION CONTRACT (v6)
+# ai_summary is REQUIRED on every /copilot, /playbook, /report request.
+# Server uses CS-4 if warm. Falls back to this field if CS-4 is cold
+# (restart / TTL expiry). Frontend NEVER omits ai_summary to optimise
+# payload size — the server decides which source to use, not the client.
+#
+# ai_summary MUST include both "investigation" AND "provenance_trail"
+# from the original /investigate response. Omitting provenance_trail
+# silently breaks Copilot source citations on session recovery.
+# -----------------------------------------------------------------------
+
+
+def _rehydrate_case_store(case_id: str, ai_summary: dict) -> None:
+    """Re-populate CS-4 from request body on session recovery (v6)."""
+    CASE_STORE[case_id] = {
+        **ai_summary.get("investigation", {}),           # all tool result sections
+        "provenance_trail": ai_summary.get("provenance_trail", []),  # must be present
+    }
+    if not ai_summary.get("provenance_trail"):
+        logger.warning(
+            f"CS-4 re-hydrated for {case_id} but provenance_trail is missing "
+            f"— Copilot source citations will be unavailable for this session."
+        )
+
+
+def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> dict:
+    """
+    CS-4 lookup pattern used by all ON-DEMAND handlers.
+    Returns warm case_data from CS-4, or re-hydrates from ai_summary if cold.
+    Raises HTTPException if neither source is available.
+    """
+    if case_id in CASE_STORE and CASE_STORE[case_id]:
+        return CASE_STORE[case_id]
+
+    # CS-4 cold — fall back to ai_summary sent in request body (v6 contract)
+    if ai_summary:
+        _rehydrate_case_store(case_id, ai_summary)
+        return CASE_STORE[case_id]
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "No investigation data available for this case. "
+            "Run POST /investigate first, or provide ai_summary "
+            "(with investigation sections and provenance_trail) in the request body."
+        ),
+    )
+
+
+# -----------------------------------------------------------------------
 # Request / response models
 # -----------------------------------------------------------------------
 
@@ -388,14 +408,18 @@ class InvestigateRequest(BaseModel):
 
 
 class PlaybookRequest(BaseModel):
-    case_id: Optional[str] = None
-    ai_investigation_data: Optional[Dict[str, Any]] = None
+    case_id: str
+    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
+    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
+    ai_summary: Dict[str, Any]
 
 
 class ReportRequest(BaseModel):
     case_id: str
+    # ai_summary is REQUIRED per v6 spec.
+    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
+    ai_summary: Dict[str, Any]
     ai_case_summary: Optional[str] = None
-    ai_investigation_data: Optional[Dict[str, Any]] = None
     ai_playbook: Optional[Dict[str, Any]] = None
     analyst_decision: Optional[Dict[str, Any]] = None
 
@@ -403,7 +427,9 @@ class ReportRequest(BaseModel):
 class CopilotRequest(BaseModel):
     case_id: str
     question: str
-    ai_investigation_data: Optional[Dict[str, Any]] = None
+    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
+    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
+    ai_summary: Dict[str, Any]
     conversation_history: Optional[List[Dict[str, Any]]] = None
 
 
@@ -448,8 +474,9 @@ def investigate(req: InvestigateRequest):
         # This is the ONLY content shown to the investigator on screen.
         "agent_summary":    agent_summary,
         # investigation contains structured JSON sections — one per tool.
-        # NOT displayed directly; saved as ai_investigation_data and sent
-        # in request bodies to /playbook, /report, /copilot.
+        # NOT displayed directly; the frontend saves the full response as
+        # ai_summary and sends it in request bodies to /playbook, /report,
+        # /copilot (ai_summary = { investigation: sections, provenance_trail }).
         "investigation":    sections,
         "provenance_trail": provenance_trail,
         "meta": {
@@ -464,17 +491,22 @@ def investigate(req: InvestigateRequest):
 def playbook(req: PlaybookRequest):
     """
     ON-DEMAND — calls get_investigation_playbook only.
-    Requires risk_tier from a prior /investigate run (via CS-4 or request body).
+    Requires risk_tier from a prior /investigate run (via CS-4 or ai_summary body).
+    ai_summary is REQUIRED per v6 spec — server decides which source to use.
     """
     from agent_service.agent_runner import build_playbook_prompt
 
-    case_id, case_data = _get_or_populate_case_store(req.case_id, req.ai_investigation_data)
-    runner    = _get_runner()
+    # CS-4 pattern (v6): use store if warm, fall back to ai_summary on miss.
+    if req.case_id not in CASE_STORE:
+        _rehydrate_case_store(req.case_id, req.ai_summary)
+    case_data = CASE_STORE[req.case_id]
+
+    runner = _get_runner()
 
     messages, _ = runner.run_scoped(
         system_prompt=build_playbook_prompt(case_data),
         user_message=(
-            f"Retrieve the investigation playbook for case {case_id}. "
+            f"Retrieve the investigation playbook for case {req.case_id}. "
             f"Extract fraud_types and risk_tier from the context provided in the system prompt "
             f"and call get_investigation_playbook."
         ),
@@ -482,14 +514,11 @@ def playbook(req: PlaybookRequest):
     )
 
     sections = _extract_tool_results(messages)
-
-    if case_id not in CASE_STORE:
-        CASE_STORE[case_id] = case_data
-    CASE_STORE[case_id].update(sections)
+    CASE_STORE[req.case_id].update(sections)
 
     return {
-        "case_id":     case_id,
-        "status":      "completed",
+        "case_id":       req.case_id,
+        "status":        "completed",
         "investigation": sections,
     }
 
@@ -499,10 +528,14 @@ def report(req: ReportRequest):
     """
     ON-DEMAND — calls generate_final_report only.
     Requires: risk_assessment in case data, playbook, and analyst approval.
+    ai_summary is REQUIRED per v6 spec — server decides which source to use.
     """
     from agent_service.agent_runner import build_report_prompt
 
-    case_id, case_data = _get_or_populate_case_store(req.case_id, req.ai_investigation_data)
+    # CS-4 pattern (v6): use store if warm, fall back to ai_summary on miss.
+    if req.case_id not in CASE_STORE:
+        _rehydrate_case_store(req.case_id, req.ai_summary)
+    case_data = CASE_STORE[req.case_id]
 
     if "risk_assessment" not in case_data:
         raise HTTPException(
@@ -534,13 +567,13 @@ def report(req: ReportRequest):
 
     messages, _ = runner.run_scoped(
         system_prompt=build_report_prompt(
-            case_data       = case_data,
-            ai_case_summary = req.ai_case_summary or "",
-            playbook_data   = playbook_data,
+            case_data        = case_data,
+            ai_case_summary  = req.ai_case_summary or "",
+            playbook_data    = playbook_data,
             analyst_decision = req.analyst_decision,
         ),
         user_message=(
-            f"Generate the investigation summary report for case {case_id}. "
+            f"Generate the investigation summary report for case {req.case_id}. "
             f"Call generate_final_report first, then synthesise all findings "
             f"into the director-ready narrative as instructed."
         ),
@@ -549,19 +582,17 @@ def report(req: ReportRequest):
 
     sections = _extract_tool_results(messages)
     sections = _enrich_final_report_from_context(
-        sections=sections,
-        case_data=case_data,
-        playbook_data=playbook_data,
-        analyst_decision=req.analyst_decision,
+        sections         = sections,
+        case_data        = case_data,
+        playbook_data    = playbook_data,
+        analyst_decision = req.analyst_decision,
     )
 
-    if case_id not in CASE_STORE:
-        CASE_STORE[case_id] = case_data
-    CASE_STORE[case_id].update(sections)
+    CASE_STORE[req.case_id].update(sections)
 
     return {
-        "case_id":     case_id,
-        "status":      "completed",
+        "case_id":       req.case_id,
+        "status":        "completed",
         "investigation": sections,
     }
 
@@ -571,14 +602,21 @@ def copilot(req: CopilotRequest):
     """
     ON-DEMAND — answers investigator questions grounded in case context.
     Answers from CS-4 context first; falls back to tools only if needed.
+    ai_summary is REQUIRED per v6 spec — server decides which source to use.
+    If provenance_trail is absent from ai_summary, source citations degrade
+    gracefully — no crash.
     """
     from agent_service.agent_runner import build_copilot_prompt
 
-    case_id, case_data = _get_or_populate_case_store(req.case_id, req.ai_investigation_data)
-    runner    = _get_runner()
+    # CS-4 pattern (v6): use store if warm, fall back to ai_summary on miss.
+    if req.case_id not in CASE_STORE:
+        _rehydrate_case_store(req.case_id, req.ai_summary)
+    case_data = CASE_STORE[req.case_id]
+
+    runner = _get_runner()
 
     messages, provenance_trail = runner.run_scoped(
-        system_prompt=build_copilot_prompt(case_id, case_data),
+        system_prompt=build_copilot_prompt(req.case_id, case_data),
         user_message=req.question,
         conversation_history=req.conversation_history or [],
     )
@@ -591,11 +629,9 @@ def copilot(req: CopilotRequest):
         for p in provenance_trail
     ]
 
-    # CS-4: Update store if a tool was called
+    # CS-4: Update store if a tool was called during this Copilot turn
     if provenance_trail:
         new_sections = _extract_tool_results(messages)
-        if req.case_id not in CASE_STORE:
-            CASE_STORE[req.case_id] = case_data
         CASE_STORE[req.case_id].update(new_sections)
 
     return {
