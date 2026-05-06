@@ -1,6 +1,15 @@
 # BSI Fraud Investigation Platform
 ## Architecture Reference Document
-### Version 3.0 — POC
+### Version 6.0 — POC
+
+---
+
+> ## 📋 Document Changelog
+>
+> | Version | Date | Author | Changes |
+> |---|---|---|---|
+> | v6 | 2026-05-05 | Claude | **1.** `generate_final_report` parameters expanded from `case_id` only → `case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules` — updated in Section 3.3 (execution flow), Section 3.4 (Gate 1 error list), and Section 7 (manifest YAML entry added). **2.** CS-4 TTL / expiry configuration requirement added — Section 2 (CS-4 block), Section 4 (reference table Lifespan column), Section 9 (system characteristics). **3.** `ai_summary` declared as a **required field** (not optional) on every `/copilot`, `/playbook`, and `/report` request — must carry both `investigation` sections and `provenance_trail`. `_rehydrate_case_store()` helper added to `webhook.py` for explicit session-recovery logic — Section 2 (CS-4 block), Sections 3.2 / 3.3 / 3.4 (ON-DEMAND flow handlers), Section 4 (reference table). |
+> | v5 | — | — | Previous version — see `bsi_architecture_reference_v5.md` |
 
 ---
 
@@ -84,9 +93,33 @@ ON-DEMAND flows and the Copilot correctly.
 │  subsequent ON-DEMAND requests, webhook.py checks CS-4 first.    │
 │  If populated (same server session), it uses CS-4 directly. If   │
 │  empty (new session or server restart), it falls back to the     │
-│  ai_investigation_data field sent in the request body by the frontend. │
+│  ai_summary field sent in the request body by the frontend.      │
 │  CS-4 is never the authoritative store — AppWorks case fields    │
 │  are. CS-4 is a within-session performance cache only.           │
+│                                                                  │
+│  Frontend Contract (REQUIRED):                                   │   ← [NEW v6]
+│  ai_summary is a REQUIRED field on every /copilot, /playbook,    │   ← [NEW v6]
+│  and /report request — not optional. The frontend must always    │   ← [NEW v6]
+│  send it regardless of whether it believes CS-4 is warm.         │   ← [NEW v6]
+│  The server decides which source to use — the frontend never     │   ← [NEW v6]
+│  tries to predict CS-4 state. ai_summary must contain BOTH       │   ← [NEW v6]
+│  the investigation sections AND provenance_trail from the        │   ← [NEW v6]
+│  original /investigate response. Omitting provenance_trail       │   ← [NEW v6]
+│  silently breaks Copilot source citations on session recovery.   │   ← [NEW v6]
+│                                                                  │   ← [NEW v6]
+│  Session Recovery (webhook.py — _rehydrate_case_store helper):   │   ← [NEW v6]
+│  When CS-4 is cold, webhook.py calls                             │   ← [NEW v6]
+│  _rehydrate_case_store(case_id,ai_summary)                       │   ← [NEW v6]
+│   which re-populates CASE_STORE as:                              │   ← [NEW v6]
+│    { **ai_summary["investigation"],                              │   ← [NEW v6]
+│      "provenance_trail": ai_summary["provenance_trail"] }        │   ← [NEW v6]
+│  If provenance_trail is absent, a warning is logged and          │   ← [NEW v6]
+│  Copilot citations degrade gracefully — no crash.                │   ← [NEW v6]
+│                                                                  │
+│  TTL / Expiry Configuration (REQUIRED):                          │   ← [NEW v6]
+│  POC (in-memory dict): No TTL — entries live for the duration    │   ← [NEW v6]
+│  of the server process. Acceptable for POC only.                 │   ← [NEW v6]
+│                                                                  │
 ├──────────────────────────────────────────────────────────────────┤
 │  CS-5  COPILOT INJECTED CONTEXT                                  │
 │  Location: System prompt string built in webhook.py /copilot     │
@@ -118,9 +151,24 @@ ON-DEMAND flows and the Copilot correctly.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
----
+> 🔄 **[MODIFIED — v6 — 2026-05-05] CS-4 TTL / Expiry Configuration added**
+> CS-4 (`CASE_STORE`) now includes an explicit TTL / expiry policy requirement.
+> In-memory (POC): no TTL needed — entries live for the server process lifetime.
+> **Production (Redis or DB-backed session store): TTL must be set — recommended 86 400 s (24 h),
+> keyed as `CASE_STORE:{case_id}`.** Any equivalent context store playing the same cache-aside
+> role must apply a matching expiry policy. On TTL expiry, ON-DEMAND endpoints fall back
+> to `ai_summary` in the request body — same pattern as `conversation_history` for the Copilot.
+> See updated CS-4 block above and the reference table in Section 4.
+> 
+> `ai_summary` is now explicitly declared as a **required field** on every `/copilot`, `/playbook`,
+> and `/report` request — not optional. Frontend must always send it; server decides which source to use.
+> `ai_summary` must carry **both** `investigation` sections and `provenance_trail` — omitting
+> `provenance_trail` silently breaks Copilot source citations on session recovery.
+> `_rehydrate_case_store(case_id, ai_summary)` helper added to `webhook.py` to make session-recovery
+> logic explicit, consistent across all ON-DEMAND handlers, and warning-logged when provenance is missing.
+> See updated ON-DEMAND flow handlers in Sections 3.2, 3.3, 3.4.
 
-## Section 3 — Complete Execution Sequences
+---
 
 ### 3.1 AUTO Flow — POST /investigate
 **Trigger:** AppWorks complaint form submitted or on Click of "AI Insights". Runs tools 1–4 automatically.
@@ -358,43 +406,25 @@ AppWorks submits: POST /investigate  { "case_id": "BSI-2024-00421" }
 │       {
 │         case_id:       "BSI-2024-00421",
 │         status:        "completed",
-│         agent_summary: "Investigation complete. Risk score 0.87 HIGH.
-│                         Three rules triggered. Subject has 2 prior
-│                         cases...",              ← NATURAL LANGUAGE
-│                                                   displayed on screen
-│                                                   saved to ai_case_summary
+│         agent_summary: "Investigation complete. Risk score 0.87...",
 │         investigation: {
-│           <section>: { ... }   ← STRUCTURED JSON, one key per tool,
-│           ...                    section name from manifest.yaml
-│         },                       saved to ai_investigation_data
-│                                  used by /playbook /report /copilot
+│           <section>: { ... }   ← one key per tool that ran,
+│           ...                    section name comes from manifest.yaml
+│         },
 │         provenance_trail: [ ...one entry per tool call... ],
-│         meta: { tool_calls_made:5, duration_seconds:9.1, ... }
+│         meta: { tool_calls_made:4, duration_seconds:8.3, ... }
 │       }
 │
 └── FRONTEND
-      Case summary panel renders agent_summary as natural language
-      narrative alongside the Copilot chat interface.
-      The investigator reads agent_summary — not raw JSON.
+      Case summary panel renders all investigation sections in a
+      single unified view alongside the Copilot chat interface.
+      No separate tab triggers a new agent call or endpoint.
 
       Analyst reviews the summary on screen. When satisfied, the
       analyst uses the native BSI AppWorks save action to commit
-      both fields to the case record in one action:
-
-        ai_case_summary      = agent_summary
-                               (natural language — what the analyst read
-                                and approved. Displayed on screen when
-                                case is reopened.)
-
-        ai_investigation_data = investigation{}
-                               (structured JSON sections — used by
-                                /playbook, /report, /copilot as
-                                machine-readable context. Never
-                                displayed directly to the investigator.)
-
-      This is a single BSI UI save action — not an agent write.
-      The agent service has no write path to AppWorks.
-      READONLY is preserved end to end.
+      the ai_case_summary to the case record. This is a BSI UI
+      action — not an agent write. The agent service has no write
+      path to AppWorks. READONLY is preserved end to end.
 
       If the case is subsequently modified in AppWorks (new allegation
       added, subject details updated), AppWorks workflow rules set
@@ -407,23 +437,62 @@ AppWorks submits: POST /investigate  { "case_id": "BSI-2024-00421" }
 
 ---
 
+---
+
+> 🔄 **[NEW — v6 — 2026-05-05] `_rehydrate_case_store` helper — webhook.py**
+> Centralises CS-4 session-recovery logic so all three ON-DEMAND handlers
+> (`/playbook`, `/report`, `/copilot`) behave identically on cache miss.
+>
+> ```python
+> # webhook.py
+>
+> # ─────────────────────────────────────────────────────────────────────
+> # CS-4 RE-HYDRATION CONTRACT
+> # ai_summary is REQUIRED on every /copilot, /playbook, /report request.
+> # Server uses CS-4 if warm. Falls back to this field if CS-4 is cold
+> # (restart / TTL expiry). Frontend NEVER omits ai_summary to optimise
+> # payload size — the server decides which source to use, not the client.
+> #
+> # ai_summary MUST include both "investigation" AND "provenance_trail"
+> # from the original /investigate response. Omitting provenance_trail
+> # silently breaks Copilot source citations on session recovery.
+> # ─────────────────────────────────────────────────────────────────────
+>
+> def _rehydrate_case_store(case_id: str, ai_summary: dict):
+>     """Re-populate CS-4 from request body on session recovery."""
+>     CASE_STORE[case_id] = {
+>         **ai_summary.get("investigation", {}),           # all tool result sections
+>         "provenance_trail": ai_summary.get("provenance_trail", [])  # must be present
+>     }
+>     if not ai_summary.get("provenance_trail"):
+>         logger.warning(
+>             f"CS-4 re-hydrated for {case_id} but provenance_trail is missing "
+>             f"— Copilot source citations will be unavailable for this session."
+>         )
+> ```
+>
+> **Usage in every ON-DEMAND handler (consistent pattern):**
+> ```python
+> if request.case_id not in CASE_STORE:
+>     _rehydrate_case_store(request.case_id, request.ai_summary)
+> # ... rest of handler unchanged — CS-4 now guaranteed warm
+> ```
+
 ### 3.2 ON-DEMAND Flow — POST /playbook
 **Trigger:** Reviewer clicks "Load Investigation Playbook" button in BSI UI.
 
-The frontend always sends the ai_investigation_data it has in the
-request body. This is the structured JSON sections from the /investigate
-response — not the natural language agent_summary. The system needs
-structured data to build the scoped prompt reliably. This is the same
-stateless pattern as /copilot sending conversation_history. If CS-4
-is populated (same session), webhook.py uses it and ignores the body
-field. If CS-4 is empty (new session), webhook.py reads from the
-request body. No AppWorks read is required either way.
+The frontend always sends the ai_summary it has on screen in the
+request body. This is the same pattern as /copilot sending
+conversation_history. The server does not need to hold state between
+sessions. If CS-4 is populated (same session), webhook.py uses it
+and ignores the body field. If CS-4 is empty (new session), webhook.py
+reads from the request body. No AppWorks read is required either way.
 
 ```
 Reviewer clicks button → POST /playbook
   {
-    "case_id":              "BSI-2024-00421",
-    "ai_investigation_data": {    ← structured JSON from /investigate
+    "case_id":   "BSI-2024-00421",
+    "ai_summary": {           ← frontend sends what it has on screen
       "complaint_intelligence": { fraud_types: ["BILLING","NETWORK"], ... },
       "risk_assessment":        { risk_score: 0.87, risk_tier: "HIGH",
                                   triggered_rules: [...], ... },
@@ -433,21 +502,26 @@ Reviewer clicks button → POST /playbook
   }
 │
 ├── webhook.py
-│     checks CS-4 — if populated use it, skip ai_investigation_data field
-│     if CS-4 empty: reads request.ai_investigation_data     ← CS-4 POPULATED
-│       CASE_STORE["BSI-2024-00421"] = request.ai_investigation_data
+│     checks CS-4 — if populated use it, skip ai_summary field
+│     if CS-4 empty: calls _rehydrate_case_store(case_id, request.ai_summary)  ← [NEW v6]
+│       CASE_STORE[case_id] = {                                          ← [NEW v6]
+│         **request.ai_summary["investigation"],   ← tool result sections← [NEW v6]
+│         "provenance_trail": ai_summary["provenance_trail"]  ← required ← [NEW v6]
+│       }                                                                ← [NEW v6]
+│       NOTE: ai_summary is a REQUIRED field on this request —          ← [NEW v6]
+│       frontend always sends it; server decides which source to use.   ← [NEW v6]
 │
-│     passes full ai_investigation_data as context into scoped prompt
+│     passes full ai_summary as context into scoped prompt
 │       no static field extraction — the full JSON is serialised
 │       and injected directly. The LLM reads what it needs from it.
-│       This means adding a new investigation section automatically
-│       enriches the playbook prompt with no code change.
+│       This means adding a new investigation section to the summary
+│       automatically enriches the playbook prompt with no code change.
 │
 │     creates BSIAgentRunner(manifest_path)
 │     builds scoped prompt with full case context:
 │       "Retrieve the investigation playbook appropriate for this case.
-│        Here is the full investigation data:
-│        { ...full ai_investigation_data serialised as JSON... }
+│        Here is the full investigation summary:
+│        { ...full ai_summary serialised as JSON... }
 │        Tailor the recommended investigation steps specifically to
 │        this case — prioritise steps relevant to the established
 │        fraud pattern, reference prior case findings where relevant,
@@ -522,20 +596,20 @@ Reviewer clicks button → POST /playbook
 ### 3.3 ON-DEMAND Flow — POST /report
 **Trigger:** Director clicks "Generate Investigation Summary" button.
 
+> 🔄 **[MODIFIED — v6 — 2026-05-05] `generate_final_report` parameters expanded**
+> Tool call now passes `case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules`
+> instead of `case_id` only. The report agent now receives all context it needs from the dispatcher
+> directly rather than re-deriving it from upstream tool results. See highlighted lines in the flow below.
+
 ```
 Director clicks button → POST /report
   {
-    "case_id":               "BSI-2024-00421",
-    "ai_case_summary":       "Investigation complete. Risk score 0.87...",
-                              ← natural language narrative — woven into
-                                 report tone and framing
-    "ai_investigation_data": { ...full structured investigation sections... },
-                              ← structured JSON — factual grounding for
-                                 report synthesis
-    "ai_playbook":           { ...tailored playbook from /playbook... },
+    "case_id":         "BSI-2024-00421",
+    "ai_summary":      { ...full investigation sections... },
+    "ai_playbook":     { ...tailored playbook from /playbook... },
     "analyst_decision": {
-      "decision":   "APPROVED",
-      "notes":      "Risk assessment confirmed. Proceed with full audit.",
+      "decision":  "APPROVED",
+      "notes":     "Risk assessment confirmed. Proceed with full audit.",
       "decided_by": "Analyst Jane Smith",
       "decided_at": "2025-04-27T15:10:00Z"
     }
@@ -543,11 +617,17 @@ Director clicks button → POST /report
 │
 ├── webhook.py
 │     checks CS-4 — if populated use it, skip body fields
-│     if CS-4 empty: reads request.ai_investigation_data  ← CS-4 POPULATED
-│     validates all prior phases present:
-│       ai_investigation_data.risk_assessment present? if not → 400
-│       ai_playbook present?                           if not → 400
-│       analyst_decision.decision == "APPROVED"?       if not → 400
+│     if CS-4 empty: calls _rehydrate_case_store(case_id, request.ai_summary)  ← [NEW v6]
+│       CASE_STORE[case_id] = {                                          ← [NEW v6]
+│         **request.ai_summary["investigation"],                         ← [NEW v6]
+│         "provenance_trail": ai_summary["provenance_trail"]             ← [NEW v6]
+│       }                                                                ← [NEW v6]
+│       NOTE: ai_summary is a REQUIRED field on this request —          ← [NEW v6]
+│       frontend always sends it; server decides which source to use.   ← [NEW v6]
+│     validates all three prior phases present:
+│       ai_summary.risk_assessment present?      if not → 400
+│       ai_playbook present?                     if not → 400
+│       analyst_decision.decision == "APPROVED"? if not → 400
 │         clear message: report requires analyst approval first
 │
 │     builds scoped prompt with complete case context:
@@ -555,9 +635,15 @@ Director clicks button → POST /report
 │       LLM task: synthesise into a director-ready narrative report
 │
 ├── agent_runner.py → OpenAI GPT-4o
-│     DECIDES: "generate_final_report(BSI-2024-00421)"
+│     DECIDES: "generate_final_report(BSI-2024-00421, SUBJ-7821,    # ← CHANGED v6
+│               [BILLING,NETWORK], 0.87, HIGH, [R-101,R-205,R-312])"# ← CHANGED v6
 │     tool_call: { name:"generate_final_report",
-│                  params:{ case_id:"BSI-2024-00421" } }
+│                  params:{ case_id:         "BSI-2024-00421",       # ← CHANGED v6: was case_id only
+│                           subject_id:      "SUBJ-7821",            # ← NEW v6
+│                           fraud_types:     ["BILLING","NETWORK"],  # ← NEW v6
+│                           risk_score:      0.87,                   # ← NEW v6
+│                           risk_tier:       "HIGH",                 # ← NEW v6
+│                           triggered_rules: ["R-101","R-205","R-312"] } }  # ← NEW v6
 │
 ├── dispatcher.py → appworks_services.py
 │     compile_and_render_report("BSI-2024-00421")
@@ -599,13 +685,11 @@ Director clicks button → POST /report
 Investigator types: "Why is the risk score so high?"
 
 POST /copilot  {
-  "case_id":               "BSI-2024-00421",
-  "question":              "Why is the risk score so high?",
-  "ai_investigation_data": { ...structured JSON investigation sections... },
-                             ← system context — not displayed to user
-                               used to build injected prompt reliably
-  "conversation_history":  []   ← empty on first message,
-                                   grows with every exchange
+  "case_id":             "BSI-2024-00421",
+  "question":            "Why is the risk score so high?",
+  "ai_summary":          { ...full investigation sections... },
+  "conversation_history": []   ← empty on first message,
+                                 grows with every exchange
 
   Conversation history size and duration:
   The frontend appends every user + assistant exchange to this list.
@@ -614,16 +698,23 @@ POST /copilot  {
   - Each exchange adds two messages (user + assistant)
   - A 10-question Copilot session sends 20 messages of history
   - The LLM context window is the practical ceiling
-  The practical limit is determined by the model context window budget
-  minus the size of the injected ai_investigation_data. A sliding
-  window keeping the last N exchanges is the production approach.
+  For the POC, 15–20 exchanges per case session is a reasonable
+  working limit before token cost and latency become noticeable.
+  In production, a sliding window strategy (keep last N exchanges
+  plus the system prompt context) should be applied by the frontend.
   The server never enforces a limit — it processes whatever it receives.
 }
 │
 ├── webhook.py
-│     checks CS-4 — if populated use it, skip ai_investigation_data field
-│     if CS-4 empty: reads request.ai_investigation_data  ← CS-4 POPULATED
-│       CASE_STORE["BSI-2024-00421"] = request.ai_investigation_data
+│     checks CS-4 — if populated use it, skip ai_summary field
+│     if CS-4 empty: calls _rehydrate_case_store(case_id, request.ai_summary)  ← [NEW v6]
+│       CASE_STORE[case_id] = {                                          ← [NEW v6]
+│         **request.ai_summary["investigation"],                         ← [NEW v6]
+│         "provenance_trail": ai_summary["provenance_trail"]  ← required ← [NEW v6]
+│       }                                                                ← [NEW v6]
+│       if provenance_trail absent: log warning, citations degrade       ← [NEW v6]
+│       gracefully — no crash. ai_summary is REQUIRED on every          ← [NEW v6]
+│       request — frontend never omits it to optimise payload size.     ← [NEW v6]
 │
 │     builds CONTEXT-INJECTED system prompt:            ← CS-5 BUILT
 │       "You are the BSI Investigation Copilot for case BSI-2024-00421.
@@ -717,7 +808,7 @@ POST /copilot  {
 │     reads context — similar_cases already present but from intake time
 │     DECIDES: "Question asks for newer cases. Fresh tool call required."
 │     returns: tool_call: { name:"search_similar_cases",
-│                           params:{ fraud_types:["BILLING","NETWORK"] } }
+│                           params:{ complaint_text:"...", top_n:3 } }
 │
 ├── dispatcher.py  ←  Gate 1, 2, 3 pass
 ├── appworks_services.py  ←  fresh search
@@ -753,8 +844,8 @@ Investigator types: "Can you pull the provider's licence status?"
 │         message:"Tool 'get_provider_license' is not registered.
 │                  Available tools: verify_case_intake,
 │                  fetch_subject_history, search_similar_cases,
-│                  get_risk_rules, calculate_risk_metrics,
-│                  get_investigation_playbook, generate_final_report" }
+│                  calculate_risk_metrics, get_investigation_playbook,
+│                  generate_final_report" }               # ← tool name unchanged; params updated in 3.3
 │
 ├── agent_runner.py
 │     appends error as tool result to messages         ← CS-2 STORED
@@ -780,12 +871,14 @@ Investigator types: "Can you pull the provider's licence status?"
 
 ## Section 4 — Context Storage Reference Table
 
+> 🔄 **[MODIFIED — v6 — 2026-05-05]** CS-4 Lifespan column updated to include TTL / expiry policy.
+
 | ID | Name | Location | Created by | Read by | Lifespan |
 |---|---|---|---|---|---|
 | CS-1 | LLM Turn Context | `messages[]` in agent_runner.py | agent_runner.py init | GPT-4o on every turn | Duration of agent loop |
 | CS-2 | Tool Result Context | `role:"tool"` entries in CS-1 | agent_runner.py after each dispatch | GPT-4o on next turn | Duration of agent loop |
 | CS-3 | Response Context | `sections{}` dict in webhook.py | `_extract_tool_results()` | HTTP response builder, frontend case summary panel | Duration of request |
-| CS-4 | Case Session Context | `CASE_STORE[case_id]` in webhook.py | `/investigate` endpoint or request body ai_investigation_data | `/playbook`, `/report`, `/copilot` | Server session (POC) — falls back to request body if empty |
+| CS-4 | Case Session Context | `CASE_STORE[case_id]` in webhook.py | `/investigate` endpoint or `_rehydrate_case_store()` from request body `ai_summary` | `/playbook`, `/report`, `/copilot` | **POC (in-memory):** server process lifetime — no TTL. **Production (Redis/DB):** TTL required — recommended 86 400 s (24 h), key `CASE_STORE:{case_id}`. On expiry, `_rehydrate_case_store()` re-populates from `ai_summary` (required field on all ON-DEMAND requests). `ai_summary` must include both `investigation` sections and `provenance_trail`. |
 | CS-5 | Copilot Injected Context | System prompt string | webhook.py `/copilot` handler | GPT-4o system turn | Duration of request |
 | CS-6 | Copilot Conversation History | `conversation_history[]` in request body | Frontend (appends each exchange) | agent_runner.py messages build | Frontend session |
 | CS-7 | Provenance Trail | `provenance_trail[]` in agent_runner.py; extracted by webhook.py | agent_runner.py after each dispatch | webhook.py response builder; CASE_STORE; Copilot injected context | Duration of request; persisted in CASE_STORE |
@@ -798,9 +891,9 @@ Investigator types: "Can you pull the provider's licence status?"
 |---|---|---|---|---|---|
 | `GET /health` | Browser / monitoring | None | Nothing | Nothing | — |
 | `POST /investigate` | AppWorks form submission | 1–5 (LLM decides — includes get_risk_rules) | manifest.yaml | CS-4 CASE_STORE | AUTO |
-| `POST /playbook` | Reviewer clicks button | Tool 6 only | CS-4 or request body ai_investigation_data | CS-4 updated | ON-DEMAND |
-| `POST /report` | Director clicks button | Tool 7 only | CS-4 or request body ai_investigation_data + ai_case_summary + ai_playbook + analyst_decision | CS-4 updated | ON-DEMAND |
-| `POST /copilot` | Investigator sends message | 0 or 1 (LLM decides) | CS-4 or request body ai_investigation_data | CS-4 if tool called | ON-DEMAND |
+| `POST /playbook` | Reviewer clicks button | Tool 5 only | CS-4 or request body ai_summary | CS-4 updated | ON-DEMAND |
+| `POST /report` | Director clicks button | Tool 6 only | CS-4 or request body ai_summary + ai_playbook + analyst_decision | CS-4 updated | ON-DEMAND |
+| `POST /copilot` | Investigator sends message | 0 or 1 (LLM decides) | CS-4 or request body ai_summary | CS-4 if tool called | ON-DEMAND |
 
 ---
 
@@ -811,7 +904,7 @@ this table identifies which file owns that concern.
 
 | File | Responsible for | Outside its scope |
 |---|---|---|
-| `api/webhook.py` | HTTP endpoints, CASE_STORE, response shaping, provenance trail extraction and persistence | Calling appworks_services directly. Knowing tool names beyond TOOL_TO_SECTION. |
+| `api/webhook.py` | HTTP endpoints, CASE_STORE, response shaping, provenance trail extraction and persistence, `_rehydrate_case_store()` session recovery helper | Calling appworks_services directly. Knowing tool names beyond TOOL_TO_SECTION. |
 | `agent_service/agent_runner.py` | LLM loop, message history, turn management, provenance_trail[] accumulation across turns | HTTP concerns, tab names, UI section structure. |
 | `agent_service/tool_builder.py` | Converting manifest catalogue to OpenAI tool schema | Knowledge of specific tools. It is intentionally generic. |
 | `semantic_layer/dispatcher.py` | Three validation gates, tool routing, passing the full {result, provenance} envelope through unchanged | Being bypassed or called around for any reason. Modifying or stripping provenance blocks. |
@@ -844,6 +937,44 @@ two files are involved.
 ```
 
 **For reference — corrected entries for existing tools:**
+
+> 🔄 **[MODIFIED — v6 — 2026-05-05]** `generate_final_report` manifest entry added below.
+> Parameters expanded from `case_id` only to include `subject_id`, `fraud_types`, `risk_score`,
+> `risk_tier`, and `triggered_rules`. All other tool entries are unchanged.
+
+```yaml
+- name: "generate_final_report"                 # ← NEW ENTRY v6
+  section: "final_report"
+  description: >
+    Compiles and renders the final investigation report for a case.
+    Requires: case_id, subject_id, fraud_types (list), risk_score (float),
+    risk_tier (string), and triggered_rules (list). All values come from
+    upstream tool outputs — case_id and subject_id from verify_case_intake,
+    risk_score / risk_tier / triggered_rules from calculate_risk_metrics,
+    fraud_types from verify_case_intake. Called only after analyst approval.
+    Returns: report template populated with case metadata for LLM narrative synthesis.
+  python_function: "appworks_services.compile_and_render_report"
+  required_params:
+    - name: "case_id"
+      type: "string"
+      description: "Case identifier from verify_case_intake output"
+    - name: "subject_id"                        # ← NEW v6
+      type: "string"
+      description: "Subject identifier from verify_case_intake output"
+    - name: "fraud_types"                       # ← NEW v6
+      type: "list[string]"
+      description: "List of fraud types from verify_case_intake — determines report sections"
+    - name: "risk_score"                        # ← NEW v6
+      type: "float"
+      description: "Deterministic risk score from calculate_risk_metrics (0–1)"
+    - name: "risk_tier"                         # ← NEW v6
+      type: "string"
+      description: "Risk tier from calculate_risk_metrics: LOW/MEDIUM/HIGH/CRITICAL"
+    - name: "triggered_rules"                   # ← NEW v6
+      type: "list[string]"
+      description: "Rule IDs triggered by calculate_risk_metrics — cited in report narrative"
+```
+
 ```yaml
 - name: "search_similar_cases"
   section: "similar_cases"
@@ -942,10 +1073,8 @@ PRINCIPLE 3 — The case summary panel reads sections. It does not trigger agent
   UI is the surface. The architecture is backstage.
 
 PRINCIPLE 4 — ON-DEMAND endpoints receive context in the request body.
-  POST /playbook and POST /copilot receive ai_investigation_data —
-  the structured JSON sections from the /investigate response.
-  POST /report receives both ai_investigation_data and ai_case_summary.
-  POST /copilot also receives conversation_history.
+  POST /playbook and POST /report receive the ai_summary the frontend
+  already has on screen. POST /copilot receives conversation_history.
   The server does not need to hold state between sessions. If CS-4
   is populated from the current session, it is used. If not, the
   request body field is the fallback. No AppWorks read is required
@@ -1020,7 +1149,7 @@ PRINCIPLE 11 — ai_summary staleness is a BSI workflow concern, not an agent co
 | Is provenance-aware | Every tool response is stamped with its AppWorks data sources, retrieval timestamp, and how the result was produced. The risk score carries provenance showing it came from BSI's configured rules — not from LLM reasoning. The Copilot cites provenance when answering investigator questions. |
 | Is READONLY end to end | appworks_services.py makes read-only AppWorks REST calls only. No agent endpoint writes to AppWorks. Investigation outputs are saved to case fields by analyst action via the BSI UI. |
 | Fails gracefully on unknown tools | If the LLM attempts a tool not in the manifest, Gate 1 returns a structured error. The LLM informs the investigator honestly. No fabrication, no crash. |
-| Is stateless between sessions | CS-4 is a within-session cache. ON-DEMAND endpoints fall back to ai_investigation_data sent in the request body. The same pattern as the Copilot's conversation_history. No AppWorks read required by the agent service to recover between sessions. |
+| Is stateless between sessions | CS-4 is a within-session cache. **Production deployments must configure a TTL on CS-4 (recommended 86 400 s / 24 h when backed by Redis or a DB session table).** ON-DEMAND endpoints fall back to ai_summary sent in the request body on cache miss or expiry. The same pattern as the Copilot's conversation_history. No AppWorks read required by the agent service to recover between sessions. |
 
 ---
 
@@ -1171,72 +1300,50 @@ in-memory cache that does not survive a server restart. The pattern
 that bridges sessions without giving the agent service a write path
 to AppWorks is as follows.
 
-### The AppWorks case fields
+### The four AppWorks case fields
 
-| Field | Written by | Contains | Used by |
-|---|---|---|---|
-| `ai_case_summary` | Analyst (BSI UI save action) | `agent_summary` — natural language narrative | Displayed on case screen when case reopened |
-| `ai_investigation_data` | Analyst (BSI UI save action) | `investigation{}` — structured JSON sections | Sent in request body to /playbook, /report, /copilot |
-| `ai_playbook` | Reviewer (BSI UI save action) | Tailored playbook JSON from /playbook response | Sent in request body to /report |
-| `ai_report_summary` | Director (BSI UI save action) | Final report narrative from /report response | Displayed to director |
-| `reload_ai_summary` | AppWorks workflow rules | Boolean flag — set to true when case is modified | Read by BSI UI only |
-
-Both `ai_case_summary` and `ai_investigation_data` come from the same
-single HTTP response returned by /investigate. The frontend saves both
-in one analyst action. They serve different purposes:
-`ai_case_summary` is for humans. `ai_investigation_data` is for the system.
+| Field | Written by | Contains |
+|---|---|---|
+| `ai_case_summary` | Analyst (BSI UI save action) | Full investigation JSON from /investigate response |
+| `ai_playbook` | Reviewer (BSI UI save action) | Tailored playbook JSON from /playbook response |
+| `ai_report_summary` | Director (BSI UI save action) | Final report JSON from /report response |
+| `reload_ai_summary` | AppWorks workflow rules | Boolean flag — set to true when case is modified |
 
 ### The write path — analyst action only
 
 ```
-/investigate completes → HTTP 200 → frontend receives:
-  { agent_summary: "...",  ← natural language
-    investigation: {...},  ← structured JSON
-    provenance_trail: [...] }
+/investigate completes → HTTP 200 → frontend renders case summary panel
 │
-└── Frontend renders agent_summary on case summary panel
-      Analyst reads and reviews
-
+└── Analyst reviews output on screen
       If satisfied: clicks "Save AI Summary" in BSI UI
-        → AppWorks native save action (one action, two fields)
-        → ai_case_summary      = response.agent_summary
-        → ai_investigation_data = response.investigation
+        → AppWorks native save action
+        → ai_case_summary field = JSON from investigation response
         → AppWorks audit trail records: Analyst X saved at timestamp Y
         → Agent service is not involved
 ```
 
 No agent endpoint writes to AppWorks. Every field write is a named
-analyst action in the AppWorks audit trail.
+analyst action in the AppWorks audit trail. This is a stronger audit
+record than automatic write-back — it attributes the save to a specific
+person at a specific time.
 
 ### The read path — frontend owns context between sessions
 
 ```
 Analyst opens case next day — new server session, CS-4 empty
 │
-└── BSI UI reads both AppWorks fields:
-      ai_case_summary      → renders on case summary panel (human readable)
-      ai_investigation_data → held in memory, sent in request bodies
-
+└── BSI UI reads ai_case_summary from AppWorks case record
+      Renders case summary panel from stored field value
       When analyst clicks "Load Playbook":
-        POST /playbook {
-          case_id: "BSI-2024-00421",
-          ai_investigation_data: <field value>
-        }
-        webhook.py reads request.ai_investigation_data → populates CS-4
+        POST /playbook { case_id, ai_summary: <field value> }
+        webhook.py reads request.ai_summary → populates CS-4
         Agent loop proceeds normally
-
-      When investigator asks Copilot question:
-        POST /copilot {
-          case_id: "BSI-2024-00421",
-          question: "...",
-          ai_investigation_data: <field value>,
-          conversation_history: [...]
-        }
 ```
 
-The frontend is responsible for reading both AppWorks fields and sending
-the right one to each endpoint. The server receives what it needs in the
-request body. It never reads AppWorks to recover context.
+The frontend is responsible for reading AppWorks case fields and
+sending them in request bodies. This is exactly the same pattern
+as the Copilot owning conversation_history. The server receives
+context it needs in the request. It never reads AppWorks to recover it.
 
 ### The staleness flag — BSI workflow concern only
 
