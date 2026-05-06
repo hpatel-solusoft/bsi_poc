@@ -267,6 +267,8 @@ def build_case_header_data(case_id: str) -> dict:
         },
         "allegations": allegations_list,
         "subjects":    subjects_list,
+        "subject_primary_id": next((s["subject_id"] for s in subjects_list if s.get("is_primary_subject")), None),
+        "fraud_types": list(set(a["allegation_type"]["description"] for a in allegations_list if a.get("allegation_type"))),
     }
 
     logger.info(

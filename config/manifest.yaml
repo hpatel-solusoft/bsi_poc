@@ -72,9 +72,12 @@ tools:
     description: >
       Evaluates active BSI fraud detection rules across 5 dimensions against live case
       and subject data. Returns risk_score (0-1), risk_tier (LOW/MEDIUM/HIGH/CRITICAL),
-      and triggered_rules with per-dimension scores.
-      Requires: case_id, subject_id, fraud_types. The score is computed deterministically
-      by the BSI rules engine — report it as-is.
+      and triggered_rules with per-dimension scores and point breakdowns.
+      Requires: case_id, subject_id, fraud_types.
+      IMPORTANT: Always call get_risk_rules first, then pass its result.rules array here
+      as active_rules — this ensures the scoring engine uses the AppWorks-defined thresholds
+      and breakpoints fetched at runtime, not any fallback defaults.
+      The score is computed deterministically by the BSI rules engine — report it as-is.
     python_function: "appworks_services.calculate_risk_metrics"
     required_params:
       - name: "case_id"
@@ -86,6 +89,40 @@ tools:
       - name: "fraud_types"
         type: "list[string]"
         description: "List of fraud types from verify_case_intake — determines which rule dimensions are evaluated"
+    optional_params:
+      - name: "active_rules"
+        type: "list[dict]"
+        description: "Active rule definitions returned by get_risk_rules (result.rules). Pass this so the scoring engine uses AppWorks-defined thresholds."
+      - name: "prior_case_count"
+        type: "integer"
+        description: "Total prior cases from fetch_subject_history output"
+      - name: "primary_in_prior_cases"
+        type: "integer"
+        description: "Number of prior cases where subject was Primary"
+      - name: "total_calculated"
+        type: "number"
+        description: "Total calculated exposure from financial context"
+      - name: "total_ordered"
+        type: "number"
+        description: "Total ordered exposure from financial context"
+      - name: "similar_case_volume"
+        type: "integer"
+        description: "Total similar cases found by search_similar_cases"
+      - name: "distinct_types"
+        type: "integer"
+        description: "Count of distinct fraud types in current case"
+      - name: "has_open_allegation"
+        type: "boolean"
+        description: "True if any allegation is still Open"
+      - name: "fast_track"
+        type: "boolean"
+        description: "True if case is flagged as Fast Track"
+      - name: "subject_count"
+        type: "integer"
+        description: "Total number of subjects in case"
+      - name: "received_age"
+        type: "integer"
+        description: "Age of case in days since received"
 
   - name: "get_investigation_playbook"
     section: "investigation_playbook"
