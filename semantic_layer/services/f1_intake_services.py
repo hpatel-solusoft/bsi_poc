@@ -29,9 +29,44 @@ def build_case_header_data(case_id: str) -> dict:
         """Returns full embedded item list, preserving per-item _links."""
         try:
             res = fetch(href)
-            return res.get("_embedded", {}).get(embedded_key, [])
+            if not res:
+                return []
+            
+            # If the response itself is an entity item (has Properties and self link)
+            # then it's likely a to-one relationship.
+            props = res.get("Properties")
+            links = res.get("_links", {})
+            if props is not None and "self" in links:
+                logger.info(f"Detected to-one relationship for {href}")
+                return [res]
+
+            embedded = res.get("_embedded", {})
+            items = embedded.get(embedded_key)
+            
+            if isinstance(items, list):
+                return items
+            if isinstance(items, dict):
+                return [items]
+            
+            # Fallback to _links.item (User guide pattern)
+            if isinstance(links, dict):
+                l_items = links.get("item")
+                if isinstance(l_items, list):
+                    return l_items
+                if isinstance(l_items, dict):
+                    return [l_items]
+            
+            # If still nothing, try any key in _embedded that is a list
+            if isinstance(embedded, dict):
+                for val in embedded.values():
+                    if isinstance(val, list):
+                        return val
+                    if isinstance(val, dict):
+                        return [val]
+
+            return []
         except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch relationship [{href}]: {str(e)}")
+            logger.warning(f"⚠️ fetch_relationship_items failed for {href}: {str(e)}")
             return []
 
     # 1. Fetch Main Workfolder
@@ -232,7 +267,47 @@ def build_case_header_data(case_id: str) -> dict:
             except Exception as e:
                 logger.warning(f"⚠️ Failed processing subject: {str(e)}")
 
-    # 5. Build Clean Result
+    # 5. Fetch Financials
+    logger.info("💰 Fetching financials...")
+    financials_list = []
+    total_calculated = 0.0
+    total_ordered    = 0.0
+
+    financials_rel_href = links.get("relationship:Workfolder_FinancialRelationship", {}).get("href")
+    if financials_rel_href:
+        financial_items = fetch_relationship_items(
+            financials_rel_href, "Workfolder_FinancialRelationship"
+        )
+        logger.info(f"🔍 Found {len(financial_items)} financial record(s)")
+
+        for fin_item in financial_items:
+            try:
+                fin_self_href = fin_item.get("_links", {}).get("self", {}).get("href", "")
+                fin_props, fin_links = fetch_entity(fin_self_href) if fin_self_href else ({}, {})
+
+                # Fraud type link from financial
+                type_href = fin_links.get("relationship:Financial_PrimaryFraudTypeRelationShip", {}).get("href", "")
+                type_props, _ = fetch_entity(type_href) if type_href else ({}, {})
+                fraud_type = type_props.get("Classification_Name")
+
+                calc = float(fin_props.get("Financial_Calculated") or 0.0)
+                ordr = float(fin_props.get("Financial_Ordered") or 0.0)
+                total_calculated += calc
+                total_ordered    += ordr
+
+                financials_list.append({
+                    "calculated":  calc,
+                    "ordered":     ordr,
+                    "comment":     fin_props.get("Financial_Comment"),
+                    "start_date":  fin_props.get("Financial_RequestedStartDate"),
+                    "end_date":    fin_props.get("Financial_RequestedEndDate"),
+                    "date":        fin_props.get("Financial_Date"),
+                    "fraud_type":  fraud_type,
+                })
+            except Exception as e:
+                logger.warning(f"⚠️ Failed processing financial: {str(e)}")
+
+    # 6. Build Clean Result
     clean_result = {
         "case_id": props.get("CASEID", case_id),
         "summary": {
@@ -267,6 +342,11 @@ def build_case_header_data(case_id: str) -> dict:
         },
         "allegations": allegations_list,
         "subjects":    subjects_list,
+        "financials": {
+            "records":          financials_list,
+            "total_calculated": total_calculated,
+            "total_ordered":    total_ordered,
+        },
         "subject_primary_id": next((s["subject_id"] for s in subjects_list if s.get("is_primary_subject")), None),
         "fraud_types": list(set(a["allegation_type"]["description"] for a in allegations_list if a.get("allegation_type"))),
     }

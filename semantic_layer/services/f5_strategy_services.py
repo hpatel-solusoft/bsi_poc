@@ -17,7 +17,7 @@
 
 import logging
 from datetime import datetime, timezone
-from semantic_layer.appworks_auth import fetch
+from semantic_layer.appworks_auth import fetch, fetch_list
 from semantic_layer.semantic_model import InvestigationPlaybook
 
 logger = logging.getLogger(__name__)
@@ -47,10 +47,8 @@ def _resolve_allegation_descriptions(fraud_types: list) -> dict:
     """
     resolved = {}
     try:
-        items = _fetch_embedded(
-            "/entities/AllegationType/lists/AllegationType_All",
-            "AllegationType_All"
-        )
+        res = fetch_list("/entities/AllegationType/lists/AllegationType_All")
+        items = res.get("_embedded", {}).get("AllegationType_All", [])
         for item in items:
             p    = item.get("Properties", {})
             desc = p.get("AllegationType_AllegationTypeDescription") or ""
@@ -78,10 +76,8 @@ def _fetch_commentary_types() -> list:
     types = []
     try:
         # Try the standard list endpoint first
-        items = _fetch_embedded(
-            "/entities/CommentaryType/lists/CommentaryType_All",
-            "CommentaryType_All"
-        )
+        res = fetch_list("/entities/CommentaryType/lists/CommentaryType_All")
+        items = res.get("_embedded", {}).get("CommentaryType_All", [])
         for item in items:
             p = item.get("Properties", {})
             t = p.get("Type") or p.get("CommentaryType_Type") or ""

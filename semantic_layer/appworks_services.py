@@ -47,8 +47,8 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
 
 
 def search_similar_cases(
-    fraud_types: list,
     case_id: str = None,
+    fraud_types: list = None,
     complaint_description: str = None,
 ) -> dict:
     """Dispatched from 'search_similar_cases'"""

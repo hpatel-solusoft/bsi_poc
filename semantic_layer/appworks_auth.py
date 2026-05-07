@@ -122,11 +122,98 @@ def _build_url(endpoint: str) -> str:
         return f"{rest_base}/{clean}"
 
 
-def fetch(endpoint: str, method: str = "GET", payload: Dict = None, _retry: bool = True) -> Dict[str, Any]:
+def _build_list_url(endpoint: str) -> str:
     """
-    High-level fetcher for AppWorks REST entities.
-    Handles URL construction (including cross-namespace), SAMLart injection,
-    and automatic re-authentication.
+    Build the full URL for AppWorks LIST (search/filter) endpoints.
+
+    The AppWorks platform exposes two distinct HTTP services:
+      - entityRestService/api/  — used for items, relationships, childEntities
+      - entityservice/          — used for /lists/ filtered queries
+
+    The API guide confirms list queries use entityservice:
+      http://host:81/home/BSIDev/app/entityservice/OSABSIACM/entities/Allegations/lists/Allegations_All?...
+
+    REST_URL   = http://host:81/home/BSIDev/app/entityRestService/api/OSABSIACM
+    list base  = http://host:81/home/BSIDev/app/entityservice/OSABSIACM
+    """
+    clean = endpoint.lstrip("/")
+
+    rest_base  = REST_URL.rstrip("/")
+    primary_ns = rest_base.rsplit("/", 1)[-1]
+
+    # Derive the app root: http://host:81/home/BSIDev/app
+    # REST_URL structure: <app_root>/entityRestService/api/<ns>
+    # Strip "/entityRestService/api/<ns>" to get app_root
+    app_root = rest_base
+    for suffix in (f"/entityRestService/api/{primary_ns}",
+                   f"/entityRestService/api",
+                   f"/entityRestService"):
+        if app_root.endswith(suffix):
+            app_root = app_root[: -len(suffix)]
+            break
+
+    list_base = f"{app_root}/entityservice/{primary_ns}"
+
+    # endpoint may or may not be prefixed with the namespace
+    endpoint_ns = clean.split("/")[0]
+    if endpoint_ns == primary_ns:
+        path_after_ns = clean[len(primary_ns):].lstrip("/")
+        return f"{list_base}/{path_after_ns}"
+    else:
+        return f"{list_base}/{clean}"
+
+
+def fetch_list(endpoint: str, params: dict = None, _retry: bool = True) -> dict:
+    """
+    Fetch an AppWorks LIST endpoint (entityservice path).
+
+    Use this for any /lists/ query — e.g.:
+        /entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id=114689
+
+    The entityservice base is derived automatically from APPWORKS_URL.
+    Authentication (SAMLart) is injected the same way as fetch().
+    """
+    global _SAML_TOKEN
+
+    if not _SAML_TOKEN:
+        logger.info("[Auth] No AppWorks token available; performing lazy login.")
+        if not perform_login():
+            raise ConnectionError("Unauthorized: AppWorks login failed.")
+
+    url = _build_list_url(endpoint)
+    
+    # Merge SAML token with other parameters
+    q_params = {"SAMLart": _SAML_TOKEN}
+    if params:
+        q_params.update(params)
+        
+    headers = {"SAMLart": _SAML_TOKEN, "Accept": "application/json"}
+    cookies = {"SAMLart": _SAML_TOKEN}
+
+    try:
+        logger.info(f"[REST-LIST] GET {url}")
+        resp = requests.get(url, params=q_params, headers=headers, cookies=cookies, timeout=20)
+
+        if resp.status_code == 401 and _retry:
+            logger.warning("Session expired (401). Retrying authentication...")
+            _SAML_TOKEN = None
+            return fetch_list(endpoint, params=params, _retry=False)
+
+        if resp.status_code == 404:
+            return {}
+
+        resp.raise_for_status()
+        return resp.json()
+
+    except Exception as e:
+        logger.error(f"REST-LIST Request Failed [{endpoint}]: {str(e)}")
+        raise ConnectionError(f"AppWorks List API Error: {str(e)}")
+
+
+def fetch(endpoint: str, method: str = "GET", params: dict = None, payload: dict = None, _retry: bool = True) -> dict:
+    """
+    General purpose AppWorks REST fetcher.
+    Auto-builds URLs, handles SAML injection, and retries 401s once.
     """
     global _SAML_TOKEN
 
@@ -143,20 +230,27 @@ def fetch(endpoint: str, method: str = "GET", payload: Dict = None, _retry: bool
             "Use /lists/ endpoints for filtering and searching."
         )
 
-    base_path = _build_url(endpoint)
-    sep = "&" if "?" in base_path else "?"
-    url = f"{base_path}{sep}SAMLart={_SAML_TOKEN}"
+    url = _build_url(endpoint)
+    
+    # Merge SAML token with other parameters
+    q_params = {"SAMLart": _SAML_TOKEN}
+    if params:
+        q_params.update(params)
 
-    headers = {"SAMLart": _SAML_TOKEN, "Accept": "application/json"}
+    headers = {
+        "SAMLart": _SAML_TOKEN,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
 
     try:
         logger.info(f"[REST] {method} {url}")
-        resp = requests.request(method, url, json=payload, headers=headers, timeout=20)
+        resp = requests.request(method, url, params=q_params, headers=headers, json=payload, timeout=20)
 
         if resp.status_code == 401 and _retry:
             logger.warning("Session expired (401). Retrying authentication...")
             _SAML_TOKEN = None
-            return fetch(endpoint, method, payload, _retry=False)
+            return fetch(endpoint, method, params=params, payload=payload, _retry=False)
 
         if resp.status_code == 404:
             return {}
