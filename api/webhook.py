@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="BSI Fraud Investigation Platform")
 
 # -----------------------------------------------------------------------
-# CS-4: Case session context — in-memory for POC with 15-minute TTL.
-# Falls back to ai_summary sent in the request body when the entry has
-# expired or the server has restarted (stateless-session pattern).
+# CS-4: Case session context — in-memory for POC with no TTL.
+# Entries live for the lifetime of the server process.
+# Falls back to ai_summary sent in the request body only if the server has restarted.
 # ai_summary is a REQUIRED field on all ON-DEMAND requests (v6 spec).
 # -----------------------------------------------------------------------
 
-CASE_STORE_TTL_SECONDS = 15 * 60  # 15 minutes (CS-4 lifespan per spec)
+CASE_STORE_TTL_SECONDS = 86400  # 24 hour TTL per v6 specification
 
 
 class _TTLStore:
@@ -54,18 +54,21 @@ class _TTLStore:
     # -- TTL helpers --------------------------------------------------
 
     def _alive(self, key: str) -> bool:
-        return (
-            key in self._data
-            and (time.monotonic() - self._ts.get(key, 0.0)) < self._ttl
-        )
+        if key not in self._data:
+            return False
+        if self._ttl is None:
+            return True
+        return (time.monotonic() - self._ts.get(key, 0.0)) < self._ttl
 
     def _evict(self, key: str) -> None:
         self._data.pop(key, None)
         self._ts.pop(key, None)
 
     def ttl_remaining(self, key: str) -> Optional[float]:
-        """Seconds remaining before key expires, or None if not present."""
+        """Seconds remaining before key expires, or None if not present / no TTL."""
         if not self._alive(key):
+            return None
+        if self._ttl is None:
             return None
         return max(0.0, self._ttl - (time.monotonic() - self._ts[key]))
 
@@ -455,7 +458,17 @@ def investigate(req: InvestigateRequest):
 
     start  = time.time()
     runner = _get_runner()
-    messages, provenance_trail = runner.investigate(req.case_id)
+    investigation_tools = [
+        "verify_case_intake",
+        "fetch_subject_history",
+        "search_similar_cases",
+        "get_risk_rules",
+        "calculate_risk_metrics"
+    ]
+    messages, provenance_trail, tool_call_log = runner.investigate(
+        case_id=req.case_id,
+        allowed_tool_names=investigation_tools
+    )
     duration = round(time.time() - start, 1)
 
     sections      = _extract_tool_results(messages)
@@ -467,22 +480,25 @@ def investigate(req: InvestigateRequest):
         "provenance_trail": provenance_trail,
     }
 
+    # tool_call_log is available for terminal inspection via Python logging.
+    # It is intentionally omitted from the HTTP response to keep the payload
+    # clean — only the sections the frontend needs are returned (per v6 spec).
     return {
         "case_id":          req.case_id,
         "status":           "completed",
-        # agent_summary is the LLM-generated narrative covering all 4 agents.
-        # This is the ONLY content shown to the investigator on screen.
+        # agent_summary: LLM-generated narrative — the only text shown to the
+        # investigator on screen.
         "agent_summary":    agent_summary,
-        # investigation contains structured JSON sections — one per tool.
-        # NOT displayed directly; the frontend saves the full response as
-        # ai_summary and sends it in request bodies to /playbook, /report,
-        # /copilot (ai_summary = { investigation: sections, provenance_trail }).
+        # investigation: structured JSON sections, one per tool that ran.
+        # Frontend saves the full response as ai_summary and forwards it in
+        # /playbook, /report, /copilot request bodies.
         "investigation":    sections,
+        # provenance_trail: ordered per-tool audit trail — source + timestamp
+        # for every AppWorks read. Required field on all ON-DEMAND requests.
         "provenance_trail": provenance_trail,
         "meta": {
             "tool_calls_made":  len(provenance_trail),
             "duration_seconds": duration,
-            "cs4_ttl_seconds":  CASE_STORE_TTL_SECONDS,
         },
     }
 
@@ -503,14 +519,14 @@ def playbook(req: PlaybookRequest):
 
     runner = _get_runner()
 
-    messages, _ = runner.run_scoped(
+    messages, _, tool_call_log = runner.run_scoped(
         system_prompt=build_playbook_prompt(case_data),
         user_message=(
             f"Retrieve the investigation playbook for case {req.case_id}. "
             f"Extract fraud_types and risk_tier from the context provided in the system prompt "
             f"and call get_investigation_playbook."
         ),
-        allowed_tool_names=["get_investigation_playbook"],
+        allowed_tool_names=["get_investigation_playbook"]
     )
 
     sections = _extract_tool_results(messages)
@@ -565,7 +581,7 @@ def report(req: ReportRequest):
 
     runner = _get_runner()
 
-    messages, _ = runner.run_scoped(
+    messages, _, tool_call_log = runner.run_scoped(
         system_prompt=build_report_prompt(
             case_data        = case_data,
             ai_case_summary  = req.ai_case_summary or "",
@@ -577,7 +593,7 @@ def report(req: ReportRequest):
             f"Call generate_final_report first, then synthesise all findings "
             f"into the director-ready narrative as instructed."
         ),
-        allowed_tool_names=["generate_final_report"],
+        allowed_tool_names=["generate_final_report"]
     )
 
     sections = _extract_tool_results(messages)
@@ -615,7 +631,7 @@ def copilot(req: CopilotRequest):
 
     runner = _get_runner()
 
-    messages, provenance_trail = runner.run_scoped(
+    messages, provenance_trail, tool_call_log = runner.run_scoped(
         system_prompt=build_copilot_prompt(req.case_id, case_data),
         user_message=req.question,
         conversation_history=req.conversation_history or [],

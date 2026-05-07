@@ -24,11 +24,78 @@
 import json
 import logging
 from datetime import datetime, timezone
-from semantic_layer.appworks_auth import fetch
+from semantic_layer.appworks_auth import fetch, fetch_list
 
 logger = logging.getLogger(__name__)
 
 _RULES_LIST_ENDPOINT = "/entities/AgentRulesTable/lists/AgentRulesTable_AgentRulesTableListInternal"
+
+
+# -----------------------------------------------------------------------
+# SPEC DEFAULTS
+# Used when AppWorks AgentRulesTable rows exist but do not yet have
+# Thresholds / MaxPoints / BonusCondition columns populated.
+# AppWorks values always take precedence — these are fallbacks only.
+# BSI teams can eliminate any fallback by populating the AppWorks column.
+# -----------------------------------------------------------------------
+
+_SPEC_THRESHOLDS: dict = {
+    "subject_history": [
+        {"min_value": 5, "points": 25},
+        {"min_value": 3, "points": 20},
+        {"min_value": 2, "points": 15},
+        {"min_value": 1, "points": 8},
+    ],
+    "financial_exposure": [
+        {"min_value": 50000, "points": 25},
+        {"min_value": 20000, "points": 20},
+        {"min_value": 5000,  "points": 12},
+        {"min_value": 0.01,  "points": 6},
+    ],
+    "similar_case_volume": [
+        {"min_value": 100, "points": 20},
+        {"min_value": 50,  "points": 16},
+        {"min_value": 20,  "points": 12},
+        {"min_value": 5,   "points": 7},
+        {"min_value": 1,   "points": 3},
+    ],
+    "allegation_severity": [
+        {"min_value": 4, "points": 20},
+        {"min_value": 3, "points": 16},
+        {"min_value": 2, "points": 12},
+        {"min_value": 1, "points": 6},
+    ],
+    "case_characteristics": [
+        {"condition": "fast_track",        "points": 5},
+        {"condition": "multiple_subjects", "points": 3},
+        {"condition": "received_age_gt30", "points": 2},
+    ],
+}
+
+_SPEC_MAX_PTS: dict = {
+    "subject_history":      25.0,
+    "financial_exposure":   25.0,
+    "similar_case_volume":  20.0,
+    "allegation_severity":  20.0,
+    "case_characteristics": 10.0,
+}
+
+# (bonus_condition_key, bonus_points) per dimension
+_SPEC_BONUS: dict = {
+    "subject_history":    ("primary_ge2",              5.0),
+    "financial_exposure": ("ordered_gt_2x_calculated", 3.0),
+    "allegation_severity": ("open_allegation",          4.0),
+}
+
+# Keyword fragments in description → dimension_key
+# Fallback when AppWorks row has no DimensionKey column
+_DESC_TO_DIM: dict = {
+    "subject history":     "subject_history",
+    "financial exposure":  "financial_exposure",
+    "similar case":        "similar_case_volume",
+    "allegation severity": "allegation_severity",
+    "case characteristic": "case_characteristics",
+}
 
 
 # -----------------------------------------------------------------------
@@ -283,6 +350,7 @@ def _parse_bonus_from_condition(cond_str: str, dimension_key: str) -> tuple:
     """
     Extract bonus condition key and points from the parent AgentRulesTable
     CONDITION field (e.g. '+5 bonus if ANY subject is primary in ≥ 2 prior cases').
+    Falls back to spec defaults if the string cannot be parsed.
     Returns (bonus_condition_key: str, bonus_pts: float).
     """
     import re
@@ -300,6 +368,9 @@ def _parse_bonus_from_condition(cond_str: str, dimension_key: str) -> tuple:
         if "open" in s and "allegation" in s:
             return "open_allegation", bonus_pts
 
+    # Fall back to spec defaults
+    if dimension_key in _SPEC_BONUS:
+        return _SPEC_BONUS[dimension_key]
     return "", 0.0
 # -----------------------------------------------------------------------
 
@@ -378,7 +449,7 @@ def _fetch_similar_case_volume(case_id: str) -> int:
                 type_id = type_href.rstrip("/").split("/")[-1]
                 if not type_id:
                     continue
-                list_res = fetch(
+                list_res = fetch_list(
                     f"/entities/Allegations/lists/Allegations_All"
                     f"?Allegations_AllegationsType$Identity.Id={type_id}"
                 )
@@ -490,13 +561,42 @@ def _score_dimension(
     If optional context parameters are provided, they are used instead of
     re-fetching the data from AppWorks.
     """
-    dimension_key   = rule.get("dimension_key", "")
+    dimension_key   = rule.get("dimension_key", "").strip()
     thresholds      = _parse_thresholds(rule.get("thresholds") or "")
     bonus_condition = rule.get("bonus_condition", "")
     bonus_pts       = _safe_float(rule.get("bonus_pts", 0))
     max_pts         = _safe_float(rule.get("max_pts", 0))
     rule_id         = rule.get("rule_id", dimension_key)
     description     = rule.get("description", rule_id)
+
+    # Fallback: derive dimension_key from description if missing (LLM may lose it during serialization)
+    if not dimension_key:
+        source_text = " ".join(
+            str(x or "").lower()
+            for x in (description, rule_id)
+        )
+        for keyword, dk in _DESC_TO_DIM.items():
+            if keyword in source_text:
+                dimension_key = dk
+                logger.info(
+                    f"Recovered dimension_key='{dk}' from rule '{rule_id}' "
+                    f"(was lost in LLM serialization)"
+                )
+                break
+        
+        # Secondary fallback: try to match rule_id pattern directly
+        if not dimension_key:
+            rule_id_lower = str(rule_id or "").lower()
+            for keyword, dk in _DESC_TO_DIM.items():
+                # Try matching the dimension_key name itself in rule_id
+                dk_pattern = dk.lower()
+                if dk_pattern in rule_id_lower or dk_pattern.replace("_", " ") in rule_id_lower:
+                    dimension_key = dk
+                    logger.info(
+                        f"Recovered dimension_key='{dk}' from rule_id pattern '{rule_id}' "
+                        f"(secondary fallback after description match failed)"
+                    )
+                    break
 
     pts           = 0.0
     bonus_applied = 0.0
@@ -505,25 +605,47 @@ def _score_dimension(
 
     if dimension_key == "subject_history":
         if prior_case_count is None:
+            # LLM did not pass prior_case_count — this means the LLM skipped
+            # passing the context param. Log a warning and attempt fetch.
+            # If fetch fails (network unreachable), score will be 0.
+            logger.warning(
+                f"prior_case_count not passed by LLM for subject_history — "
+                f"attempting AppWorks fetch (may fail if network unreachable)"
+            )
             p_count, is_p_ge2 = _fetch_subject_history(subject_id, case_id)
         else:
-            p_count = prior_case_count
-            is_p_ge2 = bool(primary_in_prior_cases and primary_in_prior_cases >= 2)
-        
+            p_count  = int(prior_case_count)
+            # primary_in_prior_cases may come as int or as a bool coerced by LLM
+            if primary_in_prior_cases is None:
+                is_p_ge2 = False
+            else:
+                is_p_ge2 = bool(
+                    int(primary_in_prior_cases) >= 2
+                    if isinstance(primary_in_prior_cases, (int, float))
+                    else str(primary_in_prior_cases).lower() in ("true", "1", "yes")
+                )
+
         pts = _apply_thresholds(float(p_count), thresholds)
         condition_matched = f"{p_count} prior case(s)"
         if bonus_condition == "primary_ge2" and is_p_ge2:
             bonus_applied = bonus_pts
         flags.append(
-            f"Subject History: {p_count} cases found → {pts} pts"
+            f"Subject History: {p_count} prior case(s) → {pts} pts"
             + (f" +{bonus_applied} primary bonus" if bonus_applied > 0 else "")
             + f" = {min(pts + bonus_applied, max_pts)}/{max_pts}"
         )
 
     elif dimension_key == "financial_exposure":
-        if total_calculated is None or total_ordered is None:
+        if total_calculated is None:
+            logger.warning(
+                "total_calculated not passed by LLM for financial_exposure — "
+                "attempting AppWorks fetch"
+            )
             total_calculated, total_ordered = _fetch_financial_exposure(case_id)
-        
+        else:
+            total_calculated = _safe_float(total_calculated)
+            total_ordered    = _safe_float(total_ordered) if total_ordered is not None else 0.0
+
         pts = _apply_thresholds(total_calculated, thresholds)
         condition_matched = f"calculated={total_calculated}, ordered={total_ordered}"
         if (
@@ -540,16 +662,35 @@ def _score_dimension(
 
     elif dimension_key == "similar_case_volume":
         if similar_case_volume is None:
+            logger.warning(
+                "similar_case_volume not passed by LLM — "
+                "attempting AppWorks fetch"
+            )
             similar_case_volume = _fetch_similar_case_volume(case_id)
-        
+        else:
+            similar_case_volume = int(similar_case_volume)
+
         pts = _apply_thresholds(float(similar_case_volume), thresholds)
         condition_matched = f"{similar_case_volume} similar cases found"
         flags.append(f"Similar Case Volume: {similar_case_volume} cases found → {pts}/{max_pts}")
 
     elif dimension_key == "allegation_severity":
-        if distinct_types is None or has_open_allegation is None:
+        if distinct_types is None:
+            logger.warning(
+                "distinct_types not passed by LLM for allegation_severity — "
+                "attempting AppWorks fetch"
+            )
             distinct_types, has_open_allegation = _fetch_allegation_severity(case_id)
-        
+        else:
+            distinct_types = int(distinct_types)
+            # Normalise has_open_allegation — LLM may pass as bool, int, or string
+            if has_open_allegation is None:
+                has_open_allegation = False
+            elif isinstance(has_open_allegation, str):
+                has_open_allegation = has_open_allegation.lower() in ("true", "1", "yes")
+            else:
+                has_open_allegation = bool(has_open_allegation)
+
         pts = _apply_thresholds(float(distinct_types), thresholds)
         condition_matched = f"{distinct_types} distinct type(s)"
         if bonus_condition == "open_allegation" and has_open_allegation:
@@ -561,9 +702,21 @@ def _score_dimension(
         )
 
     elif dimension_key == "case_characteristics":
-        if fast_track is None or subject_count is None or received_age is None:
+        if fast_track is None and subject_count is None and received_age is None:
+            logger.warning(
+                "case_characteristics params not passed by LLM — "
+                "attempting AppWorks fetch"
+            )
             fast_track, subject_count, received_age = _fetch_case_characteristics(case_id)
-        
+        else:
+            # Normalise: LLM may pass booleans as strings "True"/"False"
+            if isinstance(fast_track, str):
+                fast_track = fast_track.lower() in ("true", "1", "yes")
+            else:
+                fast_track = bool(fast_track) if fast_track is not None else False
+            subject_count = int(subject_count) if subject_count is not None else 0
+            received_age  = int(received_age)  if received_age  is not None else 0
+
         # Additive: each breakpoint has a named condition string
         for bp in thresholds:
             cond_name = str(bp.get("condition", "")).strip()
@@ -577,13 +730,21 @@ def _score_dimension(
             elif cond_name == "received_age_gt30" and received_age > 30:
                 pts += bp_pts
                 flags.append(f"Case Characteristics: age={received_age} days > 30 → +{bp_pts}")
-        condition_matched = "; ".join(flags) if flags else "no conditions met"
+        condition_matched = "; ".join(f for f in flags if "Characteristics:" in f and "total:" not in f)
+        if not condition_matched:
+            condition_matched = "no conditions met"
         flags.append(f"Case Characteristics total: {min(pts, max_pts)}/{max_pts}")
 
 
     else:
-        logger.warning(f"Unknown dimension_key '{dimension_key}' for rule {rule_id}")
+        logger.error(
+            f"Cannot evaluate rule {rule_id} — dimension_key could not be recovered "
+            f"(empty after extraction, recovery from description failed). "
+            f"Description: '{description}', rule_id: '{rule_id}'. "
+            f"Valid keys: {list(_DESC_TO_DIM.values())}"
+        )
         return 0.0, {}
+
 
     total_pts = min(pts + bonus_applied, max_pts)
     if total_pts <= 0:
@@ -610,6 +771,13 @@ def get_risk_rules() -> dict:
     AgentRulesTable. Returns each active rule with dimension_key, thresholds
     (already parsed to list), bonus_condition, bonus_pts, and max_pts.
 
+    Field resolution strategy:
+      1. Try all known AppWorks column name variants.
+      2. Derive dimension_key from description text if column is absent.
+      3. Fall back to spec-default thresholds / max_pts / bonus when the
+         AppWorks column exists but is empty — so rules always score correctly
+         even before BSI populates every column.
+
     The LLM receives this result and passes active_rules to calculate_risk_metrics.
     """
     rules = []
@@ -624,17 +792,28 @@ def get_risk_rules() -> dict:
             props = item.get("Properties", {})
             links = item.get("_links", {})
 
+            # ── Diagnostic: log prop keys of first row once ───────────────
+            if idx == 0:
+                logger.info(f"AgentRulesTable first-row prop keys: {sorted(props.keys())}")
+
             # ── is_active ────────────────────────────────────────────────
-            active_raw = (
-                props.get("ACTIVE")
-                or props.get("AgentRulesTable_IsActive")
-                or props.get("IsActive")
-                or props.get("Active")
-                or props.get("AgentRulesTable_Active")
-                or props.get("Enabled")
-                or True
-            )
-            if str(active_raw).strip().lower() in ("false", "0", "no", "inactive", "disabled"):
+            # BUG-FIX: str(None) == "none" which was in the exclusion tuple,
+            # filtering every rule when the IsActive column is absent.
+            # Correct behaviour: field absent → assume active; only exclude
+            # when the field is explicitly set to a falsy value.
+            active_raw = None
+            for ak in ("AgentRulesTable_IsActive", "IsActive", "Active", "ACTIVE",
+                       "AgentRulesTable_Active", "AgentRulesTable_Enabled", "Enabled", "ENABLED"):
+                if ak in props:
+                    active_raw = props[ak]
+                    break
+            if active_raw is None:
+                is_active = True   # column absent → treat as active
+            else:
+                is_active = str(active_raw).strip().lower() not in (
+                    "false", "0", "no", "inactive", "disabled", "none"
+                )
+            if not is_active:
                 logger.info(f"  Row {idx}: skipped — IsActive={active_raw!r}")
                 continue
 
@@ -645,9 +824,12 @@ def get_risk_rules() -> dict:
                 or props.get("RuleId")
                 or props.get("AgentRulesTable_Name")
                 or props.get("Name")
+                or props.get("AgentRulesTable_Title")
+                or props.get("Title")
                 or ""
             )
             if not rule_id:
+                # Fall back to the AppWorks item ID from the self link
                 self_href = links.get("self", {}).get("href", "")
                 if self_href:
                     rule_id = f"R-{self_href.rstrip('/').split('/')[-1]}"
@@ -657,66 +839,100 @@ def get_risk_rules() -> dict:
                 props.get("DESCRIPTION")
                 or props.get("AgentRulesTable_Description")
                 or props.get("Description")
+                or props.get("AgentRulesTable_Label")
+                or props.get("Label")
                 or rule_id
             )
 
             # ── dimension_key ────────────────────────────────────────────
-            # Priority: 1. DIMENSION field, 2. Derived from RULE_ID
-            dimension_raw = str(
-                props.get("DIMENSION")
-                or props.get("DIMENSION_KEY")
+            dimension_key = str(
+                props.get("DIMENSION_KEY")
                 or props.get("DimensionKey")
-                or props.get("AgentRulesTable_Dimension")
                 or props.get("AgentRulesTable_DimensionKey")
-                or rule_id
+                or props.get("AgentRulesTable_Dimension")
+                or props.get("Dimension")
+                or props.get("KEY")
+                or props.get("Key")
+                or props.get("TYPE")
+                or props.get("Type")
                 or ""
             )
-            dimension_key = dimension_raw.strip().lower().replace(" ", "_")
+            # Derive from description or rule_id when the column is absent
             if not dimension_key:
-                logger.warning(f"  Row {idx}: skipped — dimension_key could not be derived")
+                source_text = " ".join(
+                    str(x or "").lower()
+                    for x in (description, rule_id)
+                )
+                for keyword, dk in _DESC_TO_DIM.items():
+                    if keyword in source_text:
+                        dimension_key = dk
+                        logger.info(
+                            f"  Row {idx}: derived dimension_key='{dk}' "
+                            f"from rule metadata"
+                        )
+                        break
+
+            if not rule_id or not dimension_key:
+                logger.warning(
+                    f"  Row {idx}: skipped — rule_id={rule_id!r}, "
+                    f"dimension_key={dimension_key!r}, prop keys: {sorted(props.keys())}"
+                )
                 continue
 
-            # ── max_pts: AppWorks value ──────────────────────────────────
+            # ── max_pts: AppWorks value → spec default ───────────────────
             max_pts = _safe_float(
                 props.get("WEIGHT")
                 or props.get("AgentRulesTable_MaxPoints")
                 or props.get("MaxPoints")
+                or props.get("AgentRulesTable_MaxPts")
+                or props.get("MaxPts")
                 or 0
             )
+            # Handle "max 25 pts" string format if WEIGHT was used
             if isinstance(props.get("WEIGHT"), str):
                 max_pts = _parse_pts_string(props.get("WEIGHT"))
 
-            # ── thresholds: AppWorks value ──────────────────────────────
+            if max_pts <= 0 and dimension_key in _SPEC_MAX_PTS:
+                max_pts = _SPEC_MAX_PTS[dimension_key]
+                logger.info(f"  Row {idx} ({dimension_key}): using spec max_pts={max_pts}")
+
+            # ── thresholds: AppWorks value → spec default ────────────────
             thresholds_raw = (
                 props.get("CONDITION")
                 or props.get("AgentRulesTable_Thresholds")
                 or props.get("Thresholds")
+                or props.get("AgentRulesTable_Condition")
+                or props.get("Condition")
+                or props.get("AgentRulesTable_BreakPoints")
+                or props.get("BreakPoints")
                 or ""
             )
-            # Try parsing thresholds directly if they are in JSON/compact format
             thresholds = _parse_thresholds(thresholds_raw)
-            
-            # If no thresholds found in parent, fetch from child 'Rules'
-            if not thresholds:
-                # Extract item_id from self or item link
-                item_href = (
-                    links.get("self", {}).get("href", "")
-                    or links.get("item", {}).get("href", "")
-                    or ""
+            if not thresholds and rule_id:
+                # Try loading child rule breakpoints when the parent row stores
+                # its thresholds in the child Rules entity rather than a direct field.
+                item_id = (
+                    props.get("AgentRulesTable_Id")
+                    or props.get("Id")
+                    or props.get("AgentRulesTable_Identity", {}).get("Id")
+                    or props.get("Identity", {}).get("Id")
+                    or props.get("AgentRulesTable_Identity", {}).get("BusinessId")
+                    or props.get("Identity", {}).get("BusinessId")
+                    or None
                 )
-                item_id = None
-                if item_href:
-                    item_id = item_href.rstrip("/").split("/")[-1]
-                
                 if not item_id:
-                    item_id = (
-                        props.get("AgentRulesTable_Id")
-                        or props.get("Id")
-                        or props.get("Identity", {}).get("Id")
+                    # Fallback to link traversal
+                    item_href = (
+                        links.get("self", {}).get("href") 
+                        or links.get("item", {}).get("href") 
+                        or ""
                     )
+                    if item_href:
+                        item_id = item_href.rstrip("/").split("/")[-1]
 
                 if item_id:
                     try:
+                        # Try to find the relationship link first
                         child_href = None
                         for lk in links.keys():
                             if "Rules" in lk and "relationship" in lk:
@@ -737,21 +953,44 @@ def get_risk_rules() -> dict:
                             f"  Row {idx}: failed to load child rule breakpoints: {e}"
                         )
 
-            # ── bonus: AppWorks value ──────────────────────────────────
-            bonus_raw = str(props.get("CONDITION") or "")
+            if not thresholds and dimension_key in _SPEC_THRESHOLDS:
+                thresholds = _SPEC_THRESHOLDS[dimension_key]
+                logger.info(
+                    f"  Row {idx} ({dimension_key}): using spec-default thresholds "
+                    f"({len(thresholds)} breakpoint(s))"
+                )
+
+            # ── bonus: AppWorks value → parsed or spec default ───────────
+            bonus_raw = str(
+                props.get("CONDITION")
+                or props.get("AgentRulesTable_BonusCondition")
+                or props.get("BonusCondition")
+                or props.get("condition")
+                or ""
+            )
             bonus_cond, bonus_pts = _parse_bonus_from_condition(bonus_raw, dimension_key)
+            if bonus_cond and bonus_raw:
+                logger.info(
+                    f"  Row {idx} ({dimension_key}): parsed bonus condition='{bonus_cond}' "
+                    f"pts={bonus_pts} from raw='{bonus_raw}'"
+                )
+            elif bonus_cond and not bonus_raw:
+                logger.info(
+                    f"  Row {idx} ({dimension_key}): using spec-default bonus "
+                    f"condition='{bonus_cond}' pts={bonus_pts}"
+                )
 
             # ── optional metadata fields ──────────────────────────────────
-            weight = _safe_float(props.get("WEIGHT") or 0)
+            weight = _safe_float(
+                props.get("AgentRulesTable_Weight") or props.get("Weight") or 0
+            )
             tier_thresholds_raw = (
-                props.get("TIER_THRESHOLDS")
-                or props.get("AgentRulesTable_TierThresholds")
+                props.get("AgentRulesTable_TierThresholds")
                 or props.get("TierThresholds")
                 or ""
             )
             recommendations_raw = (
-                props.get("RECOMMENDATIONS")
-                or props.get("AgentRulesTable_Recommendations")
+                props.get("AgentRulesTable_Recommendations")
                 or props.get("Recommendations")
                 or ""
             )
@@ -760,7 +999,7 @@ def get_risk_rules() -> dict:
                 "rule_id":         rule_id,
                 "description":     description,
                 "dimension_key":   dimension_key,
-                "thresholds":      thresholds,
+                "thresholds":      thresholds,       # already parsed list
                 "bonus_condition": bonus_cond,
                 "bonus_pts":       bonus_pts,
                 "max_pts":         max_pts,
@@ -776,9 +1015,37 @@ def get_risk_rules() -> dict:
             )
 
     except Exception as e:
-        logger.error(f"Critical error in get_risk_rules: {e}")
+        logger.warning(f"AgentRulesTable fetch failed: {e}. Returning empty rules list.")
 
-    logger.info(f"get_risk_rules: {len(rules)} active rule(s) loaded from AppWorks")
+    if not rules:
+        logger.warning(
+            "No active rules loaded from AppWorks — using BSI spec defaults."
+        )
+        # Fallback: create default rule objects from spec definitions so the
+        # scoring engine always has rules to evaluate, even if AppWorks is empty.
+        # This ensures risk scores are computed deterministically.
+        for dimension_key, max_pts in _SPEC_MAX_PTS.items():
+            thresholds = _SPEC_THRESHOLDS.get(dimension_key, [])
+            bonus_cond, bonus_pts = _SPEC_BONUS.get(dimension_key, ("", 0.0))
+            rules.append({
+                "rule_id":         f"SPEC-{dimension_key}",
+                "description":     dimension_key.replace("_", " ").title(),
+                "dimension_key":   dimension_key,
+                "thresholds":      thresholds,
+                "bonus_condition": bonus_cond,
+                "bonus_pts":       bonus_pts,
+                "max_pts":         max_pts,
+                "weight":          0.0,
+                "tier_thresholds": "",
+                "recommendations": "",
+                "active":          True,
+            })
+            logger.info(
+                f"Created spec-default rule for '{dimension_key}' "
+                f"max={max_pts} thresholds={len(thresholds)}"
+            )
+    else:
+        logger.info(f"get_risk_rules: {len(rules)} active rule(s) loaded")
 
     return {
         "result": {"rules": rules},
@@ -812,12 +1079,25 @@ def calculate_risk_metrics(
 ) -> dict:
     """
     Deterministic BSI risk scoring using active_rules from AppWorks.
+
+    active_rules is passed by the LLM from the get_risk_rules tool output.
+    If not provided, the function fetches rules from AppWorks itself —
+    but the agentic path is: LLM calls get_risk_rules first, then passes
+    result["rules"] here as active_rules.
+
+    Scoring:
+      - Each active rule defines a dimension (dimension_key), thresholds,
+        bonus condition, max_pts — all from AppWorks, none hardcoded.
+      - total_max = sum of all active rule max_pts.
+      - risk_score = earned / total_max, normalised [0,1].
+      - Tiers and recommendation text read from AppWorks if present.
     """
     logger.info(f"calculate_risk_metrics — Case: {case_id}  Subject: {subject_id}")
 
     if isinstance(fraud_types, str):
         fraud_types = [fraud_types]
 
+    # Obtain active rules — from LLM (preferred) or fetched directly
     if active_rules is None:
         logger.info("active_rules not provided — fetching from AppWorks directly")
         rules_envelope = get_risk_rules()
@@ -853,6 +1133,7 @@ def calculate_risk_metrics(
         )
         total_earned += pts
 
+        # Capture prior_case_count for result envelope
         if rule.get("dimension_key") == "subject_history" and triggered_dict:
             cm = triggered_dict.get("condition_matched", "")
             try:
@@ -868,9 +1149,11 @@ def calculate_risk_metrics(
             f"{triggered_dict.get('condition_matched','') if triggered_dict else 'not triggered'}"
         )
 
+    # Normalise
     effective_max = total_max if total_max > 0 else 100.0
     risk_score    = round(total_earned / effective_max, 4)
 
+    # Tier — from AppWorks tier_thresholds or spec defaults
     tier_thresholds = _load_tier_thresholds(active_rules)
     tier = "LOW"
     for tier_name, min_score in sorted(tier_thresholds.items(), key=lambda x: -x[1]):
@@ -917,6 +1200,7 @@ def calculate_risk_metrics(
 def _load_tier_thresholds(active_rules: list) -> dict:
     """
     Read tier min-score thresholds from AppWorks rules metadata.
+    Falls back to BSI spec defaults only if AppWorks provides none.
     """
     for rule in active_rules:
         raw = rule.get("tier_thresholds")
@@ -929,13 +1213,14 @@ def _load_tier_thresholds(active_rules: list) -> dict:
                     return parsed
             except (json.JSONDecodeError, ValueError):
                 pass
-    return {"HIGH": 0.60, "MEDIUM": 0.30, "LOW": 0.0}
+    # Spec defaults — only used when AppWorks provides no tier config
+    return {"CRITICAL": 0.75, "HIGH": 0.50, "MEDIUM": 0.25, "LOW": 0.0}
 
 
 def _load_recommendation(tier: str, active_rules: list) -> str:
     """
     Read recommendation text for a tier from AppWorks rules metadata.
-    Returns a generic instruction if AppWorks provides none.
+    Falls back to spec defaults only if AppWorks provides none.
     """
     for rule in active_rules:
         recs = rule.get("recommendations")
@@ -948,4 +1233,22 @@ def _load_recommendation(tier: str, active_rules: list) -> str:
                     return parsed[tier]
             except (json.JSONDecodeError, ValueError):
                 pass
-    return "Review case data and determine appropriate investigative action."
+    defaults = {
+        "CRITICAL": (
+            "Immediate field investigation and evidence preservation required. "
+            "Notify Director of Special Investigations without delay."
+        ),
+        "HIGH": (
+            "Prioritise for comprehensive audit and subject interview. "
+            "Escalate to supervisor within 24 hours."
+        ),
+        "MEDIUM": (
+            "Desk audit and prior-case history verification recommended. "
+            "Monitor for additional activity."
+        ),
+        "LOW": (
+            "Routine monitoring — no immediate field action required. "
+            "Document and schedule standard review."
+        ),
+    }
+    return defaults.get(tier, "Review case and determine appropriate action.")

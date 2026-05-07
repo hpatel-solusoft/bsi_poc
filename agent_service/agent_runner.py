@@ -1,77 +1,144 @@
 """
 BSI Agent Runner — LLM agentic loop.
-Responsibilities: message history, turn management, provenance_trail accumulation.
+Responsibilities: message history, turn management, provenance_trail
+accumulation, and structured tool_call_log (per-call trace with
+input/output/elapsed_ms for every dispatcher call).
 Outside its scope: HTTP concerns, section names, UI structure.
 """
 import json
+import logging
 import os
+import time
 from typing import List, Dict, Tuple
 
 from openai import OpenAI
 
+logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------
+# RESULT SUMMARISER — concise one-liner per tool for tool_call_log
+# -----------------------------------------------------------------------
+
+def _extract_rules_from_messages(messages: list) -> list:
+    """
+    Scan message history for get_risk_rules tool result and return rules array.
+    Used to auto-inject active_rules when LLM omits them from calculate_risk_metrics.
+    """
+    rules_call_id = None
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                if tc.get("function", {}).get("name") == "get_risk_rules":
+                    rules_call_id = tc.get("id")
+    if not rules_call_id:
+        return []
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == rules_call_id:
+            try:
+                data = json.loads(msg["content"])
+                return data.get("rules", [])
+            except (json.JSONDecodeError, TypeError):
+                return []
+    return []
+
+
+def _extract_case_id_from_messages(messages: list):
+    """
+    Scan message history for verify_case_intake tool result and return its case_id.
+    Used to auto-inject case_id into search_similar_cases when the LLM omits it.
+    """
+    intake_call_id = None
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                if tc.get("function", {}).get("name") == "verify_case_intake":
+                    intake_call_id = tc.get("id")
+    if not intake_call_id:
+        return None
+    for msg in messages:
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == intake_call_id:
+            try:
+                data = json.loads(msg["content"])
+                return str(data.get("case_id", "")) or None
+            except (json.JSONDecodeError, TypeError):
+                return None
+    return None
+
+
+def _summarise_result(tool_name: str, result: dict) -> str:
+    """Returns a short human-readable summary of a tool result for logging."""
+    try:
+        if tool_name == "verify_case_intake":
+            ci = result
+            complaint_no = ci.get("summary", {}).get("complaint_no") or ci.get("case_id", "?")
+            subjects = ci.get("subjects", [])
+            fraud_types = ci.get("fraud_types", [])
+            return (
+                f"case={complaint_no} subjects={len(subjects)} "
+                f"fraud_types={fraud_types}"
+            )
+        if tool_name == "fetch_subject_history":
+            fn = result.get("first_name", "")
+            ln = result.get("last_name", "")
+            prior = result.get("prior_case_count", "?")
+            return f"subject={fn} {ln} prior_cases={prior}"
+        if tool_name == "search_similar_cases":
+            n = result.get("top_n_returned", 0)
+            q = result.get("query_summary", "")
+            return f"matches={n} — {q}"
+        if tool_name == "get_risk_rules":
+            rules = result.get("rules", [])
+            return f"{len(rules)} active rule(s) loaded"
+        if tool_name == "calculate_risk_metrics":
+            score = result.get("risk_score", "?")
+            tier  = result.get("risk_tier", "?")
+            pts   = result.get("total_points", "?")
+            mx    = result.get("max_points", "?")
+            return f"score={score} tier={tier} pts={pts}/{mx}"
+        if tool_name == "get_investigation_playbook":
+            pid = result.get("playbook_id", "?")
+            steps = len(result.get("investigation_steps", []))
+            return f"playbook={pid} steps={steps}"
+        if tool_name == "generate_final_report":
+            secs = len(result.get("sections", {}))
+            return f"report_sections={secs}"
+    except Exception:
+        pass
+    return json.dumps(result, default=str)[:120]
+
+
 # -----------------------------------------------------------------------
 # SYSTEM PROMPT — /investigate (AUTO flow)
 # The LLM decides which available tools to call based on their input/output contracts.
+# No ordering instructions — Principle 1: the LLM is the router.
 # -----------------------------------------------------------------------
 INVESTIGATE_SYSTEM_PROMPT = """You are the BSI Fraud Investigation AI Agent for the Bureau of Special Investigations, Massachusetts.
 
-You have access to a set of approved tools connected to the AppWorks case management system. Read each tool description carefully — it tells you exactly what data it needs and what it returns.
+You have access to a set of approved tools connected to the AppWorks case management system. Read each tool description carefully — it defines what data it needs as input and what it produces as output. Use those data dependencies to determine which tools to call and in what order.
 
-YOUR TASK: Investigate the submitted case_id by calling the tools that are necessary to gather case intake, subject history, similar case context, active risk rules, and the deterministic risk assessment. Use the available tool descriptions and the manifest to decide which tools to call and in what or=== HOW TO WORK ===
-- Choose tools based on the inputs they require and the outputs they provide.
-- CRITICAL: Use verified values from previous tool results as input to later tool calls. For example, pass prior_case_count from fetch_subject_history, similar_case_volume from search_similar_cases, and rules from get_risk_rules to calculate_risk_metrics. This ensures the deterministic scoring engine uses verified data and avoids inconsistent "zero-scores" caused by redundant fetches.
-- Stop calling tools once you have enough verified information to produce a complete investigator-facing summary.
+GUARDRAILS:
 - Do not fabricate any data. If a tool returns an error, report it honestly.
-- Treat risk_score as a deterministic output from the risk assessment engine and report it exactly as returned.
+- Do not call tools not listed in your tool catalogue.
+- Treat risk_score, risk_tier, and triggered_rules as deterministic outputs produced by the BSI configured rules evaluation engine — report them exactly as returned, never modify or re-interpret them.
+- Stop calling tools once you have gathered all the data needed for the investigation summary.
 
-=== RISK ASSESSMENT — REQUIRED TOOL SEQUENCE ===
-1. Call get_risk_rules first (no parameters). It returns { rules: [...] } — the active AppWorks rule dimensions.
-2. Call calculate_risk_metrics with case_id, subject_id, fraud_types, active_rules (from step 1), AND all applicable context params (prior_case_count, similar_case_volume, etc.) gathered from prior tool calls.
+SUMMARY FORMAT:
+After completing all necessary tool calls, write a comprehensive investigation brief suitable for the Bureau of Special Investigations. This is a formal case document — not a short summary.
 
-=== FINAL SUMMARY ===
-After gathering all data, write the agent_summary using the following structured format exactly as shown. Use bold headers and bullet points as specified.
+Structure:
+- Use bold section headers to organise the brief.
+- Present all data from tool outputs as readable prose and key-value pairs — never output raw JSON.
+- Include every relevant field returned by the tools. Do not omit data to be concise — investigators need the full picture.
+- Write in clear, professional English. Use paragraphs for narrative sections (case background, subject history, risk assessment) and bullet points or key-value pairs for structured data (dates, identifiers, addresses, allegation details).
 
-### Investigation Summary for Case [case_id]
+Risk Assessment:
+- State the risk score, tier, and which BSI fraud detection rules were triggered.
+- Explain on what BASIS each rule triggered (e.g. "the subject has 2 prior substantiated cases", "1 similar case was identified with matching billing patterns") — cite the underlying case data that caused the trigger.
+- Do NOT explain HOW the scoring engine works or show point calculations. The investigator needs to know WHAT drove the risk, not the scoring mechanics.
+- State that the risk score was computed by the BSI configured rules evaluation engine, not by AI inference.
 
-**Case Summary:**
-- **Complaint No:** [value]
-- **Description:** [value]
-- **Case Description:** [value]
-- **Status:** [value]
-- **Destination:** [value]
-- **Team:** [value]
-- **Created:** [value]
-
-**Subject History:**
-- **Primary Subject:** [name]
-- **Aliases:** [aliases]
-- **Prior Case Count:** [count]
-- **Co-Subject:** [name]
-
-**Similar Cases:**
-- Found [n] similar archived cases across [m] fraud types.
-
-**Risk Assessment:**
-- **Risk Score:** [score]
-- **Risk Tier:** [tier]
-- **Rules Triggered:**
-  - [Rule Name 1]: [Brief explanation of trigger]
-  - [Rule Name 2]: [Brief explanation of trigger]
-- **Total points earned:** [points]/100
-- **Recommendation:** [verbatim from tool output]
-
-**Recommended Actions:**
-- [Recommendation verbatim from tool output]
-
-WRITING RULES:
-- REQUIRED: Start the summary with the '### Investigation Summary for Case [case_id]' header.
-- REQUIRED: Use the exact bold headers and bullet point structure shown above.
-- NEGATIVE CONSTRAINT: DO NOT write narrative paragraphs.
-- NEGATIVE CONSTRAINT: DO NOT use "Paragraph 1", "Paragraph 2" etc. headers.
-- Cite actual values from tool outputs — do not invent anything.
-- If a field is null or empty, state "Not recorded in AppWorks".
-- Ensure the Risk Assessment section explicitly states it was computed by the BSI rules engine.
-engine, not by AI inference."""
+Provenance:
+- At the end of the brief, include a "Data Sources" section listing the AppWorks entities and records that were consulted, along with when they were retrieved. Present this in a readable format, not as raw JSON."""
 
 
 # -----------------------------------------------------------------------
@@ -79,28 +146,18 @@ engine, not by AI inference."""
 # -----------------------------------------------------------------------
 
 def build_playbook_prompt(case_data: dict) -> str:
-    return f"""You are the BSI Investigation Agent. Your ONLY task is to call the 'get_investigation_playbook' tool for this case.
+    return f"""You are the BSI Investigation Agent. You have access to the AppWorks tool catalogue.
 
-=== VERIFIED CASE CONTEXT (from prior AppWorks data retrieval) ===
+Here is the verified investigation context for this case:
+
 {json.dumps(case_data, indent=2)}
-=== END CONTEXT ===
 
-INSTRUCTIONS:
-1. Extract fraud_types from the complaint_intelligence section of the context above.
-   fraud_types must be a JSON array of strings — e.g. ["Dependent Not in Home", "EAEDC"].
+Use the tool descriptions to determine which tool to call and with what parameters, based on the data available in the context above. After the tool returns, produce a concise plain-English summary of the playbook for the investigator.
 
-2. Extract risk_tier from the risk_assessment section.
-   risk_tier must be one of: LOW, MEDIUM, HIGH, CRITICAL.
-
-3. Call get_investigation_playbook with these two parameters.
-
-4. After the tool returns, produce a concise plain-English summary of:
-   - The playbook ID and which fraud types it covers
-   - Total number of investigation steps
-   - Key escalation requirements (if any)
-   - Evidence checklist mandatory items
-
-Do NOT call any other tool. Do NOT fabricate steps."""
+GUARDRAILS:
+- Do not call tools not in your catalogue.
+- Do not fabricate investigation steps.
+- Ground every claim in verified tool output or the case context above."""
 
 
 def build_report_prompt(
@@ -109,86 +166,46 @@ def build_report_prompt(
     playbook_data: dict,
     analyst_decision: dict,
 ) -> str:
-    return f"""You are the BSI Investigation Report Agent. Your task is to call the 'generate_final_report' tool and then synthesise all verified findings into a director-ready narrative investigation summary report.
+    return f"""You are the BSI Investigation Report Agent. You have access to the AppWorks tool catalogue.
 
-=== VERIFIED INVESTIGATION DATA ===
+Here is the full verified investigation context for this case:
+
+=== INVESTIGATION DATA ===
 {json.dumps(case_data, indent=2)}
 
-=== AI CASE SUMMARY (from /investigate) ===
+=== AI CASE SUMMARY ===
 {ai_case_summary or "Not provided."}
 
-=== INVESTIGATION PLAYBOOK (from /playbook) ===
+=== INVESTIGATION PLAYBOOK ===
 {json.dumps(playbook_data, indent=2)}
 
 === ANALYST DECISION ===
 {json.dumps(analyst_decision, indent=2)}
-=== END OF INPUT DATA ===
 
-STEP 1 — TOOL CALL:
-Call generate_final_report with these exact parameters extracted from the verified context above:
-- case_id from complaint_intelligence.case_id
-- subject_id from complaint_intelligence.subject_primary_id
-- fraud_types from complaint_intelligence.fraud_types
-- risk_score from risk_assessment.risk_score
-- risk_tier from risk_assessment.risk_tier
-- triggered_rules from risk_assessment.triggered_rules, enriched with matching rule definitions from risk_rules when available
+Use the tool descriptions to determine which tool to call and with what parameters, using the verified values from the context above. After the tool returns, synthesise all findings into a formal, director-ready investigation report.
 
-The tool will return the raw AppWorks case data (Workfolder, subjects, allegations, financials, commentary).
-
-STEP 2 — NARRATIVE SYNTHESIS:
-After the tool returns, write a formal investigation summary report covering these sections IN ORDER:
-
-1. CASE SUMMARY
-   Complaint number, intake date, source, referral number, assigned team, description, and current status — all from tool output.
-
-2. SUBJECT PROFILE
-   Full name, identifier (SSN/EIN), type, role, address history, prior case count and case references — from tool output.
-
-3. ALLEGATIONS & FINANCIAL RECORD
-   All allegation types with status, dates, and agency. Financial amounts (ordered and calculated) with fraud type and period — from tool output.
-
-4. RISK ASSESSMENT
-   Risk score (exact decimal), risk tier, triggered BSI rule IDs and their condition descriptions. State explicitly that the score was computed by the BSI configured rules evaluation engine.
-
-5. INVESTIGATION PLAYBOOK SUMMARY
-   Number of steps, key actions, escalation requirements, mandatory evidence items.
-
-6. ANALYST DECISION & NOTES
-   Decision outcome, analyst name if available, decision notes. Analyst commentary from AppWorks WorkfolderCommentary entity.
-
-7. RECOMMENDED NEXT ACTIONS
-   Based on risk tier and playbook — factual, directive, no speculation.
-
-RULES:
-- Every factual claim must reference the AppWorks source (e.g. "per AppWorks Workfolder entity", "per WorkfolderCommentary").
-- The risk score is deterministic — never restate it as an estimate or modify the value.
-- Do NOT fabricate data. If a field is missing from AppWorks, state "Not recorded in AppWorks".
+GUARDRAILS:
+- Every factual claim must reference the AppWorks source entity it came from.
+- The risk score is a deterministic output of the BSI configured rules evaluation engine — never modify or re-estimate it.
+- Do not fabricate data. If a field is missing from AppWorks, state "Not recorded in AppWorks".
 - Write in formal plain English suitable for a Director of Special Investigations."""
 
 
 def build_copilot_prompt(case_id: str, case_data: dict) -> str:
     return f"""You are the BSI Investigation Copilot for Case {case_id}.
 
-Your role is to answer investigator questions accurately and concisely, grounded entirely in the verified AppWorks data below.
+The following investigation data has already been retrieved and verified from AppWorks. Use it to answer investigator questions.
 
-=== VERIFIED CASE CONTEXT ===
+--- VERIFIED CASE CONTEXT ---
 {json.dumps(case_data, indent=2)}
-=== END CONTEXT ===
+--- END CONTEXT ---
 
-RULES:
-1. CONTEXT FIRST: Always attempt to answer from the verified context above before calling any tool.
-   If the answer is present in the context, state which section it came from.
-
-2. TOOL FALLBACK: Only call a tool if the question requires data that is genuinely absent from the context.
-   Do not call tools to reconfirm data already present.
-
-3. PROVENANCE: When citing a finding, reference the AppWorks source entity.
-   Example: "Per the AppWorks Subject entity, the subject's address is..."
-
-4. HONESTY: If data is not available in the context and no tool can retrieve it, say so explicitly.
-   Do not speculate or fabricate.
-
-5. CONCISENESS: Give direct, precise answers. Avoid lengthy preambles."""
+GUARDRAILS:
+- Answer from the verified context above whenever possible. State which section the answer came from.
+- Only call a tool if the question requires data genuinely not present in the context.
+- When citing a finding, reference the AppWorks source and when it was retrieved.
+- Do not fabricate case data.
+- If data is not in the context and no tool can retrieve it, say so explicitly."""
 
 
 # -----------------------------------------------------------------------
@@ -208,25 +225,16 @@ class BSIAgentRunner:
     # ------------------------------------------------------------------
     # AUTO flow — /investigate
     # ------------------------------------------------------------------
-    def investigate(self, case_id: str) -> Tuple[List[Dict], List[Dict]]:
+    def investigate(
+        self, 
+        case_id: str, 
+        allowed_tool_names: list[str] | None = None
+    ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages = [
             {"role": "system", "content": INVESTIGATE_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                f"Investigate case {case_id}. Use the available tools to gather the relevant "
-                "case intake, subject history, similarity context, active risk rules, and deterministic "
-                "risk assessment. Then produce a concise investigator-facing summary."
-            )},
+            {"role": "user", "content": f"Investigate case {case_id}."},
         ]
-        return self._run_loop(
-            messages,
-            allowed_tool_names=[
-                "verify_case_intake",
-                "fetch_subject_history",
-                "search_similar_cases",
-                "get_risk_rules",
-                "calculate_risk_metrics",
-            ],
-        )
+        return self._run_loop(messages, allowed_tool_names=allowed_tool_names)
 
     # ------------------------------------------------------------------
     # ON-DEMAND flow — /playbook, /report, /copilot
@@ -237,7 +245,7 @@ class BSIAgentRunner:
         user_message: str,
         conversation_history: list | None = None,
         allowed_tool_names: list[str] | None = None,
-    ) -> Tuple[List[Dict], List[Dict]]:
+    ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         if conversation_history:
             messages.extend(conversation_history)
@@ -251,8 +259,17 @@ class BSIAgentRunner:
         self,
         messages: List[Dict],
         allowed_tool_names: list[str] | None = None,
-    ) -> Tuple[List[Dict], List[Dict]]:
+    ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Returns (messages, provenance_trail, tool_call_log).
+
+        tool_call_log: list of per-call dicts containing:
+            turn, tool, input, status, output_summary, output,
+            elapsed_ms, retrieved_at, sources, computed_by
+        """
         provenance_trail: List[Dict] = []
+        tool_call_log:    List[Dict] = []   # CS-LOG: full per-call trace
+
         tools = self.tools
         if allowed_tool_names:
             allowed = set(allowed_tool_names)
@@ -261,7 +278,9 @@ class BSIAgentRunner:
                 if tool.get("function", {}).get("name") in allowed
             ]
 
+        turn = 0
         while True:
+            turn += 1
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -272,7 +291,7 @@ class BSIAgentRunner:
             choice = response.choices[0]
             msg    = choice.message
 
-            # Append assistant turn
+            # Append assistant turn (CS-1 GROWS)
             assistant_entry: Dict = {"role": "assistant", "content": msg.content or ""}
             if msg.tool_calls:
                 assistant_entry["tool_calls"] = [
@@ -290,6 +309,9 @@ class BSIAgentRunner:
 
             # Stop if LLM is done
             if choice.finish_reason == "stop" or not msg.tool_calls:
+                logger.info(
+                    f"[AGENT] Turn {turn}: finish_reason={choice.finish_reason!r} — loop complete"
+                )
                 break
 
             # Process every tool call in this turn
@@ -300,22 +322,103 @@ class BSIAgentRunner:
                 except json.JSONDecodeError:
                     params = {}
 
+                call_start = time.monotonic()
+                logger.info(
+                    f"[TOOL CALL] turn={turn} tool={tool_name!r} "
+                    f"input={json.dumps(params, default=str)[:600]}"
+                )
+
+                # ── pre-dispatch enrichment ──────────────────────────────────
+                # Inject case_id into search_similar_cases if the LLM omitted it.
+                # The traversal strategy in f3 requires case_id to resolve subjects
+                # and allegation type IDs — without it the call returns zero results.
+                if tool_name == "search_similar_cases" and "case_id" not in params:
+                    case_id_from_history = _extract_case_id_from_messages(messages)
+                    if case_id_from_history:
+                        params = {**params, "case_id": case_id_from_history}
+                        logger.info(
+                            f"[PRE-INJECT] case_id={case_id_from_history!r} injected "
+                            f"into search_similar_cases from verify_case_intake history"
+                        )
+
+                # Inject missing context for calculate_risk_metrics:
+                #   1. active_rules — prevents f4 from making a redundant
+                #      AppWorks AgentRulesTable fetch on every risk call.
+                #   2. total_calculated / total_ordered defaults — prevents a
+                #      redundant Workfolder_FinancialRelationship fetch when
+                #      the LLM did not forward financial figures from intake.
+                if tool_name == "calculate_risk_metrics":
+                    if "active_rules" not in params:
+                        rules_from_history = _extract_rules_from_messages(messages)
+                        if rules_from_history:
+                            params = {**params, "active_rules": rules_from_history}
+                            logger.info(
+                                f"[PRE-INJECT] active_rules injected before dispatch "
+                                f"({len(rules_from_history)} rules from message history)"
+                            )
+                    if "total_calculated" not in params:
+                        params = {**params, "total_calculated": 0.0, "total_ordered": 0.0}
+                        logger.info(
+                            "[PRE-INJECT] total_calculated/total_ordered defaulted to 0.0 "
+                            "(no financial figures forwarded by LLM)"
+                        )
+                # ── end pre-inject ───────────────────────────────────────────
+
                 envelope = self.dispatcher.dispatch(tool_name, params)
+                elapsed_ms = round((time.monotonic() - call_start) * 1000)
 
                 if envelope.get("status") == "ok":
-                    # LLM receives only the result — never the provenance block
-                    tool_content = json.dumps(envelope.get("result", {}))
-                    # Provenance accumulates separately (CS-7) — strip to spec fields only
+                    result_data = envelope.get("result", {})
+                    # LLM receives only the result — never the provenance block (CS-2)
+                    tool_content = json.dumps(result_data)
+
+                    # Provenance trail (CS-7)
                     prov = envelope.get("provenance", {})
                     provenance_trail.append({
-                        "tool": tool_name,
-                        "sources": prov.get("sources", []),
+                        "tool":         tool_name,
+                        "sources":      prov.get("sources", []),
                         "retrieved_at": prov.get("retrieved_at", ""),
-                        "computed_by": prov.get("computed_by", ""),
+                        "computed_by":  prov.get("computed_by", ""),
                     })
+
+                    # Structured tool call log entry
+                    summary = _summarise_result(tool_name, result_data)
+                    log_entry = {
+                        "turn":           turn,
+                        "tool":           tool_name,
+                        "input":          params,
+                        "status":         "ok",
+                        "output_summary": summary,
+                        "output":         result_data,
+                        "elapsed_ms":     elapsed_ms,
+                        "retrieved_at":   prov.get("retrieved_at", ""),
+                        "sources":        prov.get("sources", []),
+                        "computed_by":    prov.get("computed_by", ""),
+                    }
+                    tool_call_log.append(log_entry)
+                    logger.info(
+                        f"[TOOL OK]  tool={tool_name!r} elapsed={elapsed_ms}ms "
+                        f"summary={summary!r}"
+                    )
+
                 else:
                     # Gate/execution error — LLM sees it and can self-correct
                     tool_content = json.dumps(envelope)
+                    error_msg = envelope.get("message", "unknown error")
+                    log_entry = {
+                        "turn":           turn,
+                        "tool":           tool_name,
+                        "input":          params,
+                        "status":         "error",
+                        "output_summary": f"ERROR: {error_msg}",
+                        "output":         envelope,
+                        "elapsed_ms":     elapsed_ms,
+                    }
+                    tool_call_log.append(log_entry)
+                    logger.warning(
+                        f"[TOOL ERR] tool={tool_name!r} elapsed={elapsed_ms}ms "
+                        f"error={error_msg!r}"
+                    )
 
                 messages.append({
                     "role":         "tool",
@@ -323,4 +426,4 @@ class BSIAgentRunner:
                     "content":      tool_content,
                 })
 
-        return messages, provenance_trail
+        return messages, provenance_trail, tool_call_log
