@@ -80,6 +80,88 @@ def _fetch_embedded(href: str, key: str) -> list:
     return res.get("_embedded", {}).get(key, [])
 
 
+def _workfolder_id_from_allegation_item(alleg_item: dict) -> str:
+    """Extract parent workfolder ID from Allegations list row."""
+    props = alleg_item.get("Properties", {})
+    links = alleg_item.get("_links", {})
+    for key in (
+        "Allegations_Workfolder$Identity",
+        "Allegations_Workfolder",
+        "Workfolder$Identity",
+        "Workfolder",
+    ):
+        raw = props.get(key)
+        if isinstance(raw, dict):
+            raw_id = raw.get("Id") or raw.get("id")
+            if raw_id:
+                return str(raw_id).strip()
+        elif raw:
+            return str(raw).strip()
+    for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
+        href = links.get(key, {}).get("href", "")
+        if href:
+            return _extract_id(href)
+    item_href = links.get("item", {}).get("href", "")
+    if item_href:
+        return _extract_id(item_href)
+    return ""
+
+
+def _parse_aw_date(raw: str):
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _apply_manifest_filters(
+    candidates: list,
+    max_per_type: int,
+    required_status: str,
+    lookback_years: int,
+) -> list:
+    """
+    Apply manifest constraints AFTER broad candidate collection.
+    This keeps fetching broad (other_dev_api style) and filtering explicit.
+    """
+    now = datetime.now(timezone.utc)
+    min_dt = datetime(now.year - max(0, int(lookback_years)), now.month, now.day, tzinfo=timezone.utc)
+    required_status_norm = (required_status or "").strip().lower()
+
+    filtered = []
+    per_type_counts = {}
+    seen_alleg = set()
+
+    for row in candidates:
+        case_status = (row.get("status") or "").strip().lower()
+        if required_status_norm and case_status != required_status_norm:
+            continue
+
+        dt = _parse_aw_date(row.get("date_received"))
+        if dt and dt < min_dt:
+            continue
+
+        alleg_id = row.get("allegation_id")
+        if alleg_id and alleg_id in seen_alleg:
+            continue
+        if alleg_id:
+            seen_alleg.add(alleg_id)
+
+        ftype = row.get("fraud_type", "UNKNOWN")
+        cnt = per_type_counts.get(ftype, 0)
+        if cnt >= max_per_type:
+            continue
+        per_type_counts[ftype] = cnt + 1
+        filtered.append(row)
+
+    return filtered
+
+
 def _names_match(fraud_type: str, aw_desc: str) -> bool:
     ft = fraud_type.strip().upper()
     aw = aw_desc.strip().upper()
@@ -281,16 +363,27 @@ def search_similar_cases(
     complaint_description=None,
 ) -> dict:
     """
-    Find similar cases via subject history traversal.
+    Broad fetch first (other_dev_api style), then manifest filtering.
 
-    1. Resolve AllegationType IDs from current case allegations
-    2. Get subjects linked to the current case
-    3. For each subject, walk Subject_SubjectWorkfolderMapping to historical WFs
-    4. For each historical WF, check allegations for matching AllegationType IDs
-    5. Return matched cases (capped at max_per_type per type)
+    Stage A (broad):
+      - Resolve allegation type IDs from current case
+      - Query Allegations_All by each type ID
+      - Build full candidate pool (excluding current case only)
+
+    Stage B (manifest filters):
+      - required_status
+      - similarity_lookback_years
+      - max_results_per_type
     """
     cfg = _load_f3_config()
     max_per_type = int(cfg.get("max_results_per_type", 5))
+    required_status = str(cfg.get("required_status", "") or "")
+    lookback_years = int(cfg.get("similarity_lookback_years", 3))
+    # Permission-gated rollout flags (kept OFF by default in manifest):
+    # - enable_broad_fetch_stage: other-dev style broad pull first, filter second.
+    # - fallback_to_raw_when_filtered_empty: if filters remove all matches, return raw.
+    enable_broad_fetch = bool(cfg.get("enable_broad_fetch_stage", False))
+    fallback_to_raw = bool(cfg.get("fallback_to_raw_when_filtered_empty", False))
 
     # Guard against positional call swap
     if isinstance(case_id, list) and (fraud_types is None or isinstance(fraud_types, str)):
@@ -317,51 +410,35 @@ def search_similar_cases(
     target_type_ids: set = {t["id"] for t in allegation_types}
     type_id_to_desc: dict = {t["id"]: t["description"] for t in allegation_types}
 
-    # Step 2: Get subjects
-    subject_ids: list = []
-    if case_id:
-        subject_ids = _get_subjects_for_case(case_id)
+    candidates: list = []
+    if enable_broad_fetch:
+        # Stage A: broad candidate fetch from Allegations_All
+        seen_pair: set = set()
+        wf_cache: dict = {}
 
-    if not subject_ids:
-        logger.warning(f"No subjects found for case {case_id}.")
-        return _build_result([], allegation_types, fraud_types)
+        for type_id in target_type_ids:
+            list_href = f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
+            list_res = _safe_fetch(list_href)
+            rows = list_res.get("_embedded", {}).get("Allegations_All", [])
+            logger.info(f"[Broad Fetch] type={type_id} returned {len(rows)} allegation row(s)")
 
-    # Steps 3 & 4: Traverse history, match allegation types
-    similar_cases: list = []
-    seen_wf_ids: set = {str(case_id)} if case_id else set()
-    seen_alleg_ids: set = set()
-    type_counts: dict = {t["id"]: 0 for t in allegation_types}
-
-    for subject_id in subject_ids:
-        hist_wf_ids = _get_historical_workfolders(subject_id, exclude_case_id=str(case_id or ""))
-
-        for wf_id in hist_wf_ids:
-            if wf_id in seen_wf_ids:
-                continue
-
-            if all(count >= max_per_type for count in type_counts.values()):
-                logger.info("[Traversal] All type quotas filled — stopping early.")
-                break
-
-            seen_wf_ids.add(wf_id)
-
-            wf_res = _safe_fetch(f"/entities/Workfolder/items/{wf_id}")
-            wf_props = wf_res.get("Properties", {})
-
-            matches = _find_matching_allegations(wf_id, target_type_ids)
-            logger.info(f"[Traversal] WF {wf_id}: {len(matches)} allegation match(es)")
-
-            for match in matches:
-                type_id = match["type_id"]
-                alleg_id = match["allegation_id"]
-
-                if alleg_id in seen_alleg_ids:
+            for alleg_row in rows:
+                wf_id = _workfolder_id_from_allegation_item(alleg_row)
+                if not wf_id or wf_id == str(case_id):
                     continue
-                if type_counts.get(type_id, 0) >= max_per_type:
+                alleg_href = alleg_row.get("_links", {}).get("self", {}).get("href", "")
+                alleg_id = _extract_id(alleg_href)
+                pair = (wf_id, alleg_id)
+                if pair in seen_pair:
                     continue
+                seen_pair.add(pair)
 
-                seen_alleg_ids.add(alleg_id)
-                type_counts[type_id] = type_counts.get(type_id, 0) + 1
+                if wf_id not in wf_cache:
+                    wf_res = _safe_fetch(f"/entities/Workfolder/items/{wf_id}")
+                    wf_cache[wf_id] = wf_res.get("Properties", {})
+                wf_props = wf_cache.get(wf_id, {})
+                if not wf_props:
+                    continue
 
                 fraud_type_desc = type_id_to_desc.get(type_id, type_id)
                 summary = (
@@ -369,36 +446,104 @@ def search_similar_cases(
                     or wf_props.get("Workfolder_CaseDescription")
                     or f"Historical {fraud_type_desc} allegation"
                 )
-
-                similar_cases.append({
+                candidates.append({
                     "case_id":              wf_id,
                     "allegation_id":        alleg_id,
                     "similarity_score":     1.0,
                     "fraud_type":           fraud_type_desc,
-                    "outcome":              "Subject history — allegation type match",
+                    "outcome":              "Allegation type match (broad candidate)",
                     "summary":              summary,
-                    "status":               match.get("status", ""),
-                    "date_received":        match.get("date_received", ""),
-                    "estimated_loss":       0.0,
+                    "status":               wf_props.get("WorkfolderStatus", ""),
+                    "date_received":        wf_props.get("WorkfolderDateReceived", ""),
                     "financial_calculated": 0.0,
                 })
-                logger.info(
-                    f"  ✅ MATCH  wf={wf_id} alleg={alleg_id} "
-                    f"type={fraud_type_desc} [{type_id}]"
-                )
+    else:
+        # Legacy traversal-only behavior kept as default until approval.
+        seen_wf_ids: set = {str(case_id)} if case_id else set()
+        seen_alleg_ids: set = set()
+        type_counts: dict = {t["id"]: 0 for t in allegation_types}
+        subject_ids: list = _get_subjects_for_case(case_id) if case_id else []
+        for subject_id in subject_ids:
+            hist_wf_ids = _get_historical_workfolders(subject_id, exclude_case_id=str(case_id or ""))
+            for wf_id in hist_wf_ids:
+                if wf_id in seen_wf_ids:
+                    continue
+                if all(count >= max_per_type for count in type_counts.values()):
+                    break
+                seen_wf_ids.add(wf_id)
+                wf_res = _safe_fetch(f"/entities/Workfolder/items/{wf_id}")
+                wf_props = wf_res.get("Properties", {})
+                matches = _find_matching_allegations(wf_id, target_type_ids)
+                for match in matches:
+                    type_id = match["type_id"]
+                    alleg_id = match["allegation_id"]
+                    if alleg_id in seen_alleg_ids or type_counts.get(type_id, 0) >= max_per_type:
+                        continue
+                    seen_alleg_ids.add(alleg_id)
+                    type_counts[type_id] = type_counts.get(type_id, 0) + 1
+                    fraud_type_desc = type_id_to_desc.get(type_id, type_id)
+                    summary = (
+                        wf_props.get("WorkfolderDescription")
+                        or wf_props.get("Workfolder_CaseDescription")
+                        or f"Historical {fraud_type_desc} allegation"
+                    )
+                    candidates.append({
+                        "case_id":              wf_id,
+                        "allegation_id":        alleg_id,
+                        "similarity_score":     1.0,
+                        "fraud_type":           fraud_type_desc,
+                        "outcome":              "Subject history — allegation type match",
+                        "summary":              summary,
+                        "status":               match.get("status", ""),
+                        "date_received":        match.get("date_received", ""),
+                        "financial_calculated": 0.0,
+                    })
+
+    # Stage B: manifest filtering
+    similar_cases = _apply_manifest_filters(
+        candidates=candidates,
+        max_per_type=max_per_type,
+        required_status=required_status,
+        lookback_years=lookback_years,
+    )
+    if fallback_to_raw and not similar_cases and candidates:
+        logger.info(
+            "[Fallback] Filters removed all similar cases; returning raw candidate pool "
+            "(fallback_to_raw_when_filtered_empty=true)"
+        )
+        similar_cases = candidates
 
     logger.info(
-        f"search_similar_cases done: {len(similar_cases)} match(es) | "
-        f"type_ids={list(target_type_ids)} | input={fraud_types}"
+        f"search_similar_cases done: raw={len(candidates)} filtered={len(similar_cases)} "
+        f"| type_ids={list(target_type_ids)} | input={fraud_types} "
+        f"| filters(status={required_status or 'ANY'}, lookback_years={lookback_years}, max_per_type={max_per_type}) "
+        f"| broad_fetch={enable_broad_fetch} fallback_to_raw={fallback_to_raw}"
     )
 
-    return _build_result(similar_cases, allegation_types, fraud_types)
+    return _build_result(
+        similar_cases=similar_cases,
+        allegation_types=allegation_types,
+        fraud_types=fraud_types,
+        raw_count=len(candidates),
+        required_status=required_status,
+        lookback_years=lookback_years,
+        max_per_type=max_per_type,
+    )
 
 
-def _build_result(similar_cases: list, allegation_types: list, fraud_types: list) -> dict:
+def _build_result(
+    similar_cases: list,
+    allegation_types: list,
+    fraud_types: list,
+    raw_count: int = 0,
+    required_status: str = "",
+    lookback_years: int = 0,
+    max_per_type: int = 0,
+) -> dict:
     type_id_list = [t["id"] for t in allegation_types]
     query_summary = (
         f"Found {len(similar_cases)} similar archive match(es) "
+        f"after filtering {raw_count} broad candidate(s) "
         f"across {len(allegation_types)} fraud types."
     )
     return {
@@ -406,13 +551,19 @@ def _build_result(similar_cases: list, allegation_types: list, fraud_types: list
             query_summary=query_summary,
             matches=similar_cases,
             top_n_returned=len(similar_cases),
+            raw_matches_found=raw_count,
+            manifest_filters_applied={
+                "required_status": required_status,
+                "similarity_lookback_years": lookback_years,
+                "max_results_per_type": max_per_type,
+            },
         ).model_dump(),
         "provenance": {
             "sources": [
-                f"AppWorks subject history traversal "
+                f"AppWorks Allegations_All broad fetch "
                 f"(type IDs: {type_id_list}, resolved from: {fraud_types})"
             ],
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by":  "AppWorks REST traversal — Subject → Workfolder → Allegations",
+            "computed_by":  "AppWorks REST retrieval + manifest post-filtering",
         },
     }

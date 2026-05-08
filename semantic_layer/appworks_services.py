@@ -14,7 +14,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+
+class NormalizationError(Exception):
+    """Raised when service data fails to align with the BSI semantic model."""
+    pass
+
+
 def _validate(model_class, envelope: dict, tool_name: str) -> dict:
+
     """
     Normalization Layer Gatekeeper.
     Validates the 'result' portion of a tool response against a Pydantic model.
@@ -28,10 +36,14 @@ def _validate(model_class, envelope: dict, tool_name: str) -> dict:
         return envelope
     except Exception as e:
         logger.error(f"Normalization failure in {tool_name}: {e}")
-        # In production, we might raise an error. For the POC, we log and return
-        # the raw envelope to avoid breaking the agentic loop, but v6 spec
-        # recommends strict enforcement.
-        return envelope
+        # v6 spec recommends strict enforcement. Raising an exception allows
+        # the dispatcher to catch it and return a structured error to the LLM.
+        raise NormalizationError(
+            f"Normalization failure in {tool_name}: {e}. "
+            f"The data returned from AppWorks does not align with the BSI semantic model. "
+            f"Please contact your system administrator."
+        )
+
 
 
 def get_case_header(case_id: str) -> dict:
