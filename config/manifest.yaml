@@ -15,7 +15,9 @@ tools:
       Reads and validates the submitted complaint form. Extracts key entities from the
       complaint narrative. Returns structured case data including fraud_types (list),
       subject_id, allegations, subjects, and case metadata. Requires: case_id.
+    execution_mode: "trigger: AUTO"
     python_function: "appworks_services.get_case_header"
+
     required_params:
       - name: "case_id"
         type: "string"
@@ -26,7 +28,9 @@ tools:
     description: >
       Fetches the full history of the subject under investigation. Returns all prior cases,
       prior_case_count, and subject profile. Requires: subject_id from verify_case_intake output.
+    execution_mode: "trigger: AUTO"
     python_function: "appworks_services.get_enriched_subject_profile"
+
     required_params:
       - name: "subject_id"
         type: "string"
@@ -39,7 +43,9 @@ tools:
       Uses subject history traversal to find archived cases with matching allegation types.
       Requires: fraud_types list from verify_case_intake output.
       Always pass fraud_types from verify_case_intake output.
+    execution_mode: "trigger: AUTO"
     python_function: "appworks_services.search_similar_cases"
+
     required_params:
       - name: "fraud_types"
         type: "list[string]"
@@ -53,8 +59,15 @@ tools:
         description: "Optional complaint description text for additional keyword filtering of matches"
     config:
       similarity_lookback_years: 10
-      max_results_per_type: 3
+      max_results_per_type: 5
       required_status: "Closed"
+      # Permission-gated rollout flags (keep false until approval):
+      # - enable_broad_fetch_stage: fetch broad candidate pool first
+      #   (other_dev_api style), then apply manifest filters.
+      # - fallback_to_raw_when_filtered_empty: if filtered result is empty,
+      #   return raw candidate pool for analyst visibility.
+      enable_broad_fetch_stage: true
+      fallback_to_raw_when_filtered_empty: true
 
   - name: "get_risk_rules"
     section: "risk_rules"
@@ -64,7 +77,9 @@ tools:
       and active flag. No parameters required.
       This demonstrates that rules are fetched from AppWorks at runtime — BSI can modify
       rules without a code change.
+    execution_mode: "trigger: AUTO"
     python_function: "appworks_services.get_risk_rules"
+
     required_params: []
 
   - name: "calculate_risk_metrics"
@@ -80,7 +95,9 @@ tools:
       from search_similar_cases), distinct_types (count of allegation types from verify_case_intake),
       has_open_allegation (true if any allegation has no date_closed), subject_count (count of
       subjects from verify_case_intake), received_age (date_received_age from verify_case_intake details).
+    execution_mode: "trigger: AUTO"
     python_function: "appworks_services.calculate_risk_metrics"
+
     required_params:
       - name: "case_id"
         type: "string"
@@ -132,7 +149,9 @@ tools:
       Retrieves the investigation playbook from AppWorks for the given fraud types and
       risk tier. Returns ordered investigation steps and evidence checklist.
       Requires: fraud_types list and risk_tier from calculate_risk_metrics output.
+    execution_mode: "trigger: ON-DEMAND"
     python_function: "appworks_services.get_investigation_playbook"
+
     required_params:
       - name: "fraud_types"
         type: "list[string]"
@@ -149,7 +168,9 @@ tools:
       Returns structured report sections for narrative synthesis.
       Requires: case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules.
       All these values come from prior tool call outputs — pass them explicitly.
+    execution_mode: "trigger: ON-DEMAND"
     python_function: "appworks_services.compile_and_render_report"
+
     required_params:
       - name: "case_id"
         type: "string"

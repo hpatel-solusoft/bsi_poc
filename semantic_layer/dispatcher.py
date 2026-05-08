@@ -1,7 +1,6 @@
 import importlib
 import yaml
-import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class SemanticDispatcher:
@@ -18,7 +17,12 @@ class SemanticDispatcher:
     def get_tool_catalogue(self) -> list:
         return self.manifest.get("tools", [])
 
-    def dispatch(self, tool_name: str, params: Dict[str, Any]) -> dict:
+    def dispatch(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        expected_execution_mode: Optional[str] = None,
+    ) -> dict:
         # --- Gate 1: Registry check ---
         if tool_name not in self.tool_registry:
             available = list(self.tool_registry.keys())
@@ -31,6 +35,17 @@ class SemanticDispatcher:
             }
 
         tool_config = self.tool_registry[tool_name]
+        tool_mode = tool_config.get("execution_mode")
+
+        # Defense-in-depth: enforce execution mode at dispatcher level too.
+        if expected_execution_mode and tool_mode != expected_execution_mode:
+            return {
+                "status": "error",
+                "message": (
+                    f"Tool '{tool_name}' is not allowed in this flow. "
+                    f"Expected mode '{expected_execution_mode}', tool mode is '{tool_mode}'."
+                ),
+            }
 
         # --- Gate 2: Parameter check & Security ---
         required  = [p["name"] for p in tool_config.get("required_params", [])]

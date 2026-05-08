@@ -30,7 +30,8 @@ app = FastAPI(title="BSI Fraud Investigation Platform")
 # ai_summary is a REQUIRED field on all ON-DEMAND requests (v6 spec).
 # -----------------------------------------------------------------------
 
-CASE_STORE_TTL_SECONDS = 86400  # 24 hour TTL per v6 specification
+# POC requirement (MD v6): in-memory CS-4 has no TTL.
+CASE_STORE_TTL_SECONDS = None
 
 
 class _TTLStore:
@@ -46,7 +47,7 @@ class _TTLStore:
     mutate it correctly without requiring a separate setter.
     """
 
-    def __init__(self, ttl_seconds: int):
+    def __init__(self, ttl_seconds: Optional[int]):
         self._data: Dict[str, Dict] = {}
         self._ts:   Dict[str, float] = {}
         self._ttl = ttl_seconds
@@ -190,6 +191,160 @@ def _extract_agent_summary(messages: list) -> str:
         if msg.get("role") == "assistant" and msg.get("content"):
             return msg["content"]
     return ""
+
+
+def _safe_join(items: List[str], sep: str = ", ") -> str:
+    """Join non-empty strings safely; return 'Not available' when empty."""
+    clean = [str(i).strip() for i in (items or []) if str(i).strip()]
+    return sep.join(clean) if clean else "Not available"
+
+
+def _format_provenance_lines(provenance_trail: List[dict]) -> str:
+    """Render provenance trail as readable markdown lines."""
+    if not provenance_trail:
+        return "- No provenance entries available."
+    lines = []
+    for p in provenance_trail:
+        tool = p.get("tool", "unknown_tool")
+        computed_by = p.get("computed_by", "Not available")
+        retrieved_at = p.get("retrieved_at", "Not available")
+        sources = _safe_join(p.get("sources", []), "; ")
+        lines.append(
+            f"- `{tool}` used `{computed_by}` on `{retrieved_at}` from source(s): {sources}."
+        )
+    return "\n".join(lines)
+
+
+def _merge_provenance(existing: List[dict], new_entries: List[dict]) -> List[dict]:
+    """Merge provenance lists while preserving order and removing duplicates."""
+    merged: List[dict] = []
+    seen = set()
+    for entry in (existing or []) + (new_entries or []):
+        key = (
+            entry.get("tool"),
+            entry.get("retrieved_at"),
+            entry.get("computed_by"),
+            tuple(entry.get("sources", [])),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    return merged
+
+
+def _build_investigation_summary(case_id: str, sections: dict, provenance_trail: List[dict]) -> str:
+    """Detailed deterministic summary for /investigate response."""
+    complaint = sections.get("complaint_intelligence", {}) if isinstance(sections, dict) else {}
+    enrichment = sections.get("context_enrichment", {}) if isinstance(sections, dict) else {}
+    similar = sections.get("similar_cases", {}) if isinstance(sections, dict) else {}
+    risk = sections.get("risk_assessment", {}) if isinstance(sections, dict) else {}
+    playbook = sections.get("investigation_playbook", {}) if isinstance(sections, dict) else {}
+    final_report = sections.get("final_report", {}) if isinstance(sections, dict) else {}
+
+    summary = complaint.get("summary", {}) if isinstance(complaint, dict) else {}
+    details = complaint.get("details", {}) if isinstance(complaint, dict) else {}
+    subjects = complaint.get("subjects", []) if isinstance(complaint, dict) else []
+    primary_subject = next((s for s in subjects if s.get("is_primary_subject")), subjects[0] if subjects else {})
+    primary_name = (
+        primary_subject.get("details", {}).get("identifier")
+        or details.get("identifier_name")
+        or "Not recorded in AppWorks"
+    )
+    co_subjects = [s.get("details", {}).get("identifier") for s in subjects if not s.get("is_primary_subject")]
+    fraud_types = complaint.get("fraud_types", [])
+    allegations = complaint.get("allegations", [])
+    similar_matches = similar.get("matches", []) if isinstance(similar, dict) else []
+    triggered = risk.get("triggered_rules", []) if isinstance(risk, dict) else []
+    triggered_names = [
+        (r.get("rule_name") or r.get("rule_id")) if isinstance(r, dict) else str(r)
+        for r in triggered
+    ]
+    prior_count = enrichment.get("prior_case_count", 0)
+    recommendation = risk.get("recommendation", "No recommendation recorded.")
+    step_count = len(playbook.get("investigation_steps", [])) if isinstance(playbook, dict) else 0
+    report_status = final_report.get("status", "Not generated")
+    allegation_lines = []
+    for idx, item in enumerate(allegations, start=1):
+        allegation_lines.append(
+            f"{idx}) {item.get('allegation_type', {}).get('description', 'Unknown')} "
+            f"(status={item.get('status', 'Unknown')}, received={item.get('date_received', 'Unknown')}, "
+            f"agency={item.get('source_agency', {}).get('name', 'Unknown')}, ref={item.get('agency_referral_no', 'Unknown')})"
+        )
+
+    return (
+        f"### Investigation Summary for Case {case_id}\n\n"
+        f"**Case Background:** Complaint #{summary.get('complaint_no', 'Not available')} "
+        f"({summary.get('case_description', 'Not available')}) is currently in "
+        f"'{summary.get('destination', 'Not available')}' under team "
+        f"'{summary.get('team', 'Not available')}'. Intake source is "
+        f"{details.get('source', 'Not available')} with referral "
+        f"{details.get('intake_referral_no', 'Not available')}.\n\n"
+        f"**Subject Profile:** Primary subject is {primary_name}. Co-subjects recorded: "
+        f"{_safe_join(co_subjects)}. The primary subject currently has {prior_count} prior case(s) in history.\n\n"
+        f"**Allegation Details:** Fraud types linked to this case are {_safe_join(fraud_types)}. "
+        f"Recorded allegations: {_safe_join(allegation_lines, ' | ')}.\n\n"
+        f"**Similar Case Analysis:** {_safe_join([similar.get('query_summary', '')])} "
+        f"with {len(similar_matches)} match(es) returned from archive checks.\n\n"
+        f"**Risk Assessment:** Risk score is {risk.get('risk_score', 'Not available')} "
+        f"with tier {risk.get('risk_tier', 'Not available')}. Triggered rules: "
+        f"{_safe_join(triggered_names)}. Recommendation from rules evaluation: {recommendation}\n\n"
+        f"**Downstream Readiness:** Playbook step count currently available: {step_count}. "
+        f"Final report status: {report_status}.\n\n"
+        f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
+    )
+
+
+def _build_playbook_summary(case_id: str, playbook: dict, provenance_trail: List[dict]) -> str:
+    """Detailed deterministic summary for /playbook response."""
+    if not isinstance(playbook, dict):
+        return f"Playbook generation for case {case_id} completed, but no playbook payload was returned."
+    steps = playbook.get("investigation_steps", [])
+    owners = sorted({s.get("owner") for s in steps if isinstance(s, dict) and s.get("owner")})
+    mandatory = len([
+        item for item in playbook.get("evidence_checklist", [])
+        if isinstance(item, dict) and item.get("mandatory")
+    ])
+    step_lines = []
+    for step in steps:
+        step_lines.append(
+            f"Step {step.get('step', '?')}: {step.get('action', 'Not available')} "
+            f"(owner={step.get('owner', 'Not available')}, "
+            f"deadline_days={step.get('deadline_days', 'Not available')})"
+        )
+    return (
+        f"### Investigation Playbook for Case {case_id}\n\n"
+        f"Playbook `{playbook.get('playbook_id', 'Not available')}` was generated for risk tier "
+        f"{playbook.get('risk_tier', 'Not available')} and fraud types "
+        f"{_safe_join(playbook.get('fraud_types', []))}. "
+        f"The workflow includes {len(steps)} investigation step(s): {_safe_join(step_lines, ' | ')}. "
+        f"Mandatory evidence item count is {mandatory}, escalation_required is "
+        f"{playbook.get('escalation_required', False)}, and owner group(s) involved are "
+        f"{_safe_join(owners)}.\n\n"
+        f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
+    )
+
+
+def _build_report_summary(case_id: str, final_report: dict, case_data: dict, provenance_trail: List[dict]) -> str:
+    """Detailed deterministic summary for /report response."""
+    sections = final_report.get("sections", {}) if isinstance(final_report, dict) else {}
+    complaint = case_data.get("complaint_intelligence", {}) if isinstance(case_data, dict) else {}
+    risk = case_data.get("risk_assessment", {}) if isinstance(case_data, dict) else {}
+    summary = complaint.get("summary", {}) if isinstance(complaint, dict) else {}
+    recommendation = risk.get("recommendation", "No recommendation recorded.")
+    return (
+        f"### Final Report Summary for Case {case_id}\n\n"
+        f"Report `{final_report.get('report_id', 'Not available')}` generated with status "
+        f"{final_report.get('status', 'Not available')}. "
+        f"Complaint #{summary.get('complaint_no', 'Not available')} "
+        f"({summary.get('case_description', 'Not available')}). "
+        f"Risk score {risk.get('risk_score', 'Not available')} / {risk.get('risk_tier', 'Not available')}. "
+        f"Recommended action: {recommendation}. "
+        f"The final report includes {len(sections)} populated section(s), covering case summary, "
+        f"subject history, allegation summary, financial summary, risk rationale, recommended actions, "
+        f"playbook roll-up, and analyst decision status.\n\n"
+        f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
+    )
 
 
 def _risk_rule_lookup(case_data: dict) -> dict:
@@ -378,6 +533,43 @@ def _rehydrate_case_store(case_id: str, ai_summary: dict) -> None:
         )
 
 
+def _validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
+    """Validate required v6 ai_summary payload shape for ON-DEMAND requests."""
+    if not isinstance(ai_summary, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="ai_summary is required and must be an object.",
+        )
+    if "investigation" not in ai_summary or not isinstance(ai_summary.get("investigation"), dict):
+        raise HTTPException(
+            status_code=400,
+            detail="ai_summary.investigation is required and must be an object.",
+        )
+    # v6 session-recovery rule: if provenance_trail is absent, continue with warning
+    # and degrade source citations gracefully (no crash).
+    if "provenance_trail" in ai_summary and not isinstance(ai_summary.get("provenance_trail"), list):
+        raise HTTPException(
+            status_code=400,
+            detail="ai_summary.provenance_trail must be an array when provided.",
+        )
+
+
+def _normalize_playbook_payload(raw_playbook: Optional[Dict[str, Any]], case_data: dict) -> Optional[Dict[str, Any]]:
+    """Accept multiple playbook payload shapes and normalize to investigation_playbook dict."""
+    playbook_data = raw_playbook or case_data.get("investigation_playbook")
+    if not isinstance(playbook_data, dict):
+        return None
+    if "investigation_playbook" in playbook_data and isinstance(playbook_data["investigation_playbook"], dict):
+        return playbook_data["investigation_playbook"]
+    if "investigation" in playbook_data and isinstance(playbook_data["investigation"], dict):
+        nested = playbook_data["investigation"].get("investigation_playbook")
+        return nested if isinstance(nested, dict) else None
+    # already a plain playbook shape
+    if "playbook_id" in playbook_data or "investigation_steps" in playbook_data:
+        return playbook_data
+    return None
+
+
 def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> dict:
     """
     CS-4 lookup pattern used by all ON-DEMAND handlers.
@@ -389,6 +581,7 @@ def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> d
 
     # CS-4 cold — fall back to ai_summary sent in request body (v6 contract)
     if ai_summary:
+        _validate_ai_summary_contract(ai_summary)
         _rehydrate_case_store(case_id, ai_summary)
         return CASE_STORE[case_id]
 
@@ -448,175 +641,194 @@ def health():
 @app.post("/investigate")
 def investigate(req: InvestigateRequest):
     """
-    AUTO flow — runs tools 1-5 in dependency order.
+    AUTO flow — Section 3.1.
+    Runs tools 1-5 in dependency order (LLM decides sequence).
     Populates CS-4 CASE_STORE for all subsequent on-demand calls.
     """
-    if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
-    if not os.path.exists(MANIFEST_PATH):
-        raise HTTPException(status_code=500, detail="manifest.yaml not found")
+    start = time.time()
+    try:
+        if not os.getenv("OPENAI_API_KEY"):
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+        if not os.path.exists(MANIFEST_PATH):
+            raise HTTPException(status_code=500, detail="manifest.yaml not found")
 
-    start  = time.time()
-    runner = _get_runner()
-    investigation_tools = [
-        "verify_case_intake",
-        "fetch_subject_history",
-        "search_similar_cases",
-        "get_risk_rules",
-        "calculate_risk_metrics"
-    ]
-    messages, provenance_trail, tool_call_log = runner.investigate(
-        case_id=req.case_id,
-        allowed_tool_names=investigation_tools
-    )
-    duration = round(time.time() - start, 1)
+        runner = _get_runner()
+        messages, provenance_trail, _ = runner.investigate(case_id=req.case_id)
+        sections = _extract_tool_results(messages)
 
-    sections      = _extract_tool_results(messages)
-    agent_summary = _extract_agent_summary(messages)
+        # CS-4: populate store with all sections + provenance.
+        CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
+        # Agent 1 summary intentionally uses the model's original narrative output
+        # (legacy behavior requested by user) instead of deterministic formatter.
+        human_summary = _extract_agent_summary(messages)
 
-    # CS-4: Populate store with all sections + provenance (TTL = 15 min)
-    CASE_STORE[req.case_id] = {
-        **sections,
-        "provenance_trail": provenance_trail,
-    }
-
-    # tool_call_log is available for terminal inspection via Python logging.
-    # It is intentionally omitted from the HTTP response to keep the payload
-    # clean — only the sections the frontend needs are returned (per v6 spec).
-    return {
-        "case_id":          req.case_id,
-        "status":           "completed",
-        # agent_summary: LLM-generated narrative — the only text shown to the
-        # investigator on screen.
-        "agent_summary":    agent_summary,
-        # investigation: structured JSON sections, one per tool that ran.
-        # Frontend saves the full response as ai_summary and forwards it in
-        # /playbook, /report, /copilot request bodies.
-        "investigation":    sections,
-        # provenance_trail: ordered per-tool audit trail — source + timestamp
-        # for every AppWorks read. Required field on all ON-DEMAND requests.
-        "provenance_trail": provenance_trail,
-        "meta": {
-            "tool_calls_made":  len(provenance_trail),
-            "duration_seconds": duration,
-        },
-    }
+        return {
+            "case_id": req.case_id,
+            "status": "completed",
+            "agent_summary": human_summary,
+            "investigation": sections,
+            "provenance_trail": provenance_trail,
+            "meta": {
+                "tool_calls_made": len(provenance_trail),
+                "duration_seconds": round(time.time() - start, 1),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Investigate route failed for case_id=%s", req.case_id)
+        raise HTTPException(status_code=500, detail=f"Investigation failed: {exc}") from exc
+    finally:
+        logger.info("POST /investigate completed for case_id=%s", req.case_id)
 
 
 @app.post("/playbook")
 def playbook(req: PlaybookRequest):
     """
-    ON-DEMAND — calls get_investigation_playbook only.
+    ON-DEMAND — Section 3.2.
+    Calls get_investigation_playbook only.
     Requires risk_tier from a prior /investigate run (via CS-4 or ai_summary body).
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     """
     from agent_service.agent_runner import build_playbook_prompt
 
-    # CS-4 pattern (v6): use store if warm, fall back to ai_summary on miss.
-    if req.case_id not in CASE_STORE:
-        _rehydrate_case_store(req.case_id, req.ai_summary)
-    case_data = CASE_STORE[req.case_id]
+    try:
+        _validate_ai_summary_contract(req.ai_summary)
+        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
+        case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        runner = _get_runner()
 
-    runner = _get_runner()
+        messages, new_provenance, _ = runner.run_scoped(
+            system_prompt=build_playbook_prompt(case_data),
+            user_message=(
+                f"Review the investigation context for case {req.case_id} and execute the "
+                "appropriate on-demand tool to retrieve the investigation playbook."
+            ),
+        )
 
-    messages, _, tool_call_log = runner.run_scoped(
-        system_prompt=build_playbook_prompt(case_data),
-        user_message=(
-            f"Retrieve the investigation playbook for case {req.case_id}. "
-            f"Extract fraud_types and risk_tier from the context provided in the system prompt "
-            f"and call get_investigation_playbook."
-        ),
-        allowed_tool_names=["get_investigation_playbook"]
-    )
+        sections = _extract_tool_results(messages)
+        playbook_section = {
+            "investigation_playbook": sections.get("investigation_playbook", {})
+        }
 
-    sections = _extract_tool_results(messages)
-    CASE_STORE[req.case_id].update(sections)
+        merged_provenance = _merge_provenance(
+            case_data.get("provenance_trail", []),
+            new_provenance,
+        )
 
-    return {
-        "case_id":       req.case_id,
-        "status":        "completed",
-        "investigation": sections,
-    }
+        # Update CS-4 but return only the route-specific section.
+        CASE_STORE[req.case_id].update(playbook_section)
+        CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
+
+        return {
+            "case_id": req.case_id,
+            "status": "completed",
+            "agent_summary": _build_playbook_summary(
+                req.case_id,
+                playbook_section.get("investigation_playbook", {}),
+                merged_provenance,
+            ),
+            "investigation": playbook_section,
+            "provenance_trail": merged_provenance,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Playbook route failed for case_id=%s", req.case_id)
+        raise HTTPException(status_code=500, detail=f"Playbook generation failed: {exc}") from exc
+    finally:
+        logger.info("POST /playbook completed for case_id=%s", req.case_id)
 
 
 @app.post("/report")
 def report(req: ReportRequest):
     """
-    ON-DEMAND — calls generate_final_report only.
+    ON-DEMAND — Section 3.3.
+    Calls generate_final_report with all six v6 params:
+      case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules.
     Requires: risk_assessment in case data, playbook, and analyst approval.
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     """
     from agent_service.agent_runner import build_report_prompt
 
-    # CS-4 pattern (v6): use store if warm, fall back to ai_summary on miss.
-    if req.case_id not in CASE_STORE:
-        _rehydrate_case_store(req.case_id, req.ai_summary)
-    case_data = CASE_STORE[req.case_id]
+    try:
+        _validate_ai_summary_contract(req.ai_summary)
+        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
+        case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        if "risk_assessment" not in case_data:
+            raise HTTPException(
+                status_code=400,
+                detail="risk_assessment section missing — run /investigate first.",
+            )
 
-    if "risk_assessment" not in case_data:
-        raise HTTPException(
-            status_code=400,
-            detail="risk_assessment section missing — run /investigate first.",
-        )
+        playbook_data = _normalize_playbook_payload(req.ai_playbook, case_data)
+        if not playbook_data:
+            raise HTTPException(status_code=400, detail="Playbook required — run /playbook first.")
+        if not req.analyst_decision or req.analyst_decision.get("decision") != "APPROVED":
+            raise HTTPException(
+                status_code=400,
+                detail="Report requires analyst approval. analyst_decision.decision must be 'APPROVED'.",
+            )
 
-    playbook_data = req.ai_playbook or case_data.get("investigation_playbook")
-    # Normalize: if ai_playbook is the full /playbook response, extract the playbook
-    if playbook_data and isinstance(playbook_data, dict) and "investigation" in playbook_data:
-        playbook_data = playbook_data["investigation"].get("investigation_playbook")
-
-    if not playbook_data:
-        raise HTTPException(
-            status_code=400,
-            detail="Playbook required — run /playbook first.",
-        )
-
-    if not req.analyst_decision or req.analyst_decision.get("decision") != "APPROVED":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Report requires analyst approval. "
-                "analyst_decision.decision must be 'APPROVED'."
+        runner = _get_runner()
+        messages, new_provenance, _ = runner.run_scoped(
+            system_prompt=build_report_prompt(
+                case_id=req.case_id,
+                case_data=case_data,
+                ai_case_summary=req.ai_case_summary or "",
+                playbook_data=playbook_data,
+                analyst_decision=req.analyst_decision,
+            ),
+            user_message=(
+                f"Review the investigation context for case {req.case_id} and execute the "
+                "appropriate on-demand tool to generate the final investigation report."
             ),
         )
 
-    runner = _get_runner()
+        sections = _extract_tool_results(messages)
+        report_section = _enrich_final_report_from_context(
+            sections=sections,
+            case_data=case_data,
+            playbook_data=playbook_data,
+            analyst_decision=req.analyst_decision,
+        )
 
-    messages, _, tool_call_log = runner.run_scoped(
-        system_prompt=build_report_prompt(
-            case_data        = case_data,
-            ai_case_summary  = req.ai_case_summary or "",
-            playbook_data    = playbook_data,
-            analyst_decision = req.analyst_decision,
-        ),
-        user_message=(
-            f"Generate the investigation summary report for case {req.case_id}. "
-            f"Call generate_final_report first, then synthesise all findings "
-            f"into the director-ready narrative as instructed."
-        ),
-        allowed_tool_names=["generate_final_report"]
-    )
+        merged_provenance = _merge_provenance(
+            case_data.get("provenance_trail", []),
+            new_provenance,
+        )
 
-    sections = _extract_tool_results(messages)
-    sections = _enrich_final_report_from_context(
-        sections         = sections,
-        case_data        = case_data,
-        playbook_data    = playbook_data,
-        analyst_decision = req.analyst_decision,
-    )
+        # Update CS-4 but return only the route-specific section.
+        CASE_STORE[req.case_id].update(report_section)
+        CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
+        final_report = report_section.get("final_report", {})
 
-    CASE_STORE[req.case_id].update(sections)
-
-    return {
-        "case_id":       req.case_id,
-        "status":        "completed",
-        "investigation": sections,
-    }
+        return {
+            "case_id": req.case_id,
+            "status": "completed",
+            "agent_summary": _build_report_summary(
+                req.case_id,
+                final_report,
+                case_data,
+                merged_provenance,
+            ),
+            "investigation": report_section,
+            "provenance_trail": merged_provenance,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Report route failed for case_id=%s", req.case_id)
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
+    finally:
+        logger.info("POST /report completed for case_id=%s", req.case_id)
 
 
 @app.post("/copilot")
 def copilot(req: CopilotRequest):
     """
-    ON-DEMAND — answers investigator questions grounded in case context.
+    ON-DEMAND — Section 3.4.
+    Answers investigator questions grounded in case context (CS-5).
     Answers from CS-4 context first; falls back to tools only if needed.
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     If provenance_trail is absent from ai_summary, source citations degrade
@@ -624,14 +836,13 @@ def copilot(req: CopilotRequest):
     """
     from agent_service.agent_runner import build_copilot_prompt
 
-    # CS-4 pattern (v6): use store if warm, fall back to ai_summary on miss.
-    if req.case_id not in CASE_STORE:
-        _rehydrate_case_store(req.case_id, req.ai_summary)
-    case_data = CASE_STORE[req.case_id]
+    _validate_ai_summary_contract(req.ai_summary)
+    # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary
+    case_data = _resolve_case_store(req.case_id, req.ai_summary)
 
     runner = _get_runner()
 
-    messages, provenance_trail, tool_call_log = runner.run_scoped(
+    messages, new_provenance_trail, tool_call_log = runner.run_scoped(
         system_prompt=build_copilot_prompt(req.case_id, case_data),
         user_message=req.question,
         conversation_history=req.conversation_history or [],
@@ -639,19 +850,39 @@ def copilot(req: CopilotRequest):
 
     answer = _extract_agent_summary(messages)
 
+    # sources_cited: include the stored provenance trail from CS-4 (so context-
+    # grounded answers cite the original AppWorks sources) plus any new tool
+    # calls made during this copilot turn.
+    # This aligns with Section 3.4 where the response shows sources from the
+    # original investigation even when tool_calls_made = 0.
+    stored_provenance = case_data.get("provenance_trail", [])
+    combined_provenance = _merge_provenance(stored_provenance, new_provenance_trail)
+
     sources_cited = [
         f"{p['tool']} — {p.get('computed_by', '')} — "
         f"retrieved {p.get('retrieved_at', '')}"
-        for p in provenance_trail
+        for p in combined_provenance
+    ]
+    sources_cited_details = [
+        {
+            "tool": p.get("tool", ""),
+            "computed_by": p.get("computed_by", ""),
+            "retrieved_at": p.get("retrieved_at", ""),
+            "sources": p.get("sources", []),
+        }
+        for p in combined_provenance
     ]
 
     # CS-4: Update store if a tool was called during this Copilot turn
-    if provenance_trail:
+    if new_provenance_trail:
         new_sections = _extract_tool_results(messages)
         CASE_STORE[req.case_id].update(new_sections)
+        CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
 
     return {
         "answer":          answer,
         "sources_cited":   sources_cited,
-        "tool_calls_made": len(provenance_trail),
+        "sources_cited_details": sources_cited_details,
+        "provenance_trail": combined_provenance,
+        "tool_calls_made": len(new_provenance_trail),
     }

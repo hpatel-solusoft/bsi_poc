@@ -2,7 +2,7 @@
 Converts the manifest tool catalogue into OpenAI function-calling schema.
 Intentionally generic — has no knowledge of specific tool names.
 """
-from typing import List
+from typing import List, Optional
 
 
 # Map manifest type strings to OpenAI JSON Schema types
@@ -47,13 +47,17 @@ def _param_schema(param: dict) -> dict:
     return {**base, "description": desc}
 
 
-def build_openai_tools(dispatcher, allowed_tool_names: list[str] | None = None) -> List[dict]:
-    tools = []
-    allowed = set(allowed_tool_names or [])
-    for tool in dispatcher.get_tool_catalogue():
-        if allowed and tool["name"] not in allowed:
-            continue
+def build_openai_tools(dispatcher, execution_mode: Optional[str] = None) -> List[dict]:
+    """
+    Build OpenAI tool schemas from manifest entries.
 
+    If execution_mode is provided, only tools with matching execution_mode
+    are included (for example: "trigger: AUTO" or "trigger: ON-DEMAND").
+    """
+    tools = []
+    for tool in dispatcher.get_tool_catalogue():
+        if execution_mode and tool.get("execution_mode") != execution_mode:
+            continue
         properties = {}
         required_names = []
 
@@ -69,11 +73,17 @@ def build_openai_tools(dispatcher, allowed_tool_names: list[str] | None = None) 
             properties[param_name] = _param_schema(param)
             # Not appended to required_names
 
+        # [NEW] Append execution_mode to description to guide the LLM's 'auto' orchestration.
+        desc = tool["description"].strip()
+        mode = tool.get("execution_mode")
+        if mode:
+            desc = f"[Execution Mode: {mode}] {desc}"
+
         tools.append({
             "type": "function",
             "function": {
                 "name": tool["name"],
-                "description": tool["description"].strip(),
+                "description": desc,
                 "parameters": {
                     "type": "object",
                     "properties": properties,

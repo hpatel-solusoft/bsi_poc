@@ -65,6 +65,69 @@ def _extract_case_id_from_messages(messages: list):
     return None
 
 
+def _extract_tool_result_by_name(messages: list, tool_name: str) -> dict:
+    """Return latest parsed tool result payload for a given tool name."""
+    call_id = None
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls", []):
+                if tc.get("function", {}).get("name") == tool_name:
+                    call_id = tc.get("id")
+    if not call_id:
+        return {}
+    for msg in reversed(messages):
+        if msg.get("role") == "tool" and msg.get("tool_call_id") == call_id:
+            try:
+                return json.loads(msg.get("content", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                return {}
+    return {}
+
+
+def _extract_risk_context_from_messages(messages: list) -> dict:
+    """
+    Extract optional risk-scoring inputs from prior tool outputs.
+    Ensures calculate_risk_metrics receives rich context even if omitted by LLM.
+    """
+    intake = _extract_tool_result_by_name(messages, "verify_case_intake")
+    history = _extract_tool_result_by_name(messages, "fetch_subject_history")
+    similar = _extract_tool_result_by_name(messages, "search_similar_cases")
+
+    allegations = intake.get("allegations", []) if isinstance(intake, dict) else []
+    subjects = intake.get("subjects", []) if isinstance(intake, dict) else []
+    prior_cases = history.get("prior_cases", []) if isinstance(history, dict) else []
+
+    primary_in_prior_cases = sum(
+        1 for pc in prior_cases
+        if pc.get("is_primary_subject") is True
+    )
+    distinct_types = len({
+        (a.get("allegation_type", {}) or {}).get("id")
+        for a in allegations
+        if (a.get("allegation_type", {}) or {}).get("id")
+    })
+    has_open_allegation = any(
+        (a.get("date_closed") in (None, "")) for a in allegations
+    )
+
+    # Prefer broad candidate count when available; fallback to filtered count.
+    raw_matches = similar.get("raw_matches_found")
+    top_n = similar.get("top_n_returned")
+    similar_case_volume = raw_matches if isinstance(raw_matches, int) else top_n
+
+    return {
+        "prior_case_count": history.get("prior_case_count"),
+        "primary_in_prior_cases": primary_in_prior_cases,
+        "similar_case_volume": similar_case_volume,
+        "distinct_types": distinct_types,
+        "has_open_allegation": has_open_allegation,
+        "subject_count": len(subjects),
+        "received_age": (intake.get("details", {}) or {}).get("date_received_age"),
+        "total_calculated": (intake.get("financials", {}) or {}).get("total_calculated", 0.0),
+        "total_ordered": (intake.get("financials", {}) or {}).get("total_ordered", 0.0),
+    }
+
+
 def _summarise_result(tool_name: str, result: dict) -> str:
     """Returns a short human-readable summary of a tool result for logging."""
     try:
@@ -108,7 +171,7 @@ def _summarise_result(tool_name: str, result: dict) -> str:
 
 
 # -----------------------------------------------------------------------
-# SYSTEM PROMPT — /investigate (AUTO flow)
+# SYSTEM PROMPT — /investigate (AUTO flow — Section 3.1)
 # The LLM decides which available tools to call based on their input/output contracts.
 # No ordering instructions — Principle 1: the LLM is the router.
 # -----------------------------------------------------------------------
@@ -117,17 +180,18 @@ INVESTIGATE_SYSTEM_PROMPT = """You are the BSI Fraud Investigation AI Agent for 
 You have access to a set of approved tools connected to the AppWorks case management system. Read each tool description carefully — it defines what data it needs as input and what it produces as output. Use those data dependencies to determine which tools to call and in what order.
 
 GUARDRAILS:
-- Do not fabricate any data. If a tool returns an error, report it honestly.
-- Do not call tools not listed in your tool catalogue.
-- Treat risk_score, risk_tier, and triggered_rules as deterministic outputs produced by the BSI configured rules evaluation engine — report them exactly as returned, never modify or re-interpret them.
+- Do not fabricate data. report risk_score/tier exactly as returned.
 - Stop calling tools once you have gathered all the data needed for the investigation summary.
 
+EXECUTION RULES:
+- You are in the AUTO flow. Use only tools marked as "[Execution Mode: trigger: AUTO]".
+- Once you have called all AUTO tools and have the risk assessment, write the investigation brief and stop.
+
 SUMMARY FORMAT:
-After completing all necessary tool calls, write a comprehensive investigation brief suitable for the Bureau of Special Investigations. This is a formal case document — not a short summary.
+After completing all trigger tool calls, write a comprehensive investigation brief for the BSI.
 
 Structure:
 - Use bold section headers to organise the brief.
-- Present all data from tool outputs as readable prose and key-value pairs — never output raw JSON.
 - Include every relevant field returned by the tools. Do not omit data to be concise — investigators need the full picture.
 - Write in clear, professional English. Use paragraphs for narrative sections (case background, subject history, risk assessment) and bullet points or key-value pairs for structured data (dates, identifiers, addresses, allegation details).
 
@@ -142,30 +206,68 @@ Provenance:
 
 
 # -----------------------------------------------------------------------
-# SCOPED SYSTEM PROMPTS — ON-DEMAND flows
+# SCOPED SYSTEM PROMPTS — ON-DEMAND flows (Sections 3.2, 3.3, 3.4)
 # -----------------------------------------------------------------------
 
 def build_playbook_prompt(case_data: dict) -> str:
+    """
+    Section 3.2 — ON-DEMAND /playbook prompt.
+    Pre-extracts fraud_types and risk_tier so the LLM receives them as
+    explicit constants rather than having to traverse the nested JSON.
+    """
+    risk      = case_data.get("risk_assessment") or {}
+    complaint = case_data.get("complaint_intelligence") or {}
+
+    fraud_types = complaint.get("fraud_types") or []
+    risk_tier   = risk.get("risk_tier") or ""
+
     return f"""You are the BSI Investigation Agent. You have access to the AppWorks tool catalogue.
 
 Here is the verified investigation context for this case:
 
 {json.dumps(case_data, indent=2)}
 
-Use the tool descriptions to determine which tool to call and with what parameters, based on the data available in the context above. After the tool returns, produce a concise plain-English summary of the playbook for the investigator.
+PARAMETER EXTRACTION — use these exact values when calling the tool:
+  fraud_types : {json.dumps(fraud_types)}
+  risk_tier   : "{risk_tier}"
+
+EXECUTION RULES:
+- You are in the ON-DEMAND flow. Use only tools marked as "[Execution Mode: trigger: ON-DEMAND]".
+- Do not call AUTO tools (verify_case_intake, fetch_subject_history, search_similar_cases,
+  get_risk_rules, calculate_risk_metrics).
+- Call get_investigation_playbook with fraud_types and risk_tier exactly as listed above.
+
+After the tool returns, produce a concise plain-English summary of the playbook steps,
+tailored to the established fraud pattern and prior case findings.
 
 GUARDRAILS:
-- Do not call tools not in your catalogue.
 - Do not fabricate investigation steps.
 - Ground every claim in verified tool output or the case context above."""
 
 
 def build_report_prompt(
+    case_id: str,
     case_data: dict,
     ai_case_summary: str,
     playbook_data: dict,
     analyst_decision: dict,
 ) -> str:
+    """
+    Section 3.3 — ON-DEMAND /report prompt.
+    Pre-extracts all six required params for generate_final_report (v6 spec:
+    case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules).
+    Injecting them explicitly prevents the LLM from having to derive them from
+    deeply nested JSON, which is the primary cause of missing-param errors.
+    """
+    risk      = case_data.get("risk_assessment") or {}
+    complaint = case_data.get("complaint_intelligence") or {}
+
+    subject_id      = complaint.get("subject_primary_id") or risk.get("subject_id") or ""
+    fraud_types     = complaint.get("fraud_types") or []
+    risk_score      = risk.get("risk_score", 0.0)
+    risk_tier       = risk.get("risk_tier") or ""
+    triggered_rules = risk.get("triggered_rules") or []
+
     return f"""You are the BSI Investigation Report Agent. You have access to the AppWorks tool catalogue.
 
 Here is the full verified investigation context for this case:
@@ -182,28 +284,57 @@ Here is the full verified investigation context for this case:
 === ANALYST DECISION ===
 {json.dumps(analyst_decision, indent=2)}
 
-Use the tool descriptions to determine which tool to call and with what parameters, using the verified values from the context above. After the tool returns, synthesise all findings into a formal, director-ready investigation report.
+PARAMETER EXTRACTION — use these exact values when calling the tool.
+All six parameters are REQUIRED by the v6 spec (generate_final_report was expanded
+from case_id-only to the full set below):
+  case_id         : "{case_id}"
+  subject_id      : "{subject_id}"
+  fraud_types     : {json.dumps(fraud_types)}
+  risk_score      : {risk_score}
+  risk_tier       : "{risk_tier}"
+  triggered_rules : {json.dumps(triggered_rules)}
+
+EXECUTION RULES:
+- You are in the ON-DEMAND flow. Use only tools marked as "[Execution Mode: trigger: ON-DEMAND]".
+- Do not call AUTO tools.
+- Call generate_final_report with ALL SIX parameters listed above — omitting any one
+  will cause a dispatcher gate error.
+
+After the tool returns, synthesise all findings into a formal investigation report
+weaving together intake summary, enrichment patterns, risk rationale, playbook steps
+taken, and analyst decision.
 
 GUARDRAILS:
 - Every factual claim must reference the AppWorks source entity it came from.
-- The risk score is a deterministic output of the BSI configured rules evaluation engine — never modify or re-estimate it.
-- Do not fabricate data. If a field is missing from AppWorks, state "Not recorded in AppWorks".
+- The risk score is a deterministic output of the BSI configured rules evaluation
+  engine — never modify or re-estimate it.
+- Do not fabricate data. If a field is missing from AppWorks, state
+  "Not recorded in AppWorks".
 - Write in formal plain English suitable for a Director of Special Investigations."""
 
 
 def build_copilot_prompt(case_id: str, case_data: dict) -> str:
+    """
+    Section 3.4 — ON-DEMAND /copilot prompt (CS-5 Copilot Injected Context).
+    Full CASE_STORE[case_id] is serialised into the system prompt so the LLM
+    can answer from context. provenance_trail is included for source citations.
+    A tool is called only when the question requires data not present in context.
+    """
     return f"""You are the BSI Investigation Copilot for Case {case_id}.
 
-The following investigation data has already been retrieved and verified from AppWorks. Use it to answer investigator questions.
+The following investigation data has already been retrieved and verified from AppWorks.
+Use it to answer investigator questions.
 
 --- VERIFIED CASE CONTEXT ---
 {json.dumps(case_data, indent=2)}
 --- END CONTEXT ---
 
 GUARDRAILS:
-- Answer from the verified context above whenever possible. State which section the answer came from.
+- Answer from the verified context above whenever possible. State which section the
+  answer came from.
 - Only call a tool if the question requires data genuinely not present in the context.
-- When citing a finding, reference the AppWorks source and when it was retrieved.
+- When citing a finding, reference the provenance_trail entry for that section —
+  name the AppWorks source and when it was retrieved.
 - Do not fabricate case data.
 - If data is not in the context and no tool can retrieve it, say so explicitly."""
 
@@ -219,38 +350,52 @@ class BSIAgentRunner:
         from agent_service.tool_builder import build_openai_tools
 
         self.dispatcher = SemanticDispatcher(manifest_path)
-        self.tools = build_openai_tools(self.dispatcher)
+        self.auto_tools = build_openai_tools(
+            self.dispatcher,
+            execution_mode="trigger: AUTO",
+        )
+        self.on_demand_tools = build_openai_tools(
+            self.dispatcher,
+            execution_mode="trigger: ON-DEMAND",
+        )
         self.client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
     # ------------------------------------------------------------------
-    # AUTO flow — /investigate
+    # AUTO flow — /investigate  (Section 3.1)
     # ------------------------------------------------------------------
     def investigate(
-        self, 
-        case_id: str, 
-        allowed_tool_names: list[str] | None = None
+        self,
+        case_id: str,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages = [
             {"role": "system", "content": INVESTIGATE_SYSTEM_PROMPT},
             {"role": "user", "content": f"Investigate case {case_id}."},
         ]
-        return self._run_loop(messages, allowed_tool_names=allowed_tool_names)
+        return self._run_loop(
+            messages,
+            tools=self.auto_tools,
+            execution_mode="trigger: AUTO",
+        )
 
     # ------------------------------------------------------------------
-    # ON-DEMAND flow — /playbook, /report, /copilot
+    # ON-DEMAND flow — /playbook, /report, /copilot  (Sections 3.2–3.4)
     # ------------------------------------------------------------------
     def run_scoped(
         self,
         system_prompt: str,
         user_message: str,
         conversation_history: list | None = None,
-        allowed_tool_names: list[str] | None = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         if conversation_history:
             messages.extend(conversation_history)
         messages.append({"role": "user", "content": user_message})
-        return self._run_loop(messages, allowed_tool_names=allowed_tool_names)
+
+        return self._run_loop(
+            messages,
+            tools=self.on_demand_tools,
+            execution_mode="trigger: ON-DEMAND",
+        )
 
     # ------------------------------------------------------------------
     # Core agentic loop
@@ -258,7 +403,8 @@ class BSIAgentRunner:
     def _run_loop(
         self,
         messages: List[Dict],
-        allowed_tool_names: list[str] | None = None,
+        tools: List[Dict],
+        execution_mode: str,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
         Returns (messages, provenance_trail, tool_call_log).
@@ -270,22 +416,17 @@ class BSIAgentRunner:
         provenance_trail: List[Dict] = []
         tool_call_log:    List[Dict] = []   # CS-LOG: full per-call trace
 
-        tools = self.tools
-        if allowed_tool_names:
-            allowed = set(allowed_tool_names)
-            tools = [
-                tool for tool in self.tools
-                if tool.get("function", {}).get("name") in allowed
-            ]
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        logger.info(f"[AGENT] Starting loop with model={model!r}, tools={len(tools)}")
 
         turn = 0
         while True:
             turn += 1
             response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model,
                 messages=messages,
-                tools=tools,
-                tool_choice="auto",
+                tools=tools if tools else None,
+                tool_choice="auto" if tools else None,
             )
 
             choice = response.choices[0]
@@ -348,6 +489,7 @@ class BSIAgentRunner:
                 #      redundant Workfolder_FinancialRelationship fetch when
                 #      the LLM did not forward financial figures from intake.
                 if tool_name == "calculate_risk_metrics":
+                    risk_ctx = _extract_risk_context_from_messages(messages)
                     if "active_rules" not in params:
                         rules_from_history = _extract_rules_from_messages(messages)
                         if rules_from_history:
@@ -356,15 +498,42 @@ class BSIAgentRunner:
                                 f"[PRE-INJECT] active_rules injected before dispatch "
                                 f"({len(rules_from_history)} rules from message history)"
                             )
-                    if "total_calculated" not in params:
-                        params = {**params, "total_calculated": 0.0, "total_ordered": 0.0}
-                        logger.info(
-                            "[PRE-INJECT] total_calculated/total_ordered defaulted to 0.0 "
-                            "(no financial figures forwarded by LLM)"
-                        )
+                    for k in (
+                        "prior_case_count",
+                        "primary_in_prior_cases",
+                        "similar_case_volume",
+                        "distinct_types",
+                        "has_open_allegation",
+                        "subject_count",
+                        "received_age",
+                        "total_calculated",
+                        "total_ordered",
+                    ):
+                        if k not in params and risk_ctx.get(k) is not None:
+                            params[k] = risk_ctx[k]
+                    # If LLM passed a sparse/filtered volume (often 0 after manifest
+                    # filtering), promote it to broad candidate volume when available.
+                    if (
+                        "similar_case_volume" in params
+                        and isinstance(params.get("similar_case_volume"), (int, float))
+                        and params.get("similar_case_volume", 0) <= 0
+                        and isinstance(risk_ctx.get("similar_case_volume"), int)
+                        and risk_ctx.get("similar_case_volume", 0) > 0
+                    ):
+                        params["similar_case_volume"] = risk_ctx["similar_case_volume"]
+                    logger.info(
+                        "[PRE-INJECT] risk context enriched: "
+                        f"similar_case_volume={params.get('similar_case_volume')} "
+                        f"prior_case_count={params.get('prior_case_count')} "
+                        f"distinct_types={params.get('distinct_types')}"
+                    )
                 # ── end pre-inject ───────────────────────────────────────────
 
-                envelope = self.dispatcher.dispatch(tool_name, params)
+                envelope = self.dispatcher.dispatch(
+                    tool_name,
+                    params,
+                    expected_execution_mode=execution_mode,
+                )
                 elapsed_ms = round((time.monotonic() - call_start) * 1000)
 
                 if envelope.get("status") == "ok":
