@@ -27,13 +27,15 @@ def _validate(model_class, envelope: dict, tool_name: str) -> dict:
     Normalization Layer Gatekeeper.
     Validates the 'result' portion of a tool response against a Pydantic model.
     Ensures absolute schema alignment before the LLM consumes the data.
+    Returns the envelope with the 'result' key replaced by validated_data.
     """
     try:
         raw_result = envelope.get("result", {})
         # Create a validated instance. .model_dump() returns a clean dict.
         validated_data = model_class(**raw_result).model_dump(by_alias=True)
-        envelope["result"] = validated_data
-        return envelope
+        # Return a new envelope with result replaced by the validated output.
+        # The original envelope (including provenance) is preserved unchanged.
+        return {**envelope, "result": validated_data}
     except Exception as e:
         logger.error(f"Normalization failure in {tool_name}: {e}")
         # v6 spec recommends strict enforcement. Raising an exception allows

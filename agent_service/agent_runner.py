@@ -19,155 +19,80 @@ logger = logging.getLogger(__name__)
 # RESULT SUMMARISER — concise one-liner per tool for tool_call_log
 # -----------------------------------------------------------------------
 
-def _extract_rules_from_messages(messages: list) -> list:
-    """
-    Scan message history for get_risk_rules tool result and return rules array.
-    Used to auto-inject active_rules when LLM omits them from calculate_risk_metrics.
-    """
-    rules_call_id = None
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            for tc in msg.get("tool_calls", []):
-                if tc.get("function", {}).get("name") == "get_risk_rules":
-                    rules_call_id = tc.get("id")
-    if not rules_call_id:
-        return []
-    for msg in messages:
-        if msg.get("role") == "tool" and msg.get("tool_call_id") == rules_call_id:
-            try:
-                data = json.loads(msg["content"])
-                return data.get("rules", [])
-            except (json.JSONDecodeError, TypeError):
-                return []
-    return []
-
-
-def _extract_case_id_from_messages(messages: list):
-    """
-    Scan message history for verify_case_intake tool result and return its case_id.
-    Used to auto-inject case_id into search_similar_cases when the LLM omits it.
-    """
-    intake_call_id = None
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            for tc in msg.get("tool_calls", []):
-                if tc.get("function", {}).get("name") == "verify_case_intake":
-                    intake_call_id = tc.get("id")
-    if not intake_call_id:
-        return None
-    for msg in messages:
-        if msg.get("role") == "tool" and msg.get("tool_call_id") == intake_call_id:
-            try:
-                data = json.loads(msg["content"])
-                return str(data.get("case_id", "")) or None
-            except (json.JSONDecodeError, TypeError):
-                return None
-    return None
-
-
-def _extract_tool_result_by_name(messages: list, tool_name: str) -> dict:
-    """Return latest parsed tool result payload for a given tool name."""
-    call_id = None
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            for tc in msg.get("tool_calls", []):
-                if tc.get("function", {}).get("name") == tool_name:
-                    call_id = tc.get("id")
-    if not call_id:
-        return {}
-    for msg in reversed(messages):
-        if msg.get("role") == "tool" and msg.get("tool_call_id") == call_id:
-            try:
-                return json.loads(msg.get("content", "{}"))
-            except (json.JSONDecodeError, TypeError):
-                return {}
-    return {}
-
-
-def _extract_risk_context_from_messages(messages: list) -> dict:
-    """
-    Extract optional risk-scoring inputs from prior tool outputs.
-    Ensures calculate_risk_metrics receives rich context even if omitted by LLM.
-    """
-    intake = _extract_tool_result_by_name(messages, "verify_case_intake")
-    history = _extract_tool_result_by_name(messages, "fetch_subject_history")
-    similar = _extract_tool_result_by_name(messages, "search_similar_cases")
-
-    allegations = intake.get("allegations", []) if isinstance(intake, dict) else []
-    subjects = intake.get("subjects", []) if isinstance(intake, dict) else []
-    prior_cases = history.get("prior_cases", []) if isinstance(history, dict) else []
-
-    primary_in_prior_cases = sum(
-        1 for pc in prior_cases
-        if pc.get("is_primary_subject") is True
-    )
-    distinct_types = len({
-        (a.get("allegation_type", {}) or {}).get("id")
-        for a in allegations
-        if (a.get("allegation_type", {}) or {}).get("id")
-    })
-    has_open_allegation = any(
-        (a.get("date_closed") in (None, "")) for a in allegations
-    )
-
-    # Prefer broad candidate count when available; fallback to filtered count.
-    raw_matches = similar.get("raw_matches_found")
-    top_n = similar.get("top_n_returned")
-    similar_case_volume = raw_matches if isinstance(raw_matches, int) else top_n
-
-    return {
-        "prior_case_count": history.get("prior_case_count"),
-        "primary_in_prior_cases": primary_in_prior_cases,
-        "similar_case_volume": similar_case_volume,
-        "distinct_types": distinct_types,
-        "has_open_allegation": has_open_allegation,
-        "subject_count": len(subjects),
-        "received_age": (intake.get("details", {}) or {}).get("date_received_age"),
-        "total_calculated": (intake.get("financials", {}) or {}).get("total_calculated", 0.0),
-        "total_ordered": (intake.get("financials", {}) or {}).get("total_ordered", 0.0),
-    }
-
-
 def _summarise_result(tool_name: str, result: dict) -> str:
-    """Returns a short human-readable summary of a tool result for logging."""
+    """
+    Returns a short human-readable summary of a tool result for logging.
+    Uses only generic field names known from the semantic model contract —
+    no hardcoded tool name checks. Renaming a tool in manifest.yaml
+    requires no change here.
+    """
     try:
-        if tool_name == "verify_case_intake":
-            ci = result
-            complaint_no = ci.get("summary", {}).get("complaint_no") or ci.get("case_id", "?")
-            subjects = ci.get("subjects", [])
-            fraud_types = ci.get("fraud_types", [])
-            return (
-                f"case={complaint_no} subjects={len(subjects)} "
-                f"fraud_types={fraud_types}"
+        parts = []
+
+        # Case/complaint identifier
+        summary_block = result.get("summary")
+        for key in ("complaint_no", "case_id", "workfolder_id"):
+            val = (
+                summary_block.get(key)
+                if isinstance(summary_block, dict)
+                else result.get(key)
             )
-        if tool_name == "fetch_subject_history":
-            fn = result.get("first_name", "")
-            ln = result.get("last_name", "")
-            prior = result.get("prior_case_count", "?")
-            return f"subject={fn} {ln} prior_cases={prior}"
-        if tool_name == "search_similar_cases":
-            n = result.get("top_n_returned", 0)
+            if val:
+                parts.append(f"case={val}")
+                break
+
+        # Subject name (enrichment)
+        fn = result.get("first_name", "")
+        ln = result.get("last_name", "")
+        if fn or ln:
+            parts.append(f"subject={fn} {ln}".strip())
+
+        # Prior case count
+        prior = result.get("prior_case_count")
+        if prior is not None:
+            parts.append(f"prior_cases={prior}")
+
+        # Similar cases
+        top_n = result.get("top_n_returned")
+        if top_n is not None:
             q = result.get("query_summary", "")
-            return f"matches={n} — {q}"
-        if tool_name == "get_risk_rules":
-            rules = result.get("rules", [])
-            return f"{len(rules)} active rule(s) loaded"
-        if tool_name == "calculate_risk_metrics":
-            score = result.get("risk_score", "?")
-            tier  = result.get("risk_tier", "?")
-            pts   = result.get("total_points", "?")
-            mx    = result.get("max_points", "?")
-            return f"score={score} tier={tier} pts={pts}/{mx}"
-        if tool_name == "get_investigation_playbook":
-            pid = result.get("playbook_id", "?")
-            steps = len(result.get("investigation_steps", []))
-            return f"playbook={pid} steps={steps}"
-        if tool_name == "generate_final_report":
-            secs = len(result.get("sections", {}))
-            return f"report_sections={secs}"
+            parts.append(f"matches={top_n}")
+            if q:
+                parts.append(q)
+
+        # Rules list
+        rules = result.get("rules")
+        if isinstance(rules, list):
+            parts.append(f"{len(rules)} active rule(s) loaded")
+
+        # Risk score / tier
+        score = result.get("risk_score")
+        tier  = result.get("risk_tier")
+        if score is not None and tier is not None:
+            pts = result.get("total_points", "?")
+            mx  = result.get("max_points", "?")
+            parts.append(f"score={score} tier={tier} pts={pts}/{mx}")
+
+        # Playbook
+        pid = result.get("playbook_id")
+        if pid is not None:
+            steps = result.get("investigation_steps", [])
+            parts.append(f"playbook={pid} steps={len(steps) if isinstance(steps, list) else '?'}")
+
+        # Final report
+        secs = result.get("sections")
+        if isinstance(secs, dict) and result.get("report_id"):
+            parts.append(f"report_sections={len(secs)}")
+
+        if parts:
+            return " | ".join(parts)
+
     except Exception:
         pass
     return json.dumps(result, default=str)[:120]
+
+
+
 
 
 # -----------------------------------------------------------------------
@@ -184,8 +109,18 @@ GUARDRAILS:
 - Stop calling tools once you have gathered all the data needed for the investigation summary.
 
 EXECUTION RULES:
-- You are in the AUTO flow. Use only tools marked as "[Execution Mode: trigger: AUTO]".
+- You are in the AUTO flow. Use only tools marked as "[Trigger: AUTO]".
 - Once you have called all AUTO tools and have the risk assessment, write the investigation brief and stop.
+
+PARAMETER PASSING FOR calculate_risk_metrics:
+- ALWAYS pass active_rules from get_risk_rules result.rules.
+- ALWAYS pass total_calculated and total_ordered from verify_case_intake result financials (use 0.0 if financials.records is empty — do NOT omit these fields).
+- ALWAYS pass prior_case_count from fetch_subject_history result.
+- ALWAYS pass similar_case_volume (top_n_returned) from search_similar_cases result.
+- ALWAYS pass distinct_types (count of unique allegation_type ids in verify_case_intake allegations).
+- ALWAYS pass has_open_allegation (true if any allegation has date_closed null/missing).
+- ALWAYS pass subject_count (count of subjects in verify_case_intake subjects list).
+- ALWAYS pass received_age (date_received_age from verify_case_intake details).
 
 SUMMARY FORMAT:
 After completing all trigger tool calls, write a comprehensive investigation brief for the BSI.
@@ -232,9 +167,8 @@ PARAMETER EXTRACTION — use these exact values when calling the tool:
   risk_tier   : "{risk_tier}"
 
 EXECUTION RULES:
-- You are in the ON-DEMAND flow. Use only tools marked as "[Execution Mode: trigger: ON-DEMAND]".
-- Do not call AUTO tools (verify_case_intake, fetch_subject_history, search_similar_cases,
-  get_risk_rules, calculate_risk_metrics).
+- You are in the ON-DEMAND flow. Use only tools marked as "[Trigger: ON-DEMAND]".
+- Do not call AUTO tools — all case data has already been gathered and is provided in the context above.
 - Call get_investigation_playbook with fraud_types and risk_tier exactly as listed above.
 
 After the tool returns, produce a concise plain-English summary of the playbook steps,
@@ -295,7 +229,7 @@ from case_id-only to the full set below):
   triggered_rules : {json.dumps(triggered_rules)}
 
 EXECUTION RULES:
-- You are in the ON-DEMAND flow. Use only tools marked as "[Execution Mode: trigger: ON-DEMAND]".
+- You are in the ON-DEMAND flow. Use only tools marked as "[Trigger: ON-DEMAND]".
 - Do not call AUTO tools.
 - Call generate_final_report with ALL SIX parameters listed above — omitting any one
   will cause a dispatcher gate error.
@@ -352,11 +286,11 @@ class BSIAgentRunner:
         self.dispatcher = SemanticDispatcher(manifest_path)
         self.auto_tools = build_openai_tools(
             self.dispatcher,
-            execution_mode="trigger: AUTO",
+            trigger="AUTO",
         )
         self.on_demand_tools = build_openai_tools(
             self.dispatcher,
-            execution_mode="trigger: ON-DEMAND",
+            trigger="ON-DEMAND",
         )
         self.client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
@@ -374,7 +308,7 @@ class BSIAgentRunner:
         return self._run_loop(
             messages,
             tools=self.auto_tools,
-            execution_mode="trigger: AUTO",
+            trigger="AUTO",
         )
 
     # ------------------------------------------------------------------
@@ -394,7 +328,7 @@ class BSIAgentRunner:
         return self._run_loop(
             messages,
             tools=self.on_demand_tools,
-            execution_mode="trigger: ON-DEMAND",
+            trigger="ON-DEMAND",
         )
 
     # ------------------------------------------------------------------
@@ -404,7 +338,7 @@ class BSIAgentRunner:
         self,
         messages: List[Dict],
         tools: List[Dict],
-        execution_mode: str,
+        trigger: str,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
         Returns (messages, provenance_trail, tool_call_log).
@@ -469,70 +403,19 @@ class BSIAgentRunner:
                     f"input={json.dumps(params, default=str)[:600]}"
                 )
 
-                # ── pre-dispatch enrichment ──────────────────────────────────
-                # Inject case_id into search_similar_cases if the LLM omitted it.
-                # The traversal strategy in f3 requires case_id to resolve subjects
-                # and allegation type IDs — without it the call returns zero results.
-                if tool_name == "search_similar_cases" and "case_id" not in params:
-                    case_id_from_history = _extract_case_id_from_messages(messages)
-                    if case_id_from_history:
-                        params = {**params, "case_id": case_id_from_history}
-                        logger.info(
-                            f"[PRE-INJECT] case_id={case_id_from_history!r} injected "
-                            f"into search_similar_cases from verify_case_intake history"
-                        )
-
-                # Inject missing context for calculate_risk_metrics:
-                #   1. active_rules — prevents f4 from making a redundant
-                #      AppWorks AgentRulesTable fetch on every risk call.
-                #   2. total_calculated / total_ordered defaults — prevents a
-                #      redundant Workfolder_FinancialRelationship fetch when
-                #      the LLM did not forward financial figures from intake.
-                if tool_name == "calculate_risk_metrics":
-                    risk_ctx = _extract_risk_context_from_messages(messages)
-                    if "active_rules" not in params:
-                        rules_from_history = _extract_rules_from_messages(messages)
-                        if rules_from_history:
-                            params = {**params, "active_rules": rules_from_history}
-                            logger.info(
-                                f"[PRE-INJECT] active_rules injected before dispatch "
-                                f"({len(rules_from_history)} rules from message history)"
-                            )
-                    for k in (
-                        "prior_case_count",
-                        "primary_in_prior_cases",
-                        "similar_case_volume",
-                        "distinct_types",
-                        "has_open_allegation",
-                        "subject_count",
-                        "received_age",
-                        "total_calculated",
-                        "total_ordered",
-                    ):
-                        if k not in params and risk_ctx.get(k) is not None:
-                            params[k] = risk_ctx[k]
-                    # If LLM passed a sparse/filtered volume (often 0 after manifest
-                    # filtering), promote it to broad candidate volume when available.
-                    if (
-                        "similar_case_volume" in params
-                        and isinstance(params.get("similar_case_volume"), (int, float))
-                        and params.get("similar_case_volume", 0) <= 0
-                        and isinstance(risk_ctx.get("similar_case_volume"), int)
-                        and risk_ctx.get("similar_case_volume", 0) > 0
-                    ):
-                        params["similar_case_volume"] = risk_ctx["similar_case_volume"]
-                    logger.info(
-                        "[PRE-INJECT] risk context enriched: "
-                        f"similar_case_volume={params.get('similar_case_volume')} "
-                        f"prior_case_count={params.get('prior_case_count')} "
-                        f"distinct_types={params.get('distinct_types')}"
-                    )
-                # ── end pre-inject ───────────────────────────────────────────
+                # No pre-dispatch parameter injection — manifest is the single
+                # source of truth (Principle 6). If the LLM omits a required
+                # parameter, the dispatcher's Gate 2 rejects the call and the
+                # LLM self-corrects from the error message. Hardcoding tool names
+                # or silently injecting parameters here would:
+                #   a) violate manifest-as-single-source-of-truth principle;
+                #   b) mask LLM errors silently rather than surfacing them;
+                #   c) break if any tool is renamed in the manifest.
 
                 envelope = self.dispatcher.dispatch(
                     tool_name,
                     params,
-                    expected_execution_mode=execution_mode,
+                    expected_trigger=trigger,
                 )
                 elapsed_ms = round((time.monotonic() - call_start) * 1000)
 

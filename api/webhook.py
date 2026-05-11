@@ -658,19 +658,27 @@ def investigate(req: InvestigateRequest):
 
         # CS-4: populate store with all sections + provenance.
         CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
-        # Agent 1 summary intentionally uses the model's original narrative output
-        # (legacy behavior requested by user) instead of deterministic formatter.
-        human_summary = _extract_agent_summary(messages)
+
+        # ── Response split (v6 spec) ────────────────────────────────────────
+        # ai_summary: the contract object passed as-is to /playbook, /report,
+        #   /copilot. Contains only what downstream routes need.
+        # details: human-readable narrative + meta — NOT required by downstream.
+        # ──────────────────────────────────────────────────────────────────────
+        ai_summary = {
+            "investigation":    sections,
+            "provenance_trail": provenance_trail,
+        }
 
         return {
-            "case_id": req.case_id,
-            "status": "completed",
-            "agent_summary": human_summary,
-            "investigation": sections,
-            "provenance_trail": provenance_trail,
-            "meta": {
-                "tool_calls_made": len(provenance_trail),
-                "duration_seconds": round(time.time() - start, 1),
+            "case_id":    req.case_id,
+            "status":     "completed",
+            "ai_summary": ai_summary,          # ← pass this object to /playbook, /report, /copilot
+            "details": {
+                "agent_summary": _extract_agent_summary(messages),
+                "meta": {
+                    "tool_calls_made":  len(provenance_trail),
+                    "duration_seconds": round(time.time() - start, 1),
+                },
             },
         }
     except HTTPException:
@@ -720,16 +728,26 @@ def playbook(req: PlaybookRequest):
         CASE_STORE[req.case_id].update(playbook_section)
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
 
-        return {
-            "case_id": req.case_id,
-            "status": "completed",
-            "agent_summary": _build_playbook_summary(
-                req.case_id,
-                playbook_section.get("investigation_playbook", {}),
-                merged_provenance,
-            ),
-            "investigation": playbook_section,
+        # ai_summary: updated contract — includes all prior investigation sections
+        # plus the new playbook section. Pass this to /report and /copilot.
+        updated_sections = {**case_data, **playbook_section}
+        updated_sections.pop("provenance_trail", None)
+        ai_summary = {
+            "investigation":    updated_sections,
             "provenance_trail": merged_provenance,
+        }
+
+        return {
+            "case_id":    req.case_id,
+            "status":     "completed",
+            "ai_summary": ai_summary,          # ← pass this object to /report, /copilot
+            "details": {
+                "agent_summary": _build_playbook_summary(
+                    req.case_id,
+                    playbook_section.get("investigation_playbook", {}),
+                    merged_provenance,
+                ),
+            },
         }
     except HTTPException:
         raise
@@ -803,17 +821,27 @@ def report(req: ReportRequest):
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
         final_report = report_section.get("final_report", {})
 
-        return {
-            "case_id": req.case_id,
-            "status": "completed",
-            "agent_summary": _build_report_summary(
-                req.case_id,
-                final_report,
-                case_data,
-                merged_provenance,
-            ),
-            "investigation": report_section,
+        # ai_summary: final complete contract — all sections including report.
+        # Pass to /copilot for grounded Q&A on the final report.
+        updated_sections = {**case_data, **report_section}
+        updated_sections.pop("provenance_trail", None)
+        ai_summary = {
+            "investigation":    updated_sections,
             "provenance_trail": merged_provenance,
+        }
+
+        return {
+            "case_id":    req.case_id,
+            "status":     "completed",
+            "ai_summary": ai_summary,          # ← pass to /copilot
+            "details": {
+                "agent_summary": _build_report_summary(
+                    req.case_id,
+                    final_report,
+                    case_data,
+                    merged_provenance,
+                ),
+            },
         }
     except HTTPException:
         raise
@@ -834,55 +862,66 @@ def copilot(req: CopilotRequest):
     If provenance_trail is absent from ai_summary, source citations degrade
     gracefully — no crash.
     """
-    from agent_service.agent_runner import build_copilot_prompt
+    try:
+        from agent_service.agent_runner import build_copilot_prompt
 
-    _validate_ai_summary_contract(req.ai_summary)
-    # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary
-    case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        _validate_ai_summary_contract(req.ai_summary)
+        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary
+        cs4_warm = req.case_id in CASE_STORE
+        case_data = _resolve_case_store(req.case_id, req.ai_summary)
 
-    runner = _get_runner()
+        runner = _get_runner()
 
-    messages, new_provenance_trail, tool_call_log = runner.run_scoped(
-        system_prompt=build_copilot_prompt(req.case_id, case_data),
-        user_message=req.question,
-        conversation_history=req.conversation_history or [],
-    )
+        messages, new_provenance_trail, tool_call_log = runner.run_scoped(
+            system_prompt=build_copilot_prompt(req.case_id, case_data),
+            user_message=req.question,
+            conversation_history=req.conversation_history or [],
+        )
 
-    answer = _extract_agent_summary(messages)
+        answer = _extract_agent_summary(messages)
 
-    # sources_cited: include the stored provenance trail from CS-4 (so context-
-    # grounded answers cite the original AppWorks sources) plus any new tool
-    # calls made during this copilot turn.
-    # This aligns with Section 3.4 where the response shows sources from the
-    # original investigation even when tool_calls_made = 0.
-    stored_provenance = case_data.get("provenance_trail", [])
-    combined_provenance = _merge_provenance(stored_provenance, new_provenance_trail)
+        # sources_cited: include the stored provenance trail from CS-4 (so context-
+        # grounded answers cite the original AppWorks sources) plus any new tool
+        # calls made during this copilot turn.
+        # This aligns with Section 3.4 where the response shows sources from the
+        # original investigation even when tool_calls_made = 0.
+        stored_provenance = case_data.get("provenance_trail", [])
+        combined_provenance = _merge_provenance(stored_provenance, new_provenance_trail)
 
-    sources_cited = [
-        f"{p['tool']} — {p.get('computed_by', '')} — "
-        f"retrieved {p.get('retrieved_at', '')}"
-        for p in combined_provenance
-    ]
-    sources_cited_details = [
-        {
-            "tool": p.get("tool", ""),
-            "computed_by": p.get("computed_by", ""),
-            "retrieved_at": p.get("retrieved_at", ""),
-            "sources": p.get("sources", []),
+        sources_cited = [
+            f"{p['tool']} — {p.get('computed_by', '')} — "
+            f"retrieved {p.get('retrieved_at', '')}"
+            for p in combined_provenance
+        ]
+        sources_cited_details = [
+            {
+                "tool": p.get("tool", ""),
+                "computed_by": p.get("computed_by", ""),
+                "retrieved_at": p.get("retrieved_at", ""),
+                "sources": p.get("sources", []),
+            }
+            for p in combined_provenance
+        ]
+
+        # CS-4: Update store only if the case entry still exists (it may have
+        # been evicted if TTL expires between _resolve_case_store and here).
+        if new_provenance_trail and req.case_id in CASE_STORE:
+            new_sections = _extract_tool_results(messages)
+            CASE_STORE[req.case_id].update(new_sections)
+            CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
+
+        return {
+            "answer":               answer,
+            "sources_cited":        sources_cited,
+            "sources_cited_details": sources_cited_details,
+            "provenance_trail":     combined_provenance,
+            "tool_calls_made":      len(new_provenance_trail),
+            "cs4_source":           "warm" if cs4_warm else "rehydrated",
         }
-        for p in combined_provenance
-    ]
-
-    # CS-4: Update store if a tool was called during this Copilot turn
-    if new_provenance_trail:
-        new_sections = _extract_tool_results(messages)
-        CASE_STORE[req.case_id].update(new_sections)
-        CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
-
-    return {
-        "answer":          answer,
-        "sources_cited":   sources_cited,
-        "sources_cited_details": sources_cited_details,
-        "provenance_trail": combined_provenance,
-        "tool_calls_made": len(new_provenance_trail),
-    }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Copilot route failed for case_id=%s", req.case_id)
+        raise HTTPException(status_code=500, detail=f"Copilot failed: {exc}") from exc
+    finally:
+        logger.info("POST /copilot completed for case_id=%s", req.case_id)
