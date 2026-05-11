@@ -62,14 +62,14 @@ class InvestigationStep(BaseModel):
     action:        str
     owner:         str
     deadline_days: int
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}
 
 
 class EvidenceItem(BaseModel):
     """A single item in the evidence checklist."""
     item:      str
     mandatory: Optional[bool] = True
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}
 
 
 class SimilarCaseMatch(BaseModel):
@@ -80,9 +80,13 @@ class SimilarCaseMatch(BaseModel):
     fraud_type:           str
     outcome:              str
     summary:              str
-    estimated_loss:       float = 0.0
-    financial_calculated: float = 0.0
-    model_config = {"extra": "allow"}
+    # estimated_loss removed — not part of the canonical model (Code Review #9)
+    # financial_calculated has no default — AppWorks must supply it or call is rejected (#9)
+    financial_calculated: Optional[float] = None
+    # Workfolder metadata carried through from AppWorks for filtering and display
+    status:               Optional[str] = None
+    date_received:        Optional[str] = None
+    model_config = {"extra": "forbid"}
 
 
 # ================================================================
@@ -202,10 +206,13 @@ class SubjectProfile(BaseModel):
 # ================================================================
 
 class SimilarCasesResult(BaseModel):
-    query_summary:  str
-    matches:        list[SimilarCaseMatch]
-    top_n_returned: int
-    model_config = {"extra": "allow"}
+    query_summary:             str
+    matches:                   list[SimilarCaseMatch]
+    top_n_returned:            int
+    # Filtering provenance — always populated by f3 for traceability
+    raw_matches_found:         Optional[int] = None
+    manifest_filters_applied:  Optional[dict] = None
+    model_config = {"extra": "forbid"}
 
 
 # ================================================================
@@ -235,7 +242,7 @@ class RiskRuleDef(BaseModel):
 
 class RiskRulesResult(BaseModel):
     rules: list[RiskRuleDef]
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}
 
 
 # ================================================================
@@ -251,7 +258,8 @@ class RiskAssessment(BaseModel):
     total_points:         Optional[float] = None
     max_points:           Optional[float] = None
     billing_anomaly_flag: bool = False
-    prior_case_count:     int = 0
+    # prior_case_count has no default — it must be present in the computed output (#10)
+    prior_case_count:     Optional[int] = None
     recommendation:       str
     model_config = {"extra": "allow"}
 
@@ -267,7 +275,7 @@ class InvestigationPlaybook(BaseModel):
     investigation_steps: list[InvestigationStep]
     evidence_checklist:  list[EvidenceItem]
     escalation_required: bool
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}
 
 
 # ================================================================
@@ -280,4 +288,4 @@ class FinalReport(BaseModel):
     generated_at: str
     sections:     dict
     status:       str
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}

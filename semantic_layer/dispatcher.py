@@ -21,7 +21,7 @@ class SemanticDispatcher:
         self,
         tool_name: str,
         params: Dict[str, Any],
-        expected_execution_mode: Optional[str] = None,
+        expected_trigger: Optional[str] = None,
     ) -> dict:
         # --- Gate 1: Registry check ---
         if tool_name not in self.tool_registry:
@@ -35,15 +35,15 @@ class SemanticDispatcher:
             }
 
         tool_config = self.tool_registry[tool_name]
-        tool_mode = tool_config.get("execution_mode")
+        tool_mode = tool_config.get("trigger")
 
         # Defense-in-depth: enforce execution mode at dispatcher level too.
-        if expected_execution_mode and tool_mode != expected_execution_mode:
+        if expected_trigger and tool_mode != expected_trigger:
             return {
                 "status": "error",
                 "message": (
                     f"Tool '{tool_name}' is not allowed in this flow. "
-                    f"Expected mode '{expected_execution_mode}', tool mode is '{tool_mode}'."
+                    f"Expected trigger '{expected_trigger}', tool mode is '{tool_mode}'."
                 ),
             }
 

@@ -605,14 +605,11 @@ def _score_dimension(
 
     if dimension_key == "subject_history":
         if prior_case_count is None:
-            # LLM did not pass prior_case_count — this means the LLM skipped
-            # passing the context param. Log a warning and attempt fetch.
-            # If fetch fails (network unreachable), score will be 0.
-            logger.warning(
-                f"prior_case_count not passed by LLM for subject_history — "
-                f"attempting AppWorks fetch (may fail if network unreachable)"
-            )
-            p_count, is_p_ge2 = _fetch_subject_history(subject_id, case_id)
+            # Optional param not passed by LLM — score 0 for this dimension.
+            # Per Principle 2, no AppWorks fetch allowed inside scoring logic.
+            logger.warning("prior_case_count not passed — subject_history scores 0")
+            flags.append("Subject History: prior_case_count not provided — 0 pts")
+            return 0.0, {}
         else:
             p_count  = int(prior_case_count)
             # primary_in_prior_cases may come as int or as a bool coerced by LLM
@@ -637,11 +634,15 @@ def _score_dimension(
 
     elif dimension_key == "financial_exposure":
         if total_calculated is None:
-            logger.warning(
-                "total_calculated not passed by LLM for financial_exposure — "
-                "attempting AppWorks fetch"
+            # Financial data not passed — score 0. This is expected when intake
+            # returns no financial records (total_calculated=0 from verify_case_intake).
+            # Per Principle 2, no AppWorks fetch inside scoring logic.
+            logger.info(
+                "total_calculated not passed for financial_exposure — scoring 0 "
+                "(pass total_calculated from verify_case_intake financials)"
             )
-            total_calculated, total_ordered = _fetch_financial_exposure(case_id)
+            total_calculated = 0.0
+            total_ordered    = 0.0
         else:
             total_calculated = _safe_float(total_calculated)
             total_ordered    = _safe_float(total_ordered) if total_ordered is not None else 0.0
@@ -662,11 +663,10 @@ def _score_dimension(
 
     elif dimension_key == "similar_case_volume":
         if similar_case_volume is None:
-            logger.warning(
-                "similar_case_volume not passed by LLM — "
-                "attempting AppWorks fetch"
-            )
-            similar_case_volume = _fetch_similar_case_volume(case_id)
+            # Not passed — score 0. Per Principle 2, no AppWorks fetch here.
+            logger.warning("similar_case_volume not passed — similar_case_volume scores 0")
+            flags.append("Similar Case Volume: similar_case_volume not provided — 0 pts")
+            return 0.0, {}
         else:
             similar_case_volume = int(similar_case_volume)
 
@@ -676,11 +676,10 @@ def _score_dimension(
 
     elif dimension_key == "allegation_severity":
         if distinct_types is None:
-            logger.warning(
-                "distinct_types not passed by LLM for allegation_severity — "
-                "attempting AppWorks fetch"
-            )
-            distinct_types, has_open_allegation = _fetch_allegation_severity(case_id)
+            # Not passed — score 0. Per Principle 2, no AppWorks fetch here.
+            logger.warning("distinct_types not passed — allegation_severity scores 0")
+            flags.append("Allegation Severity: distinct_types not provided — 0 pts")
+            return 0.0, {}
         else:
             distinct_types = int(distinct_types)
             # Normalise has_open_allegation — LLM may pass as bool, int, or string
@@ -703,11 +702,10 @@ def _score_dimension(
 
     elif dimension_key == "case_characteristics":
         if fast_track is None and subject_count is None and received_age is None:
-            logger.warning(
-                "case_characteristics params not passed by LLM — "
-                "attempting AppWorks fetch"
-            )
-            fast_track, subject_count, received_age = _fetch_case_characteristics(case_id)
+            # Not passed — score 0. Per Principle 2, no AppWorks fetch here.
+            logger.warning("case_characteristics params not passed — scores 0")
+            flags.append("Case Characteristics: params not provided — 0 pts")
+            return 0.0, {}
         else:
             # Normalise: LLM may pass booleans as strings "True"/"False"
             if isinstance(fast_track, str):
@@ -1097,11 +1095,14 @@ def calculate_risk_metrics(
     if isinstance(fraud_types, str):
         fraud_types = [fraud_types]
 
-    # Obtain active rules — from LLM (preferred) or fetched directly
+    # active_rules MUST be passed by the LLM from a prior get_risk_rules call.
+    # Calling get_risk_rules() directly here would bypass all three dispatcher
+    # gates and leave no provenance trail entry. Reject if absent. (#14)
     if active_rules is None:
-        logger.info("active_rules not provided — fetching from AppWorks directly")
-        rules_envelope = get_risk_rules()
-        active_rules   = rules_envelope["result"].get("rules", [])
+        raise ValueError(
+            "active_rules is required. Call get_risk_rules first and pass "
+            "result['rules'] as active_rules to this tool."
+        )
 
     if not active_rules:
         logger.warning("No active rules — risk score will be 0")

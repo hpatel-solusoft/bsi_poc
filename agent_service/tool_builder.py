@@ -47,16 +47,16 @@ def _param_schema(param: dict) -> dict:
     return {**base, "description": desc}
 
 
-def build_openai_tools(dispatcher, execution_mode: Optional[str] = None) -> List[dict]:
+def build_openai_tools(dispatcher, trigger: Optional[str] = None) -> List[dict]:
     """
     Build OpenAI tool schemas from manifest entries.
 
-    If execution_mode is provided, only tools with matching execution_mode
-    are included (for example: "trigger: AUTO" or "trigger: ON-DEMAND").
+    If trigger is provided, only tools with matching trigger value
+    are included (for example: "AUTO" or "ON-DEMAND").
     """
     tools = []
     for tool in dispatcher.get_tool_catalogue():
-        if execution_mode and tool.get("execution_mode") != execution_mode:
+        if trigger and tool.get("trigger") != trigger:
             continue
         properties = {}
         required_names = []
@@ -73,11 +73,11 @@ def build_openai_tools(dispatcher, execution_mode: Optional[str] = None) -> List
             properties[param_name] = _param_schema(param)
             # Not appended to required_names
 
-        # [NEW] Append execution_mode to description to guide the LLM's 'auto' orchestration.
+        # Prepend trigger to description so the LLM can filter by flow.
         desc = tool["description"].strip()
-        mode = tool.get("execution_mode")
+        mode = tool.get("trigger")
         if mode:
-            desc = f"[Execution Mode: {mode}] {desc}"
+            desc = f"[Trigger: {mode}] {desc}"
 
         tools.append({
             "type": "function",
