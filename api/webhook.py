@@ -187,8 +187,11 @@ def _extract_tool_results(messages: list) -> dict:
 
 def _extract_agent_summary(messages: list) -> str:
     """Return the final assistant text from the last stop turn."""
+    print("*"*50)
+    print(messages)
     for msg in reversed(messages):
         if msg.get("role") == "assistant" and msg.get("content"):
+            # print("Agent summary extracted:", msg["content"])
             return msg["content"]
     return ""
 
@@ -654,6 +657,8 @@ def investigate(req: InvestigateRequest):
 
         runner = _get_runner()
         messages, provenance_trail, _ = runner.investigate(case_id=req.case_id)
+        print("-"*50)
+        print(messages)
         sections = _extract_tool_results(messages)
 
         # CS-4: populate store with all sections + provenance.
@@ -668,7 +673,8 @@ def investigate(req: InvestigateRequest):
             "investigation":    sections,
             "provenance_trail": provenance_trail,
         }
-
+        print("="*50)
+        print(messages)
         return {
             "case_id":    req.case_id,
             "status":     "completed",
@@ -829,7 +835,6 @@ def report(req: ReportRequest):
             "investigation":    updated_sections,
             "provenance_trail": merged_provenance,
         }
-
         return {
             "case_id":    req.case_id,
             "status":     "completed",
@@ -850,6 +855,7 @@ def report(req: ReportRequest):
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
     finally:
         logger.info("POST /report completed for case_id=%s", req.case_id)
+        
 
 
 @app.post("/copilot")

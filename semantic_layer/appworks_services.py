@@ -11,14 +11,11 @@ import semantic_layer.services.f5_strategy_services as f5
 import semantic_layer.services.f6_report_services as f6
 import semantic_layer.semantic_model as model
 import logging
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
 
-
-class NormalizationError(Exception):
-    """Raised when service data fails to align with the BSI semantic model."""
-    pass
 
 
 def _validate(model_class, envelope: dict, tool_name: str) -> dict:
@@ -37,14 +34,10 @@ def _validate(model_class, envelope: dict, tool_name: str) -> dict:
         # The original envelope (including provenance) is preserved unchanged.
         return {**envelope, "result": validated_data}
     except Exception as e:
-        logger.error(f"Normalization failure in {tool_name}: {e}")
-        # v6 spec recommends strict enforcement. Raising an exception allows
-        # the dispatcher to catch it and return a structured error to the LLM.
-        raise NormalizationError(
-            f"Normalization failure in {tool_name}: {e}. "
-            f"The data returned from AppWorks does not align with the BSI semantic model. "
-            f"Please contact your system administrator."
-        )
+        error_msg = f"Tool '{tool_name}' response failed model validation: {e}"
+        logger.error(error_msg)
+        print(f"ERROR: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 
