@@ -4,7 +4,7 @@
 # ----------------------------------------------------------------
 # Every section is built from live AppWorks REST data.
 # Manifest params: case_id, subject_id, fraud_types, risk_score,
-#                  risk_tier, triggered_rules
+#                  risk_tier, risk_indicators
 # ----------------------------------------------------------------
 
 import logging
@@ -263,14 +263,14 @@ def compile_and_render_report(
     fraud_types: list,
     risk_score: float,
     risk_tier: str,
-    triggered_rules: list,
+    risk_indicators: list,
 ) -> dict:
     """
     Compiles a structured investigation report from live AppWorks data
     enriched with risk assessment context from prior tool calls.
 
     Manifest params provide grounding context:
-      case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules
+      case_id, subject_id, fraud_types, risk_score, risk_tier, risk_indicators
 
     Five AppWorks data sections — all text derived from field values:
       case_summary        ← Workfolder properties
@@ -310,7 +310,7 @@ def compile_and_render_report(
 
     # Build risk assessment section from manifest params
     triggered_display = []
-    for tr in (triggered_rules or []):
+    for tr in (risk_indicators or []):
         if isinstance(tr, dict):
             triggered_display.append(
                 f"{tr.get('rule_id', 'Unknown')}: {tr.get('rule_name', '')} "
@@ -321,7 +321,7 @@ def compile_and_render_report(
 
     risk_assessment_text = (
         f"Risk Score: {risk_score} | Risk Tier: {risk_tier} | "
-        f"Triggered Rules: {'; '.join(triggered_display) if triggered_display else 'None'}"
+        f"Risk Indicators: {'; '.join(triggered_display) if triggered_display else 'None'}"
     )
 
     sections = {
@@ -361,3 +361,4 @@ def compile_and_render_report(
             "computed_by": "AppWorks REST retrieval",
         },
     }
+
