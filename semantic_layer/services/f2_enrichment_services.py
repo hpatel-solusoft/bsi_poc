@@ -20,22 +20,25 @@ def _fetch_props_and_links(href: str) -> tuple[dict, dict]:
     res = _safe_fetch(href)
     return res.get("Properties", {}), res.get("_links", {})
 
-def get_enriched_subject_profile(subject_id: str) -> dict:
+def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
     """
     Fetches deep subject history and prior cases for a given subject_id.
-    
+    The current case (case_id) is excluded from prior_cases and prior_case_count
+    so the active investigation is not counted as its own prior history.
+
     Args:
         subject_id (str): The unique identifier for the AppWorks Subject entity.
-        
+        case_id (str, optional): The current case being investigated — excluded from results.
+
     Returns:
         dict: A structured dictionary containing the subject profile and data provenance.
     """
     logger.info(f"🚀 [LIVE] Context Enrichment for Subject ID: {subject_id}")
-    
+
     # ── Step 1: Fetch Base Subject Info ──────────────────────────────────────
     subject_href = f"/entities/Subject/items/{subject_id}"
     subj_props, subj_links = _fetch_props_and_links(subject_href)
-    
+
     first_name = subj_props.get("Subject_FirstName", "")
     last_name  = subj_props.get("Subject_LastName", "")
     dob        = subj_props.get("Subject_DOB")
@@ -85,6 +88,12 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
             if not wf_id:
                 continue
 
+            # Exclude the current case — it is the case being investigated,
+            # not a historical prior case.
+            if case_id and str(wf_id) == str(case_id):
+                logger.info(f"  Skipping current case {wf_id} from prior case history")
+                continue
+
             # Fetch linked Workfolder summary
             logger.info(f"📂 Fetching linked Workfolder: {wf_id}")
             wf_props, _ = _fetch_props_and_links(wf_href)
@@ -107,7 +116,7 @@ def get_enriched_subject_profile(subject_id: str) -> dict:
         except Exception as exc:
             logger.warning(f"⚠️  Failed processing mapping item: {exc}")
 
-    logger.info(f"✅ {len(prior_cases)} prior case(s) found for Subject {subject_id}")
+    logger.info(f"✅ {len(prior_cases)} prior case(s) found for Subject {subject_id} (current case excluded)")
 
     # Return our architectural envelope
     return {

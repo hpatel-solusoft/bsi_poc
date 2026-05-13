@@ -1,5 +1,5 @@
-"""
-BSI Agent Runner — LLM agentic loop.
+﻿"""
+BSI Agent Runner â€” LLM agentic loop.
 Responsibilities: message history, turn management, provenance_trail
 accumulation, and structured tool_call_log (per-call trace with
 input/output/elapsed_ms for every dispatcher call).
@@ -10,19 +10,24 @@ import logging
 import os
 import time
 from typing import List, Dict, Tuple
-
+from config.prompts import (
+    COPILOT_TOOL_PROMPT,
+    INVESTIGATE_SYSTEM_PROMPT as CONFIG_INVESTIGATE_SYSTEM_PROMPT,
+    PLAYBOOK_PROMPT,
+    REPORT_GENERATION_TOOL,
+)
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------
-# RESULT SUMMARISER — concise one-liner per tool for tool_call_log
+# RESULT SUMMARISER â€” concise one-liner per tool for tool_call_log
 # -----------------------------------------------------------------------
 
 def _summarise_result(tool_name: str, result: dict) -> str:
     """
     Returns a short human-readable summary of a tool result for logging.
-    Uses only generic field names known from the semantic model contract —
+    Uses only generic field names known from the semantic model contract â€”
     no hardcoded tool name checks. Renaming a tool in manifest.yaml
     requires no change here.
     """
@@ -96,91 +101,45 @@ def _summarise_result(tool_name: str, result: dict) -> str:
 
 
 # -----------------------------------------------------------------------
-# SYSTEM PROMPT — /investigate (AUTO flow — Section 3.1)
-# The LLM decides which available tools to call based on their input/output contracts.
-# No ordering instructions — Principle 1: the LLM is the router.
+# PROMPT RENDERING
 # -----------------------------------------------------------------------
-INVESTIGATE_SYSTEM_PROMPT = """You are the BSI Fraud Investigation AI Agent for the Bureau of Special Investigations, Massachusetts.
-
-You have access to a set of approved tools connected to the AppWorks case management system. Read each tool description carefully — it defines what data it needs as input and what it produces as output. Use those data dependencies to determine which tools to call and in what order.
-
-GUARDRAILS:
-- Do not fabricate data. Report risk_score and risk_tier exactly as returned by the tools.
-- Stop calling tools once you have gathered all the data needed for the investigation summary.
-- Complete your work within 10 tool calls. If a required parameter cannot be resolved after two self-correction attempts, stop and report the data gap in the investigation brief.
-
-EXECUTION RULES:
-- The tool catalogue you have received has already been scoped to this workflow phase. Use only the tools visible in your catalogue.
-- Read each tool description carefully — it specifies which parameters the tool requires and which prior tool outputs supply those values. Use those data contracts to determine call order and parameter values.
-- Once you have received the risk assessment result, write the investigation brief and stop.
-
-PARAMETER PASSING:
-- Each tool description declares which parameters it requires and where those values come from. Read the description before calling the tool.
-- Pass every required parameter declared in the tool description using the values returned by prior tool calls.
-- If a prior tool result does not contain an expected field, pass null or zero as appropriate and note the absence in the investigation brief — do not fabricate substitute values.
-- If the dispatcher rejects a call due to a missing or unrecognised parameter, read the error message, correct the parameter set from the available tool results, and retry once.
-																									 
-																						
-																					
-																			   
-
-SUMMARY FORMAT:
-After completing all tool calls, write a comprehensive investigation brief for the BSI as continous plain english. Do not miss any tool response. Your final response must be flowing prose — paragraphs and sentences. Do NOT output JSON, Python dicts, raw field names, or any structured data format. The investigator reads this brief directly — it must be immediately readable without any technical interpretation.
-
-Structure:
-- Use bold section headers to organise the brief.
-- Include every relevant field returned by the tools. Do not omit data to be concise — investigators need the full picture.
-- Write in clear, professional English. Use paragraphs for narrative sections (case background, subject history, risk assessment) and bullet points or key-value pairs for structured data (dates, identifiers, addresses, allegation details).
-
-Risk Assessment:
-- State the risk score, tier, and which BSI fraud detection rules were triggered.
-- Explain on what BASIS each rule triggered (e.g. "the subject has 2 prior substantiated cases", "1 similar case was identified with matching billing patterns") — cite the underlying case data that caused the trigger.
-- Do NOT explain HOW the scoring engine works or show point calculations. The investigator needs to know WHAT drove the risk, not the scoring mechanics.
-- State that the risk score was computed by the BSI configured rules evaluation engine, not by AI inference.
-
-Provenance:
-- At the end of the brief, include a "Data Sources" section listing the AppWorks entities and records that were consulted, along with when they were retrieved. Present this in a readable format, not as raw JSON."""
 
 
-# -----------------------------------------------------------------------
-# SCOPED SYSTEM PROMPTS — ON-DEMAND flows (Sections 3.2, 3.3, 3.4)
-# -----------------------------------------------------------------------
+def _render_prompt(template: str, values: dict) -> str:
+    """
+    Render a centralized prompt template from config/prompts.py.
+    Keeps config as the single prompt source while agent_runner supplies
+    runtime case data and pre-extracted tool parameters.
+    """
+    prompt = template
+    for key, value in values.items():
+        prompt = prompt.replace("{" + key + "}", value)
+    return prompt
+
+
+INVESTIGATE_SYSTEM_PROMPT = CONFIG_INVESTIGATE_SYSTEM_PROMPT
+
 
 def build_playbook_prompt(case_data: dict) -> str:
     """
-    Section 3.2 — ON-DEMAND /playbook prompt.
-    Pre-extracts fraud_types and risk_tier so the LLM receives them as
-    explicit constants rather than having to traverse the nested JSON.
+    Section 3.2 - ON-DEMAND /playbook prompt.
+    Prompt text lives in config/prompts.py; dynamic values are injected here.
     """
-    risk      = case_data.get("risk_assessment") or {}
+    risk = case_data.get("risk_assessment") or {}
     complaint = case_data.get("complaint_intelligence") or {}
 
     fraud_types = complaint.get("fraud_types") or []
-    risk_tier   = risk.get("risk_tier") or ""
+    risk_tier = risk.get("risk_tier") or ""
 
-    return f"""You are the BSI Investigation Agent. You have access to the AppWorks tool catalogue.
-
-Here is the verified investigation context for this case:
-
-{json.dumps(case_data, indent=2)}
-
-EXECUTION RULES:
-- The tool catalogue you have received has already been scoped to this workflow phase. Use only the tools visible in your catalogue.
-- All case data has already been gathered and is provided in the context above. Do not call data-gathering tools.
-- Read the tool descriptions to identify the appropriate tool for retrieving the investigation playbook. The tool description specifies exactly which parameter values to pass and where they come from in the case context.
-- The values you need are already extracted for your reference:
-    fraud_types : {json.dumps(fraud_types)}
-    risk_tier   : "{risk_tier}"
-- Make exactly one tool call. After the tool returns, write the playbook summary and stop.
-
-After the tool returns, produce a concise plain-English summary of the playbook steps,
-tailored to the established fraud pattern and prior case findings.
-
-GUARDRAILS:
-- Do not fabricate investigation steps.
-- Ground every claim in verified tool output or the case context above.
-- If you reference the risk score, state that it was produced by the BSI configured rules evaluation engine, not by AI inference.
-- If a required parameter is missing from the case context, state that clearly in your summary rather than passing an empty value."""
+    return _render_prompt(
+        PLAYBOOK_PROMPT,
+        {
+            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+            "json.dumps(fraud_types)": json.dumps(fraud_types),
+            "risk_tier": risk_tier,
+            "case_data.get(\"case_id\")": str(case_data.get("case_id")),
+        },
+    )
 
 
 def build_report_prompt(
@@ -191,81 +150,48 @@ def build_report_prompt(
     analyst_decision: dict,
 ) -> str:
     """
-    Section 3.3 — ON-DEMAND /report prompt.
-    Pre-extracts all six required params for generate_final_report (v6 spec:
-    case_id, subject_id, fraud_types, risk_score, risk_tier, triggered_rules).
-    Injecting them explicitly prevents the LLM from having to derive them from
-    deeply nested JSON, which is the primary cause of missing-param errors.
+    Section 3.3 - ON-DEMAND /report prompt.
+    Prompt text lives in config/prompts.py; dynamic values are injected here.
     """
-    risk      = case_data.get("risk_assessment") or {}
+    risk = case_data.get("risk_assessment") or {}
     complaint = case_data.get("complaint_intelligence") or {}
 
-    subject_id      = complaint.get("subject_primary_id") or risk.get("subject_id") or ""
-    fraud_types     = complaint.get("fraud_types") or []
-    risk_score      = risk.get("risk_score", 0.0)
-    risk_tier       = risk.get("risk_tier") or ""
-    triggered_rules = risk.get("triggered_rules") or []
+    subject_id = complaint.get("subject_primary_id") or risk.get("subject_id") or ""
+    fraud_types = complaint.get("fraud_types") or []
+    risk_score = risk.get("risk_score", 0.0)
+    risk_tier = risk.get("risk_tier") or ""
+    risk_indicators = risk.get("risk_indicators") or []
 
-    return f"""You are the BSI Investigation Report Agent. You have access to the AppWorks tool catalogue.
-
-Here is the full verified investigation context for this case:
-
-=== INVESTIGATION DATA ===
-{json.dumps(case_data, indent=2)}
-
-=== AI CASE SUMMARY ===
-{ai_case_summary or "Not provided."}
-
-=== INVESTIGATION PLAYBOOK ===
-{json.dumps(playbook_data, indent=2)}
-
-=== ANALYST DECISION ===
-{json.dumps(analyst_decision, indent=2)}
-
-EXECUTION RULES:
-- The tool catalogue you have received has already been scoped to this workflow phase. Use only the tools visible in your catalogue.
-- All case data has already been gathered and is provided in the context above. Do not call data-gathering tools.
-- Read the tool descriptions to identify the appropriate tool for generating the final investigation report. The tool description specifies exactly which parameters are required and where they come from in the context above.
-- The values you need are already extracted for your reference:
-    case_id         : "{case_id}"
-    subject_id      : "{subject_id}"
-    fraud_types     : {json.dumps(fraud_types)}
-    risk_score      : {risk_score}
-    risk_tier       : "{risk_tier}"
-    triggered_rules : {json.dumps(triggered_rules)}
-- Make exactly one tool call. After the tool returns, write the investigation report and stop.
-
-GUARDRAILS:
-- Every factual claim must reference the AppWorks source entity it came from.
-- The risk score is a deterministic output of the BSI configured rules evaluation engine — never modify or re-estimate it.
-- Do not fabricate data. If a field is missing from AppWorks, state "Not recorded in AppWorks".
-- Write in formal plain English suitable for a Director of Special Investigations."""
+    return _render_prompt(
+        REPORT_GENERATION_TOOL,
+        {
+            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+            "ai_case_summary or \"Not provided.\"": ai_case_summary or "Not provided.",
+            "json.dumps(playbook_data, indent=2)": json.dumps(playbook_data, indent=2),
+            "json.dumps(analyst_decision, indent=2)": json.dumps(analyst_decision, indent=2),
+            "case_id": case_id,
+            "subject_id": subject_id,
+            "json.dumps(fraud_types)": json.dumps(fraud_types),
+            "risk_score": str(risk_score),
+            "risk_tier": risk_tier,
+            "json.dumps(triggered_rules)": json.dumps(risk_indicators),
+            "json.dumps(risk_indicators)": json.dumps(risk_indicators),
+        },
+    )
 
 
 def build_copilot_prompt(case_id: str, case_data: dict) -> str:
     """
-    Section 3.4 — ON-DEMAND /copilot prompt (CS-5 Copilot Injected Context).
-    Full CASE_STORE[case_id] is serialised into the system prompt so the LLM
-    can answer from context. provenance_trail is included for source citations.
-    A tool is called only when the question requires data not present in context.
+    Section 3.4 - ON-DEMAND /copilot prompt.
+    Prompt text lives in config/prompts.py; dynamic values are injected here.
     """
-    return f"""You are the BSI Investigation Copilot for Case {case_id}.
-
-The following investigation data has already been retrieved and verified from AppWorks.
-Use it to answer investigator questions.
-
---- VERIFIED CASE CONTEXT ---
-{json.dumps(case_data, indent=2)}
---- END CONTEXT ---
-
-GUARDRAILS:
-- Answer from the verified context above whenever possible. State which section the answer came from.
-- Only call a tool if the question requires data genuinely not present in the context. Do not call tools to confirm or restate information already present.
-- When citing a finding, reference the provenance_trail entry for that section — name the AppWorks source and when it was retrieved.
-- Do not fabricate case data. If data is not in the context and no tool can retrieve it, say so explicitly.
-- Answer the investigator's question, cite your source from the context, and stop. Do not chain additional tool calls unless the first call's result is insufficient to answer the question."""
-
-
+    return _render_prompt(
+        COPILOT_TOOL_PROMPT,
+        {
+            "case_id": case_id,
+            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+        },
+    )
 # -----------------------------------------------------------------------
 # RUNNER
 # -----------------------------------------------------------------------
@@ -288,7 +214,7 @@ class BSIAgentRunner:
         self.client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
     # ------------------------------------------------------------------
-    # AUTO flow — /investigate  (Section 3.1)
+    # AUTO flow â€” /investigate  (Section 3.1)
     # ------------------------------------------------------------------
     def investigate(
         self,
@@ -305,7 +231,7 @@ class BSIAgentRunner:
         )
 
     # ------------------------------------------------------------------
-    # ON-DEMAND flow — /playbook, /report, /copilot  (Sections 3.2–3.4)
+    # ON-DEMAND flow â€” /playbook, /report, /copilot  (Sections 3.2â€“3.4)
     # ------------------------------------------------------------------
     def run_scoped(
         self,
@@ -378,7 +304,7 @@ class BSIAgentRunner:
             # Stop if LLM is done
             if choice.finish_reason == "stop" or not msg.tool_calls:
                 logger.info(
-                    f"[AGENT] Turn {turn}: finish_reason={choice.finish_reason!r} — loop complete"
+                    f"[AGENT] Turn {turn}: finish_reason={choice.finish_reason!r} â€” loop complete"
                 )
                 break
 
@@ -396,7 +322,7 @@ class BSIAgentRunner:
                     f"input={json.dumps(params, default=str)[:600]}"
                 )
 
-                # No pre-dispatch parameter injection — manifest is the single
+                # No pre-dispatch parameter injection â€” manifest is the single
                 # source of truth (Principle 6). If the LLM omits a required
                 # parameter, the dispatcher's Gate 2 rejects the call and the
                 # LLM self-corrects from the error message. Hardcoding tool names
@@ -414,13 +340,13 @@ class BSIAgentRunner:
 
                 if envelope.get("status") == "ok":
                     result_data = envelope.get("result", {})
-                    # LLM receives only the result — never the provenance block (CS-2)
+                    # LLM receives only the result â€” never the provenance block (CS-2)
                     tool_content = json.dumps(result_data)
 
                     # Provenance trail (CS-7)
                     prov = envelope.get("provenance", {})
                     provenance_trail.append({
-                        "tool":         tool_name,
+                        # "tool":         tool_name,
                         "sources":      prov.get("sources", []),
                         "retrieved_at": prov.get("retrieved_at", ""),
                         "computed_by":  prov.get("computed_by", ""),
@@ -447,7 +373,7 @@ class BSIAgentRunner:
                     )
 
                 else:
-                    # Gate/execution error — LLM sees it and can self-correct
+                    # Gate/execution error â€” LLM sees it and can self-correct
                     tool_content = json.dumps(envelope)
                     error_msg = envelope.get("message", "unknown error")
                     log_entry = {
@@ -472,3 +398,4 @@ class BSIAgentRunner:
                 })
 
         return messages, provenance_trail, tool_call_log
+
