@@ -1956,12 +1956,13 @@ def report(req: ReportRequest):
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass to /copilot
             "details": {
-                "agent_summary": _render_markdown_html(_build_report_summary(
-                    req.case_id,
-                    final_report,
-                    case_data,
-                    merged_provenance,
-                )),
+                # "agent_summary": _render_markdown_html(_build_report_summary(
+                #     req.case_id,
+                #     final_report,
+                #     case_data,
+                #     merged_provenance,
+                # )),
+                "agent_summary": _render_markdown_html(_extract_agent_summary(messages)),
             },
         }
     except HTTPException:
