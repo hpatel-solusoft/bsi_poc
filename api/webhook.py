@@ -1197,6 +1197,24 @@ def _safe_join(items: List[str], sep: str = ", ") -> str:
     return sep.join(clean) if clean else "Not available"
 
 
+def _extract_json_object_from_text(text: str) -> Optional[dict]:
+    """Extract the first valid JSON object from an assistant text response."""
+    if not isinstance(text, str) or "{" not in text:
+        return None
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(text[start:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        break
+    return None
+
+
 def _format_provenance_lines(provenance_trail: List[dict]) -> str:
     """Render provenance trail as readable markdown lines."""
     if not provenance_trail:
@@ -1360,7 +1378,6 @@ def _build_investigation_summary(case_id: str, sections: dict, provenance_trail:
         or details.get("identifier_name")
         or "Not recorded in AppWorks"
     )
-    co_subjects = [s.get("details", {}).get("identifier") for s in subjects if not s.get("is_primary_subject")]
     fraud_types = complaint.get("fraud_types", [])
     allegations = complaint.get("allegations", [])
     similar_matches = similar.get("matches", []) if isinstance(similar, dict) else []
@@ -1373,6 +1390,28 @@ def _build_investigation_summary(case_id: str, sections: dict, provenance_trail:
     recommendation = risk.get("recommendation", "No recommendation recorded.")
     step_count = len(playbook.get("investigation_steps", [])) if isinstance(playbook, dict) else 0
     report_status = final_report.get("status", "Not generated")
+
+    subject_lines = []
+    for subject in subjects:
+        label = "PRIMARY SUBJECT" if subject.get("is_primary_subject") else "SECONDARY SUBJECT"
+        subject_details = subject.get("details", {}) if isinstance(subject, dict) else {}
+        subject_name = (
+            " ".join(
+                part for part in [
+                    subject_details.get("first_name"),
+                    subject_details.get("middle_initial"),
+                    subject_details.get("last_name"),
+                ]
+                if part
+            )
+            or subject_details.get("identifier")
+            or "Not recorded in AppWorks"
+        )
+        subject_lines.append(
+            f"{label}: {subject_name} (Role: {subject.get('role', 'Unknown')}, "
+            f"Subject ID: {subject.get('subject_id', 'Unknown')})"
+        )
+
     allegation_lines = []
     for idx, item in enumerate(allegations, start=1):
         allegation_lines.append(
@@ -1380,6 +1419,9 @@ def _build_investigation_summary(case_id: str, sections: dict, provenance_trail:
             f"(status={item.get('status', 'Unknown')}, received={item.get('date_received', 'Unknown')}, "
             f"agency={item.get('source_agency', {}).get('name', 'Unknown')}, ref={item.get('agency_referral_no', 'Unknown')})"
         )
+
+    similar_fraud_types = _safe_join(fraud_types)
+    similar_query = similar.get('query_summary') if isinstance(similar, dict) else ''
 
     return (
         f"### Investigation Summary for Case {case_id}\n\n"
@@ -1389,12 +1431,13 @@ def _build_investigation_summary(case_id: str, sections: dict, provenance_trail:
         f"'{summary.get('team', 'Not available')}'. Intake source is "
         f"{details.get('source', 'Not available')} with referral "
         f"{details.get('intake_referral_no', 'Not available')}.\n\n"
-        f"**Subject Profile:** Primary subject is {primary_name}. Co-subjects recorded: "
-        f"{_safe_join(co_subjects)}. The primary subject currently has {prior_count} prior case(s) in history.\n\n"
-        f"**Allegation Details:** Fraud types linked to this case are {_safe_join(fraud_types)}. "
-        f"Recorded allegations: {_safe_join(allegation_lines, ' | ')}.\n\n"
-        f"**Similar Case Analysis:** {_safe_join([similar.get('query_summary', '')])} "
-        f"with {len(similar_matches)} match(es) returned from archive checks.\n\n"
+        f"**Subject Profile:**\n"
+        f"{chr(10).join(subject_lines) if subject_lines else 'No subject information recorded.'}\n\n"
+        f"**Allegations:** Fraud types linked to this case are {similar_fraud_types}.\n"
+        f"{chr(10).join(allegation_lines) if allegation_lines else 'No allegations recorded.'}\n\n"
+        f"**Similar Case Analysis:** {similar_query}\n"
+        f"Search used allegation types: {similar_fraud_types or 'Not available'}. "
+        f"Returned {len(similar_matches)} archive match(es).\n\n"
         f"**Risk Assessment:** Risk score is {risk.get('risk_score', 'Not available')} "
         f"with tier {risk.get('risk_tier', 'Not available')}. Risk Indicators: "
         f"{_safe_join(triggered_names)}. Recommendation from rules evaluation: {recommendation}\n\n"
@@ -1407,7 +1450,7 @@ def _build_investigation_summary(case_id: str, sections: dict, provenance_trail:
 def _build_playbook_summary(case_id: str, playbook: dict, provenance_trail: List[dict]) -> str:
     """Detailed deterministic summary for /playbook response."""
     if not isinstance(playbook, dict):
-        return f"Playbook generation for case {case_id} completed, but no playbook payload was returned."
+        return f"Plan generation for case {case_id} completed, but no plan payload was returned."
     steps = playbook.get("investigation_steps", [])
     owners = sorted({s.get("owner") for s in steps if isinstance(s, dict) and s.get("owner")})
     mandatory = len([
@@ -1422,8 +1465,8 @@ def _build_playbook_summary(case_id: str, playbook: dict, provenance_trail: List
             f"Deadline: {step.get('deadline_days', 'Not available')} day(s)."
         )
     return (
-        f"### Investigation Playbook for Case {case_id}\n\n"
-        f"Playbook `{playbook.get('playbook_id', 'Not available')}` was generated for risk tier "
+        f"### Investigation Plan for Case {case_id}\n\n"
+        f"Plan `{playbook.get('playbook_id', 'Not available')}` was generated for risk tier "
         f"{playbook.get('risk_tier', 'Not available')} and fraud types "
         f"{_safe_join(playbook.get('fraud_types', []))}. "
         f"The workflow includes {len(steps)} investigation step(s):\n\n"
@@ -1452,7 +1495,7 @@ def _build_report_summary(case_id: str, final_report: dict, case_data: dict, pro
         f"Recommended action: {recommendation}. "
         f"The final report includes {len(sections)} populated section(s), covering case summary, "
         f"subject history, allegation summary, financial summary, risk rationale, recommended actions, "
-        f"playbook roll-up, and analyst decision status.\n\n"
+        f"plan roll-up, and analyst decision status.\n\n"
         f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
     )
 
@@ -1575,9 +1618,9 @@ def _format_recommended_actions(case_data: dict, playbook_data: dict) -> str:
     if recommendation:
         action_bits.append(recommendation)
     if escalation_required:
-        action_bits.append("Escalation is required by the investigation playbook.")
+        action_bits.append("Escalation is required by the investigation plan.")
     if steps:
-        action_bits.append("Next playbook actions: " + "; ".join(step.get("action", "") for step in steps[:3] if step.get("action")))
+        action_bits.append("Next plan actions: " + "; ".join(step.get("action", "") for step in steps[:3] if step.get("action")))
     return " ".join(action_bits) or "No recommended actions recorded in the verified investigation context."
 
 
@@ -1683,16 +1726,24 @@ def _normalize_playbook_payload(raw_playbook: Optional[Dict[str, Any]], case_dat
 def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> dict:
     """
     CS-4 lookup pattern used by all ON-DEMAND handlers.
-    Returns warm case_data from CS-4, or re-hydrates from ai_summary if cold.
+    Returns warm case_data from CS-4, or re-hydrates/merges from ai_summary if provided.
     Raises HTTPException if neither source is available.
     """
-    if case_id in CASE_STORE and CASE_STORE[case_id]:
-        return CASE_STORE[case_id]
-
-    # CS-4 cold — fall back to ai_summary sent in request body (v6 contract)
     if ai_summary:
         _validate_ai_summary_contract(ai_summary)
+        if case_id in CASE_STORE and CASE_STORE[case_id]:
+            case_data = CASE_STORE[case_id]
+            case_data.update(ai_summary.get("investigation", {}))
+            case_data["provenance_trail"] = ai_summary.get(
+                "provenance_trail",
+                case_data.get("provenance_trail", []),
+            )
+            return case_data
+
         _rehydrate_case_store(case_id, ai_summary)
+        return CASE_STORE[case_id]
+
+    if case_id in CASE_STORE and CASE_STORE[case_id]:
         return CASE_STORE[case_id]
 
     raise HTTPException(
@@ -1787,7 +1838,9 @@ def investigate(req: InvestigateRequest):
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /playbook, /report, /copilot
             "details": {
-                "agent_summary": _render_markdown_html(_extract_agent_summary(messages)),
+                "agent_summary": _render_markdown_html(
+                    _build_investigation_summary(req.case_id, sections, provenance_trail)
+                ),
                 "meta": {
                     "tool_calls_made":  len(provenance_trail),
                     "duration_seconds": round(time.time() - start, 1),
@@ -1801,6 +1854,83 @@ def investigate(req: InvestigateRequest):
         raise HTTPException(status_code=500, detail=f"Investigation failed: {exc}") from exc
     finally:
         logger.info("POST /investigate completed for case_id=%s", req.case_id)
+
+
+
+@app.post("/risk_assessment")
+def risk_assessment(req: PlaybookRequest):
+    """
+    ON-DEMAND — Risk Assessment Route.
+    Calls get_risk_rules and calculate_risk_metrics.
+    Requires case_data from a prior /investigate run (via CS-4 or ai_summary body).
+    Explains case seriousness, triggered rules, and escalation thresholds.
+    """
+    from agent_service.agent_runner import build_risk_assessment_prompt
+
+    try:
+        _validate_ai_summary_contract(req.ai_summary)
+        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
+        case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        runner = _get_runner()
+        risk_tools = [
+            tool
+            for tool in runner.on_demand_tools
+            if tool["function"]["name"] in {"get_risk_rules", "calculate_risk_metrics"}
+        ]
+
+        messages, new_provenance, _ = runner.run_scoped(
+            system_prompt=build_risk_assessment_prompt(case_data),
+            user_message=(
+                f"Review the case data for case {req.case_id} and execute the "
+                "appropriate tools to calculate the risk assessment and explain why "
+                "this case received its risk score."
+            ),
+            tools=risk_tools,
+        )
+
+        sections = _extract_tool_results(messages)
+        risk_assessment = sections.get("risk_assessment", {})
+        risk_section = {
+            "risk_assessment": risk_assessment
+        }
+
+        merged_provenance = _merge_provenance(
+            case_data.get("provenance_trail", []),
+            new_provenance,
+        )
+
+        # Update CS-4 but return only the route-specific section.
+        CASE_STORE[req.case_id].update(risk_section)
+        CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
+
+        # ai_summary: updated contract — investigation sections with risk assessment.
+        # Pass this object to /report and /copilot.
+        investigation_data = {**case_data}
+        investigation_data.pop("provenance_trail", None)
+        investigation_playbook = investigation_data.pop("investigation_playbook", None)
+        ai_summary = {
+            "investigation":   investigation_data,
+            "risk_assessment": risk_assessment,
+            "provenance_trail": merged_provenance,
+        }
+        if investigation_playbook is not None:
+            ai_summary["investigation_playbook"] = investigation_playbook
+
+        return {
+            "case_id":    req.case_id,
+            "status":     "completed",
+            "ai_summary": ai_summary,          # ← pass this object to /report, /copilot
+            "details": {
+                "agent_summary": _render_markdown_html(_extract_agent_summary(messages)),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Risk assessment route failed for case_id=%s", req.case_id)
+        raise HTTPException(status_code=500, detail=f"Risk assessment failed: {exc}") from exc
+    finally:
+        logger.info("POST /risk_assessment completed for case_id=%s", req.case_id)
 
 
 @app.post("/playbook")
@@ -1823,12 +1953,26 @@ def playbook(req: PlaybookRequest):
             system_prompt=build_playbook_prompt(case_data),
             user_message=(
                 f"Review the investigation context for case {req.case_id} and execute the "
-                "appropriate on-demand tool to retrieve the investigation playbook."
+                "appropriate on-demand tool to retrieve the investigation plan."
             ),
         )
 
         sections = _extract_tool_results(messages)
         investigation_playbook = sections.get("investigation_playbook", {})
+
+        assistant_text = _extract_agent_summary(messages)
+        assistant_json = _extract_json_object_from_text(assistant_text)
+        if assistant_json and isinstance(assistant_json.get("investigation_playbook"), dict):
+            investigation_playbook = {
+                **investigation_playbook,
+                **assistant_json.get("investigation_playbook", {}),
+            }
+        elif assistant_text:
+            investigation_playbook = {
+                **investigation_playbook,
+                "plan_narrative": assistant_text,
+            }
+
         playbook_section = {
             "investigation_playbook": investigation_playbook
         }
@@ -1858,18 +2002,14 @@ def playbook(req: PlaybookRequest):
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /report, /copilot
             "details": {
-                "agent_summary": _render_markdown_html(_build_playbook_summary(
-                    req.case_id,
-                    playbook_section.get("investigation_playbook", {}),
-                    merged_provenance,
-                )),
+                "agent_summary": _render_markdown_html(_extract_agent_summary(messages)),
             },
         }
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Playbook route failed for case_id=%s", req.case_id)
-        raise HTTPException(status_code=500, detail=f"Playbook generation failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Plan generation failed: {exc}") from exc
     finally:
         logger.info("POST /playbook completed for case_id=%s", req.case_id)
 
@@ -1897,7 +2037,7 @@ def report(req: ReportRequest):
 
         playbook_data = _normalize_playbook_payload(req.ai_playbook, case_data)
         if not playbook_data:
-            raise HTTPException(status_code=400, detail="Playbook required — run /playbook first.")
+            raise HTTPException(status_code=400, detail="Plan required — run /playbook first.")
         if not req.analyst_decision or req.analyst_decision.get("decision") != "APPROVED":
             raise HTTPException(
                 status_code=400,

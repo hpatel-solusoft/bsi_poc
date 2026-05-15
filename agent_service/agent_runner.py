@@ -14,6 +14,7 @@ from config.prompts import (
     COPILOT_TOOL_PROMPT,
     INVESTIGATE_SYSTEM_PROMPT as CONFIG_INVESTIGATE_SYSTEM_PROMPT,
     PLAYBOOK_PROMPT,
+    RISK_ASSESSMENT_PROMPT,
     REPORT_GENERATION_TOOL,
 )
 from openai import OpenAI
@@ -142,6 +143,20 @@ def build_playbook_prompt(case_data: dict) -> str:
     )
 
 
+def build_risk_assessment_prompt(case_data: dict) -> str:
+    """
+    Section 3.x - ON-DEMAND /risk_assessment prompt.
+    Prompt text lives in config/prompts.py; dynamic values are injected here.
+    Calls get_risk_rules and calculate_risk_metrics to explain case seriousness.
+    """
+    return _render_prompt(
+        RISK_ASSESSMENT_PROMPT,
+        {
+            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+        },
+    )
+
+
 def build_report_prompt(
     case_id: str,
     case_data: dict,
@@ -238,6 +253,7 @@ class BSIAgentRunner:
         system_prompt: str,
         user_message: str,
         conversation_history: list | None = None,
+        tools: list | None = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         if conversation_history:
@@ -246,7 +262,7 @@ class BSIAgentRunner:
 
         return self._run_loop(
             messages,
-            tools=self.on_demand_tools,
+            tools=tools or self.on_demand_tools,
             trigger="ON-DEMAND",
         )
 

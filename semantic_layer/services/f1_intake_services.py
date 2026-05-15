@@ -137,6 +137,15 @@ def build_case_header_data(case_id: str) -> dict:
                     alleg_links.get("relationship:Allegations_Source", {}).get("href", "")
                 ) if alleg_links.get("relationship:Allegations_Source") else ({}, {})
 
+                allegation_description = (
+                    alleg_type_props.get("AllegationType_AllegationTypeDescription")
+                    or alleg_type_props.get("AllegationType_AllegationTypeShortDesc")
+                    or alleg_type_props.get("AllegationType_AllegationTypeDefaults")
+                    or alleg_props.get("Allegations_AllegationType")
+                    or alleg_props.get("Allegations_Comment")
+                    or f"Unknown allegation type {allegation_type_id or 'unknown'}"
+                )
+
                 allegations_list.append({
                     "status":                  alleg_props.get("Allegations_Status"),
                     "allegation_status":       alleg_props.get("Allegations_AllegationStatus"),
@@ -152,7 +161,7 @@ def build_case_header_data(case_id: str) -> dict:
                     "dta_closure_report":      alleg_props.get("Allegations_DTAClosureReport"),
                     "allegation_type": {
                         "id":          allegation_type_id,
-                        "description": alleg_type_props.get("AllegationType_AllegationTypeDescription"),
+                        "description": allegation_description,
                         "short_desc":  alleg_type_props.get("AllegationType_AllegationTypeShortDesc"),
                         "defaults":    alleg_type_props.get("AllegationType_AllegationTypeDefaults"),
                     },
@@ -307,6 +316,26 @@ def build_case_header_data(case_id: str) -> dict:
             except Exception as e:
                 logger.warning(f"⚠️ Failed processing financial: {str(e)}")
 
+    def _build_fraud_types(allegations_list, case_props):
+        types = []
+        for alleg in allegations_list:
+            desc = (
+                alleg.get("allegation_type", {}).get("description")
+                or alleg.get("allegation_type", {}).get("short_desc")
+            )
+            if desc and desc not in types:
+                types.append(desc)
+        if not types:
+            fallback = (
+                case_props.get("WorkfolderAllegation")
+                or case_props.get("WorkFolderAllegation")
+                or case_props.get("Workfolder_Allegation")
+                or case_props.get("WorkFolder_Allegation")
+            )
+            if isinstance(fallback, str) and fallback.strip():
+                types.append(fallback.strip())
+        return types
+
     # 6. Build Clean Result
     clean_result = {
         "case_id": props.get("CASEID", case_id),
@@ -348,7 +377,7 @@ def build_case_header_data(case_id: str) -> dict:
             "total_ordered":    total_ordered,
         },
         "subject_primary_id": next((s["subject_id"] for s in subjects_list if s.get("is_primary_subject")), None),
-        "fraud_types": list(set(a["allegation_type"]["description"] for a in allegations_list if a.get("allegation_type"))),
+        "fraud_types": _build_fraud_types(allegations_list, props),
     }
 
     logger.info(
