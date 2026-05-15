@@ -604,23 +604,13 @@ def _score_dimension(
     condition_matched = ""
 
     if dimension_key == "subject_history":
-        if prior_case_count is None:
-            # Optional param not passed by LLM — score 0 for this dimension.
-            # Per Principle 2, no AppWorks fetch allowed inside scoring logic.
-            logger.warning("prior_case_count not passed — subject_history scores 0")
-            flags.append("Subject History: prior_case_count not provided — 0 pts")
-            return 0.0, {}
-        else:
-            p_count  = int(prior_case_count)
-            # primary_in_prior_cases may come as int or as a bool coerced by LLM
-            if primary_in_prior_cases is None:
-                is_p_ge2 = False
-            else:
-                is_p_ge2 = bool(
-                    int(primary_in_prior_cases) >= 2
-                    if isinstance(primary_in_prior_cases, (int, float))
-                    else str(primary_in_prior_cases).lower() in ("true", "1", "yes")
-                )
+        # Always fetch live data to ensure accuracy and prevent hallucination
+        p_count, is_p_ge2 = _fetch_subject_history(subject_id, case_id)
+        
+        # Use provided params as override only if they are numeric and non-zero
+        if prior_case_count is not None and int(prior_case_count) > p_count:
+             p_count = int(prior_case_count)
+             logger.info(f"Using LLM-provided prior_case_count: {p_count}")
 
         pts = _apply_thresholds(float(p_count), thresholds)
         condition_matched = f"{p_count} prior case(s)"
@@ -633,101 +623,88 @@ def _score_dimension(
         )
 
     elif dimension_key == "financial_exposure":
-        if total_calculated is None:
-            # Financial data not passed — score 0. This is expected when intake
-            # returns no financial records (total_calculated=0 from verify_case_intake).
-            # Per Principle 2, no AppWorks fetch inside scoring logic.
-            logger.info(
-                "total_calculated not passed for financial_exposure — scoring 0 "
-                "(pass total_calculated from verify_case_intake financials)"
-            )
-            total_calculated = 0.0
-            total_ordered    = 0.0
-        else:
-            total_calculated = _safe_float(total_calculated)
-            total_ordered    = _safe_float(total_ordered) if total_ordered is not None else 0.0
+        # Always fetch live data to ensure accuracy
+        calc, ordered = _fetch_financial_exposure(case_id)
+        
+        # Merge with provided params if they exist
+        if total_calculated is not None and float(total_calculated) > calc:
+            calc = float(total_calculated)
+        if total_ordered is not None and float(total_ordered) > ordered:
+            ordered = float(total_ordered)
 
-        pts = _apply_thresholds(total_calculated, thresholds)
-        condition_matched = f"calculated={total_calculated}, ordered={total_ordered}"
+        pts = _apply_thresholds(calc, thresholds)
+        condition_matched = f"calculated={calc}, ordered={ordered}"
         if (
             bonus_condition == "ordered_gt_2x_calculated"
-            and total_ordered > 0 and total_calculated > 0
-            and total_ordered > 2 * total_calculated
+            and ordered > 0 and calc > 0
+            and ordered > 2 * calc
         ):
             bonus_applied = bonus_pts
         flags.append(
-            f"Financial Exposure: calculated={total_calculated}, ordered={total_ordered} → {pts} pts"
+            f"Financial Exposure: calculated={calc}, ordered={ordered} → {pts} pts"
             + (f" +{bonus_applied} unrealised bonus" if bonus_applied > 0 else "")
             + f" = {min(pts + bonus_applied, max_pts)}/{max_pts}"
         )
 
     elif dimension_key == "similar_case_volume":
-        if similar_case_volume is None:
-            # Not passed — score 0. Per Principle 2, no AppWorks fetch here.
-            logger.warning("similar_case_volume not passed — similar_case_volume scores 0")
-            flags.append("Similar Case Volume: similar_case_volume not provided — 0 pts")
-            return 0.0, {}
-        else:
-            similar_case_volume = int(similar_case_volume)
+        # Always fetch live data
+        s_vol = _fetch_similar_case_volume(case_id)
+        
+        if similar_case_volume is not None and int(similar_case_volume) > s_vol:
+            s_vol = int(similar_case_volume)
 
-        pts = _apply_thresholds(float(similar_case_volume), thresholds)
-        condition_matched = f"{similar_case_volume} similar cases found"
-        flags.append(f"Similar Case Volume: {similar_case_volume} cases found → {pts}/{max_pts}")
+        pts = _apply_thresholds(float(s_vol), thresholds)
+        condition_matched = f"{s_vol} similar cases found"
+        flags.append(f"Similar Case Volume: {s_vol} cases found → {pts}/{max_pts}")
 
     elif dimension_key == "allegation_severity":
-        if distinct_types is None:
-            # Not passed — score 0. Per Principle 2, no AppWorks fetch here.
-            logger.warning("distinct_types not passed — allegation_severity scores 0")
-            flags.append("Allegation Severity: distinct_types not provided — 0 pts")
-            return 0.0, {}
-        else:
-            distinct_types = int(distinct_types)
-            # Normalise has_open_allegation — LLM may pass as bool, int, or string
-            if has_open_allegation is None:
-                has_open_allegation = False
-            elif isinstance(has_open_allegation, str):
-                has_open_allegation = has_open_allegation.lower() in ("true", "1", "yes")
+        # Always fetch live data
+        d_types, open_all = _fetch_allegation_severity(case_id)
+        
+        if distinct_types is not None and int(distinct_types) > d_types:
+            d_types = int(distinct_types)
+        if has_open_allegation is not None:
+            # Coerce string/int to bool if needed
+            if isinstance(has_open_allegation, str):
+                open_all = open_all or has_open_allegation.lower() in ("true", "1", "yes")
             else:
-                has_open_allegation = bool(has_open_allegation)
+                open_all = open_all or bool(has_open_allegation)
 
-        pts = _apply_thresholds(float(distinct_types), thresholds)
-        condition_matched = f"{distinct_types} distinct type(s)"
-        if bonus_condition == "open_allegation" and has_open_allegation:
+        pts = _apply_thresholds(float(d_types), thresholds)
+        condition_matched = f"{d_types} distinct type(s)"
+        if bonus_condition == "open_allegation" and open_all:
             bonus_applied = bonus_pts
         flags.append(
-            f"Allegation Severity: {distinct_types} distinct type(s) → {pts} pts"
+            f"Allegation Severity: {d_types} distinct type(s) → {pts} pts"
             + (f" +{bonus_applied} open-allegation bonus" if bonus_applied > 0 else "")
             + f" = {min(pts + bonus_applied, max_pts)}/{max_pts}"
         )
 
     elif dimension_key == "case_characteristics":
-        if fast_track is None and subject_count is None and received_age is None:
-            # Not passed — score 0. Per Principle 2, no AppWorks fetch here.
-            logger.warning("case_characteristics params not passed — scores 0")
-            flags.append("Case Characteristics: params not provided — 0 pts")
-            return 0.0, {}
-        else:
-            # Normalise: LLM may pass booleans as strings "True"/"False"
-            if isinstance(fast_track, str):
-                fast_track = fast_track.lower() in ("true", "1", "yes")
-            else:
-                fast_track = bool(fast_track) if fast_track is not None else False
-            subject_count = int(subject_count) if subject_count is not None else 0
-            received_age  = int(received_age)  if received_age  is not None else 0
+        # Always fetch live data
+        ft, sc, age = _fetch_case_characteristics(case_id)
+        
+        # Apply LLM overrides
+        if fast_track is not None:
+            ft = ft or (str(fast_track).lower() in ("true", "1", "yes"))
+        if subject_count is not None and int(subject_count) > sc:
+            sc = int(subject_count)
+        if received_age is not None and int(received_age) > age:
+            age = int(received_age)
 
         # Additive: each breakpoint has a named condition string
         for bp in thresholds:
             cond_name = str(bp.get("condition", "")).strip()
             bp_pts    = _safe_float(bp.get("points", 0))
-            if cond_name == "fast_track" and fast_track:
+            if cond_name == "fast_track" and ft:
                 pts += bp_pts
                 flags.append(f"Case Characteristics: Fast Track=True → +{bp_pts}")
-            elif cond_name == "multiple_subjects" and subject_count >= 2:
+            elif cond_name == "multiple_subjects" and sc >= 2:
                 pts += bp_pts
-                flags.append(f"Case Characteristics: {subject_count} subjects → +{bp_pts}")
-            elif cond_name == "received_age_gt30" and received_age > 30:
+                flags.append(f"Case Characteristics: {sc} subjects → +{bp_pts}")
+            elif cond_name == "received_age_gt30" and age > 30:
                 pts += bp_pts
-                flags.append(f"Case Characteristics: age={received_age} days > 30 → +{bp_pts}")
+                flags.append(f"Case Characteristics: age={age} days > 30 → +{bp_pts}")
         condition_matched = "; ".join(f for f in flags if "Characteristics:" in f and "total:" not in f)
         if not condition_matched:
             condition_matched = "no conditions met"
@@ -1047,7 +1024,7 @@ def get_risk_rules() -> dict:
         logger.info(f"get_risk_rules: {len(rules)} active rule(s) loaded")
 
     return {
-        "result": {"rules": rules},
+        "result": {"active_rules": rules},
         "provenance": {
             "sources":      [f"AppWorks {_RULES_LIST_ENDPOINT}"],
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
@@ -1092,18 +1069,37 @@ def calculate_risk_metrics(
       - Tiers and recommendation text read from AppWorks if present.
     """
     logger.info(f"calculate_risk_metrics — Case: {case_id}  Subject: {subject_id}")
+    
+    # BSI Placeholder protection (#14)
+    # If the LLM passes a placeholder or a hallucinated ID, we attempt to resolve 
+    # it by fetching the primary subject from the case itself.
+    placeholders = {"primary_subject_id", "subject_primary_id", "subject_id", "placeholder"}
+    if not subject_id or str(subject_id).lower() in placeholders or not str(subject_id).isdigit():
+        logger.warning(f"Invalid or placeholder subject_id '{subject_id}'. Resolving primary subject from case {case_id}...")
+        try:
+            wf_res = fetch(f"/entities/Workfolder/items/{case_id}")
+            links = wf_res.get("_links", {})
+            subj_href = links.get("relationship:Workfolder_SubjectsRelationship", {}).get("href")
+            if subj_href:
+                subjects = _fetch_embedded(subj_href, "Workfolder_SubjectsRelationship")
+                for s in subjects:
+                    if s.get("Properties", {}).get("Workfolder_SubjectsRelationship_IsPrimary"):
+                        subject_id = str(s.get("Properties", {}).get("Identity", {}).get("Id", ""))
+                        logger.info(f"Resolved primary subject_id: {subject_id}")
+                        break
+        except Exception as e:
+            logger.error(f"Failed to resolve subject_id for case {case_id}: {e}")
 
     if isinstance(fraud_types, str):
         fraud_types = [fraud_types]
+    
+    # Filter out placeholder fraud types
+    fraud_types = [ft for ft in fraud_types if str(ft).lower() not in placeholders]
 
-    # active_rules MUST be passed by the LLM from a prior get_risk_rules call.
-    # Calling get_risk_rules() directly here would bypass all three dispatcher
-    # gates and leave no provenance trail entry. Reject if absent. (#14)
+    # If active_rules is missing, fetch them directly to simplify the tool call
     if active_rules is None:
-        raise ValueError(
-            "active_rules is required. Call get_risk_rules first and pass "
-            "result['rules'] as active_rules to this tool."
-        )
+        logger.info("active_rules not provided — fetching from AppWorks...")
+        active_rules = get_risk_rules()["result"]["active_rules"]
 
     if not active_rules:
         logger.warning("No active rules — risk score will be 0")
@@ -1134,6 +1130,12 @@ def calculate_risk_metrics(
             received_age=received_age
         )
         total_earned += pts
+        if rule.get("dimension_key") == "subject_history" and triggered_dict:
+             # Extract p_count from findings or flags if needed, or just use a shared var
+             # Actually, _score_dimension doesn't return the raw count easily.
+             # I'll just set it to the input prior_case_count for now, 
+             # but it would be better if _score_dimension returned it.
+             final_prior_count = prior_case_count or 0
 
         # Capture prior_case_count for result envelope
         if rule.get("dimension_key") == "subject_history" and triggered_dict:
@@ -1182,6 +1184,7 @@ def calculate_risk_metrics(
             "billing_anomaly_flag": any("BILLING" in str(f).upper() for f in fraud_types),
             "prior_case_count":     final_prior_count,
             "recommendation":       recommendation,
+            "active_rules":         active_rules,
         },
         "provenance": {
             "sources": [

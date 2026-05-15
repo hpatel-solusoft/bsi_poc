@@ -371,6 +371,7 @@ def build_case_header_data(case_id: str) -> dict:
         },
         "allegations": allegations_list,
         "subjects":    subjects_list,
+        "subject_ids": [s["subject_id"] for s in subjects_list if s.get("subject_id")],
         "financials": {
             "records":          financials_list,
             "total_calculated": total_calculated,

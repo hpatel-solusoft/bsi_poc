@@ -26,6 +26,7 @@ import re
 import yaml
 import os
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from semantic_layer.appworks_auth import fetch
 from semantic_layer.semantic_model import SimilarCasesResult
 
@@ -112,9 +113,27 @@ def _workfolder_id_from_allegation_item(alleg_item: dict) -> str:
         href = links.get(key, {}).get("href", "")
         if href:
             return _extract_id(href)
-    item_href = links.get("item", {}).get("href", "")
+
+    # NEW: If still not found, fetch the individual Allegation item. 
+    # List rows often have limited projections.
+    item_href = links.get("item", {}).get("href", "") or links.get("self", {}).get("href", "")
     if item_href:
-        return _extract_id(item_href)
+        alleg_res = _safe_fetch(item_href)
+        # Check properties of the fetched item
+        props_full = alleg_res.get("Properties", {})
+        links_full = alleg_res.get("_links", {})
+        for key in ("Allegations_Workfolder$Identity", "Workfolder$Identity", "Allegations_Workfolder", "Workfolder"):
+            raw = props_full.get(key)
+            if isinstance(raw, dict):
+                raw_id = raw.get("Id") or raw.get("id")
+                if raw_id: return str(raw_id).strip()
+            elif raw:
+                return str(raw).strip()
+        # Check links of the fetched item
+        for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
+            h = links_full.get(key, {}).get("href", "")
+            if h: return _extract_id(h)
+            
     return ""
 
 
@@ -263,7 +282,12 @@ def _apply_manifest_filters(
         # Filter 1: required_status
         if required_status_norm:
             case_status = (row.get("status") or "").strip().lower()
-            if case_status and case_status != required_status_norm:
+            # BSI specific: "open or closed" is a compound requirement.
+            # If specified, we allow any case that has a status (non-empty).
+            if required_status_norm == "open or closed":
+                if not case_status:
+                    continue
+            elif case_status != required_status_norm:
                 continue
 
         # Filter 2: lookback window
@@ -482,74 +506,84 @@ def search_similar_cases(
             else None
         )
 
-        # Shared caches across types (avoids re-fetching the same workfolder
-        # if it appears under multiple allegation types)
+        # Shared caches across types
         wf_cache:  dict = {}   # wf_id -> Properties dict
         fin_cache: dict = {}   # wf_id -> Financial_Calculated (float | None)
-        global_seen_pair: set = set()  # (wf_id, alleg_id) dedup across types
-
+        global_seen_pair: set = set()
+        
+        # Step A1: Identify candidate rows and unique workfolders to fetch
+        type_to_rows = {}
+        all_wf_ids_to_fetch = set()
+        
         for type_id in target_type_ids:
-            list_href = (
-                f"/entities/Allegations/lists/Allegations_All"
-                f"?Allegations_AllegationsType$Identity.Id={type_id}"
-            )
+            list_href = f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
             list_res = _safe_fetch(list_href)
-            rows     = list_res.get("_embedded", {}).get("Allegations_All", [])
-            logger.info(f"[Broad Fetch] type={type_id} returned {len(rows)} allegation row(s)")
-
-            fraud_type_desc   = type_id_to_desc.get(type_id, type_id)
-            seen_wf_for_type: set = set()
-
+            rows = list_res.get("_embedded", {}).get("Allegations_All", [])
+            type_to_rows[type_id] = rows
+            
+            seen_wf_for_type = set()
             for alleg_row in rows:
-                # ── Early exit: stop once per-type budget exhausted ────────
-                if len(seen_wf_for_type) >= collection_budget:
-                    logger.info(
-                        f"[Early Exit] type={type_id} collected {collection_budget} "
-                        f"workfolders — stopping row scan"
-                    )
-                    break
-
+                if len(seen_wf_for_type) >= collection_budget: break
                 wf_id = _workfolder_id_from_allegation_item(alleg_row)
-                if not wf_id or wf_id == str(case_id):
-                    continue
-
-                alleg_id   = _allegation_id_from_item(alleg_row)
-                pair = (wf_id, alleg_id)
-                if pair in global_seen_pair:
-                    continue
-
-                # ── Pre-filter: lookback date from list-row Properties ─────
-                # NOTE: allegation status ("Open"/"Closed") is independent of
-                # workfolder/case status — do NOT pre-filter on allegation status.
+                if not wf_id or wf_id == str(case_id): continue
+                
+                # Check pre-filter (date)
                 date_raw = _allegation_date_from_item(alleg_row)
                 if min_dt and date_raw:
                     dt = _parse_aw_date(date_raw)
-                    if dt and dt < min_dt:
-                        continue   # too old — skip without fetching workfolder
+                    if dt and dt < min_dt: continue
+                
+                seen_wf_for_type.add(wf_id)
+                all_wf_ids_to_fetch.add(wf_id)
 
-                # ── Mark seen (only here, after pre-filters pass) ──────────
+        # Step A2: Parallel fetch for Workfolders and Financials
+        def _fetch_full_wf(wid):
+            res = _safe_fetch(f"/entities/Workfolder/items/{wid}")
+            props = res.get("Properties", {})
+            fins = _fetch_financial_calculated(wid)
+            return wid, props, fins
+
+        logger.info(f"[Parallel Fetch] Starting batch fetch for {len(all_wf_ids_to_fetch)} workfolders...")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(_fetch_full_wf, all_wf_ids_to_fetch))
+        
+        for wid, props, fins in results:
+            wf_cache[wid] = props
+            fin_cache[wid] = fins
+
+        # Step A3: Build candidates
+        for type_id in target_type_ids:
+            rows = type_to_rows.get(type_id, [])
+            fraud_type_desc = type_id_to_desc.get(type_id, type_id)
+            seen_wf_for_type = set()
+            
+            for alleg_row in rows:
+                if len(seen_wf_for_type) >= collection_budget: break
+                wf_id = _workfolder_id_from_allegation_item(alleg_row)
+                if not wf_id or wf_id == str(case_id) or wf_id not in wf_cache: continue
+                
+                alleg_id = _allegation_id_from_item(alleg_row)
+                pair = (wf_id, alleg_id)
+                if pair in global_seen_pair: continue
+                
+                # Date pre-filter again (to stay consistent with previous logic)
+                date_raw = _allegation_date_from_item(alleg_row)
+                if min_dt and date_raw:
+                    dt = _parse_aw_date(date_raw)
+                    if dt and dt < min_dt: continue
+
+                wf_props = wf_cache[wf_id]
+                if not wf_props: continue
+                
                 seen_wf_for_type.add(wf_id)
                 global_seen_pair.add(pair)
 
-                # ── Fetch workfolder details (shared cache) ────────────────
-                if wf_id not in wf_cache:
-                    wf_res = _safe_fetch(f"/entities/Workfolder/items/{wf_id}")
-                    wf_cache[wf_id] = wf_res.get("Properties", {})
-                wf_props = wf_cache.get(wf_id, {})
-                if not wf_props:
-                    continue
-
-                # ── Resolved status from workfolder ───────────────────────
-                # AppWorks does not expose a standalone WorkfolderStatus field.
-                # The canonical closed indicator is the DESTINATION field, which
-                # contains values like "Investigation Completed - Closed".
-                # We normalise by checking if "closed" appears anywhere in it.
+                # Resolved status
                 destination = (wf_props.get("DESTINATION") or "").strip()
                 destination_lower = destination.lower()
                 if "closed" in destination_lower:
                     resolved_status = "closed"
                 elif destination_lower:
-                    # Map destination to a simple slug for filter matching
                     resolved_status = destination_lower
                 else:
                     resolved_status = (
@@ -558,22 +592,13 @@ def search_similar_cases(
                         or None
                     )
 
-                # ── Fetch financials (shared cache, only for kept rows) ────
-                if wf_id not in fin_cache:
-                    fin_cache[wf_id] = _fetch_financial_calculated(wf_id)
-
                 summary = (
                     wf_props.get("WorkfolderDescription")
                     or wf_props.get("Workfolder_CaseDescription")
                     or f"Historical {fraud_type_desc} allegation"
                 )
-                if destination:
-                    summary = f"{summary} [{destination}]"
-                date_received = (
-                    date_raw
-                    or wf_props.get("WorkfolderDateReceived")
-                    or None
-                )
+                if destination: summary = f"{summary} [{destination}]"
+                date_received = date_raw or wf_props.get("WorkfolderDateReceived") or None
 
                 candidates.append({
                     "case_id":              wf_id,
