@@ -584,13 +584,16 @@ class RiskAssessment(BaseModel):
 # ================================================================
 
 class InvestigationPlaybook(BaseModel):
-    playbook_id:         str
-    fraud_types:         list[str]
-    risk_tier:           str
-    investigation_steps: list[InvestigationStep]
-    evidence_checklist:  list[EvidenceItem]
-    escalation_required: bool
-    model_config = {"extra": "forbid"}
+    playbook_id: str
+    fraud_types: list[str]
+    risk_tier: str
+    investigation_steps: Optional[list[dict]] = None
+    evidence_checklist: Optional[list[dict]] = None
+    escalation_criteria: Optional[list[dict]] = None
+    escalation_required: Optional[bool] = None
+    data_sources: Optional[list[str]] = None
+    plan_narrative: Optional[str] = None
+    model_config = {"extra": "allow"}
 
 
 # ================================================================

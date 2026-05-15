@@ -10,6 +10,8 @@ _TYPE_MAP = {
     "string":  {"type": "string"},
     "integer": {"type": "integer"},
     "number":  {"type": "number"},
+    "dict":    {"type": "object"},
+    "object":  {"type": "object"},
 }
 
 

@@ -83,7 +83,7 @@ tools:
       and active flag. No parameters required.
       This demonstrates that rules are fetched from AppWorks at runtime — BSI can modify
       rules without a code change.
-    trigger: AUTO
+    trigger: ON-DEMAND
     python_function: "appworks_services.get_risk_rules"
 
     required_params: []
@@ -101,7 +101,7 @@ tools:
       from search_similar_cases), distinct_types (count of allegation types from verify_case_intake),
       has_open_allegation (true if any allegation has no date_closed), subject_count (count of
       subjects from verify_case_intake), received_age (date_received_age from verify_case_intake details).
-    trigger: AUTO
+    trigger: ON-DEMAND
     python_function: "appworks_services.calculate_risk_metrics"
 
     required_params:
@@ -114,10 +114,10 @@ tools:
       - name: "fraud_types"
         type: "list[string]"
         description: "List of fraud types from verify_case_intake output"
-    optional_params:
       - name: "active_rules"
         type: "list[dict]"
-        description: "Rules array from get_risk_rules result — pass result.rules here"
+        description: "Exact rules array from get_risk_rules result — do not summarize or modify"
+    optional_params:
       - name: "prior_case_count"
         type: "integer"
         description: "prior_case_count integer from fetch_subject_history result"
@@ -152,19 +152,25 @@ tools:
   - name: "get_investigation_playbook"
     section: "investigation_playbook"
     description: >
-      Retrieves the investigation playbook from AppWorks for the given fraud types and
-      risk tier. Returns ordered investigation steps and evidence checklist.
-      Requires: fraud_types list and risk_tier from calculate_risk_metrics output.
+      Retrieves the investigation plan context skeleton for the verified case and
+      risk profile. Returns only plan metadata (playbook_id, fraud_types, risk_tier);
+      the LLM is responsible for generating the detailed investigation steps,
+      evidence checklist items, and escalation guidance from the route1 case
+      context. Requires: fraud_types and risk_tier from prior investigation results.
     trigger: ON-DEMAND
     python_function: "appworks_services.get_investigation_playbook"
 
     required_params:
       - name: "fraud_types"
         type: "list[string]"
-        description: "List of fraud types from verify_case_intake — playbook covers all types"
+        description: "List of fraud types from verify_case_intake — plan covers all types"
       - name: "risk_tier"
         type: "string"
         description: "Risk tier from calculate_risk_metrics output: LOW/MEDIUM/HIGH/CRITICAL"
+    optional_params:
+      - name: "case_data"
+        type: "dict"
+        description: "Verified route1 investigation case context including complaint_intelligence and risk_assessment"
 
   - name: "generate_final_report"
     section: "final_report"
