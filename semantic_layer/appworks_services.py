@@ -46,10 +46,56 @@ def get_case_header(case_id: str) -> dict:
     return _validate(model.CaseHeader, res, "verify_case_intake")
 
 
-def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
-    """Dispatched from 'fetch_subject_history'"""
-    res = f2.get_enriched_subject_profile(subject_id, case_id=case_id)
-    return _validate(model.SubjectProfile, res, "fetch_subject_history")
+def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict:
+    """Dispatched from 'fetch_subject_history'
+
+    Accepts a list of subject IDs (as declared in the manifest).
+    Returns a SubjectHistory object containing individual profiles
+    for every subject provided.
+    """
+    if not subject_ids:
+        raise ValueError("subject_ids list is empty — at least one subject ID is required")
+
+    profiles = []
+    total_cases = 0
+    provenance_sources = []
+    last_retrieved_at = ""
+    last_computed_by = ""
+
+    for sid in subject_ids:
+        res = f2.get_enriched_subject_profile(sid, case_id=case_id)
+        result = res.get("result", {})
+        prov = res.get("provenance", {})
+
+        # Build individual profile for this subject
+        profile = {
+            "subject_id": sid,
+            "first_name": result.get("first_name"),
+            "last_name": result.get("last_name"),
+            "dob": result.get("dob"),
+            "prior_cases": result.get("prior_cases", []),
+            "prior_case_count": result.get("prior_case_count", 0),
+        }
+        profiles.append(profile)
+        total_cases += profile["prior_case_count"]
+
+        provenance_sources.extend(prov.get("sources", []))
+        last_retrieved_at = prov.get("retrieved_at", "")
+        last_computed_by = prov.get("computed_by", "")
+
+    # Build combined SubjectHistory envelope
+    combined = {
+        "result": {
+            "profiles": profiles,
+            "total_prior_case_count": total_cases,
+        },
+        "provenance": {
+            "sources": list(set(provenance_sources)), # Deduplicate
+            "retrieved_at": last_retrieved_at,
+            "computed_by": last_computed_by,
+        },
+    }
+    return _validate(model.SubjectHistory, combined, "fetch_subject_history")
 
 
 def search_similar_cases(

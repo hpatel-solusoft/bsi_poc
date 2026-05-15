@@ -1,4 +1,4 @@
-﻿"""
+"""
 BSI Agent Runner â€” LLM agentic loop.
 Responsibilities: message history, turn management, provenance_trail
 accumulation, and structured tool_call_log (per-call trace with
@@ -16,6 +16,7 @@ from config.prompts import (
     PLAYBOOK_PROMPT,
     RISK_ASSESSMENT_PROMPT,
     REPORT_GENERATION_TOOL,
+    SIMILAR_CASES_PROMPT,
 )
 from openai import OpenAI
 
@@ -67,7 +68,7 @@ def _summarise_result(tool_name: str, result: dict) -> str:
                 parts.append(q)
 
         # Rules list
-        rules = result.get("rules")
+        rules = result.get("active_rules")
         if isinstance(rules, list):
             parts.append(f"{len(rules)} active rule(s) loaded")
 
@@ -157,6 +158,20 @@ def build_risk_assessment_prompt(case_data: dict) -> str:
     )
 
 
+def build_similar_cases_prompt(case_data: dict) -> str:
+    """
+    ON-DEMAND /similar_cases prompt.
+    Prompt text lives in config/prompts.py; dynamic values are injected here.
+    Calls search_similar_cases to find historical cases with matching patterns.
+    """
+    return _render_prompt(
+        SIMILAR_CASES_PROMPT,
+        {
+            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+        },
+    )
+
+
 def build_report_prompt(
     case_id: str,
     case_data: dict,
@@ -234,6 +249,7 @@ class BSIAgentRunner:
     def investigate(
         self,
         case_id: str,
+        tools: list = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages = [
             {"role": "system", "content": INVESTIGATE_SYSTEM_PROMPT},
@@ -241,12 +257,13 @@ class BSIAgentRunner:
         ]
         return self._run_loop(
             messages,
-            tools=self.auto_tools,
+            tools=tools or self.auto_tools,
             trigger="AUTO",
         )
 
     # ------------------------------------------------------------------
-    # ON-DEMAND flow â€” /playbook, /report, /copilot  (Sections 3.2â€“3.4)
+    # ON-DEMAND flow — /similar_cases, /risk_assessment, /playbook,
+    #                   /report, /copilot
     # ------------------------------------------------------------------
     def run_scoped(
         self,
@@ -254,6 +271,7 @@ class BSIAgentRunner:
         user_message: str,
         conversation_history: list | None = None,
         tools: list | None = None,
+        trigger: str = "ON-DEMAND",
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         if conversation_history:
@@ -263,7 +281,7 @@ class BSIAgentRunner:
         return self._run_loop(
             messages,
             tools=tools or self.on_demand_tools,
-            trigger="ON-DEMAND",
+            trigger=trigger,
         )
 
     # ------------------------------------------------------------------
