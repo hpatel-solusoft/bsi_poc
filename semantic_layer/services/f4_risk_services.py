@@ -1051,7 +1051,8 @@ def calculate_risk_metrics(
     has_open_allegation: bool = None,
     fast_track: bool = None,
     subject_count: int = None,
-    received_age: int = None
+    received_age: int = None,
+    modified_recommendation: str = None
 ) -> dict:
     """
     Deterministic BSI risk scoring using active_rules from AppWorks.
@@ -1165,7 +1166,7 @@ def calculate_risk_metrics(
             tier = tier_name
             break
 
-    recommendation = _load_recommendation(tier, active_rules)
+    recommendation = modified_recommendation or _load_recommendation(tier, active_rules)
 
     logger.info(
         f"Risk result: {total_earned}/{effective_max} pts = {risk_score} ({tier}), "
@@ -1178,10 +1179,10 @@ def calculate_risk_metrics(
             "subject_id":           subject_id,
             "risk_score":           risk_score,
             "risk_tier":            tier,
+            "fraud_types":          fraud_types,
             "risk_indicators":      all_triggered,
             "total_points":         round(total_earned, 1),
             "max_points":           round(effective_max, 1),
-            "billing_anomaly_flag": any("BILLING" in str(f).upper() for f in fraud_types),
             "prior_case_count":     final_prior_count,
             "recommendation":       recommendation,
             "active_rules":         active_rules,
@@ -1225,7 +1226,8 @@ def _load_tier_thresholds(active_rules: list) -> dict:
 def _load_recommendation(tier: str, active_rules: list) -> str:
     """
     Read recommendation text for a tier from AppWorks rules metadata.
-    Falls back to spec defaults only if AppWorks provides none.
+    Returns None if AppWorks provides none — recommendations must come
+    from AppWorks or be provided by the LLM via modified_recommendation.
     """
     for rule in active_rules:
         recs = rule.get("recommendations")
@@ -1238,23 +1240,6 @@ def _load_recommendation(tier: str, active_rules: list) -> str:
                     return parsed[tier]
             except (json.JSONDecodeError, ValueError):
                 pass
-    defaults = {
-        "CRITICAL": (
-            "Immediate field investigation and evidence preservation required. "
-            "Notify Director of Special Investigations without delay."
-        ),
-        "HIGH": (
-            "Prioritise for comprehensive audit and subject interview. "
-            "Escalate to supervisor within 24 hours."
-        ),
-        "MEDIUM": (
-            "Desk audit and prior-case history verification recommended. "
-            "Monitor for additional activity."
-        ),
-        "LOW": (
-            "Routine monitoring — no immediate field action required. "
-            "Document and schedule standard review."
-        ),
-    }
-    return defaults.get(tier, "Review case and determine appropriate action.")
+    # No hardcoded fallback — LLM must generate or AppWorks must provide
+    return None
 

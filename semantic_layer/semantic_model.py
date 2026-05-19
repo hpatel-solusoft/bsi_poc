@@ -276,13 +276,12 @@ class RiskAssessment(BaseModel):
     subject_id:           str
     risk_score:           float
     risk_tier:            str
-    risk_indicators:      list               # list of TriggeredRule-compatible dicts
+    fraud_types:          list = []           # full list of fraud types for LLM context
+    risk_indicators:      list = []           # list of TriggeredRule-compatible dicts
     total_points:         Optional[float] = None
     max_points:           Optional[float] = None
-    billing_anomaly_flag: bool = False
-    # prior_case_count has no default — it must be present in the computed output (#10)
     prior_case_count:     Optional[int] = None
-    recommendation:       str
+    recommendation:       Optional[str] = None  # LLM generates this from context; AppWorks can provide
     active_rules:         Optional[list[RiskRuleDef]] = None
     model_config = {"extra": "allow"}
 
