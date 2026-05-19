@@ -135,6 +135,17 @@ def _render_markdown_html(markdown_text: str) -> str:
     return html_converter.render_agent_summary(markdown_text)
 
 
+def _render_markdown_html_with_sources(markdown_text: str, provenance_trail: List[dict]) -> str:
+    """Render markdown and append data sources when the agent omitted them."""
+    text = markdown_text or ""
+    if not re.search(r"(^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?Data\s+(?:Sources|Provenance)\b", text, re.IGNORECASE):
+        text = (
+            f"{text.rstrip()}\n\n"
+            f"### Data Sources\n{_format_provenance_lines(provenance_trail)}"
+        )
+    return _render_markdown_html(text)
+
+
 def _get_complaint_no(case_data: dict) -> Optional[str]:
     """Extract complaint_no from investigation section (CS-4 or ai_summary)."""
     # case_data usually has 'investigation' at top level from /investigate.
@@ -152,6 +163,32 @@ def _swap_case_id_for_complaint(text: str, case_id: str, case_data: dict) -> str
     if c_no and text:
         return text.replace(str(case_id), str(c_no))
     return text or ""
+
+
+def _extract_modified_recommendation_from_request(req: Any) -> Optional[str]:
+    # 1. Check request attributes directly
+    val = getattr(req, "modified_recommendation", None)
+    if val:
+        return val
+    # 2. Check ai_summary
+    if not isinstance(req.ai_summary, dict):
+        return None
+    val = req.ai_summary.get("modified_recommendation")
+    if val:
+        return val
+    # 3. Check nested risk_assessment
+    nested = req.ai_summary.get("risk_assessment") or {}
+    if isinstance(nested, dict):
+        return nested.get("modified_recommendation")
+    return None
+
+
+def _inject_modified_recommendation_section(markdown_text: str, modified_rec: Optional[str]) -> str:
+    if not modified_rec or not isinstance(modified_rec, str):
+        return markdown_text
+    if re.search(r"(?m)^#{1,6}\s*Modified\s+Recommendation", markdown_text, re.IGNORECASE):
+        return markdown_text
+    return markdown_text.rstrip() + f"\n\n### Modified Recommendation\n{modified_rec.strip()}"
 
 
 def _find_tool_name_by_call_id(messages: list, call_id: str) -> Optional[str]:
@@ -825,11 +862,19 @@ class InvestigateRequest(BaseModel):
     case_id: str
 
 
+class SimilarCasesRequest(BaseModel):
+    case_id: str
+    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
+    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
+    ai_summary: Dict[str, Any]
+
+
 class PlaybookRequest(BaseModel):
     case_id: str
     # ai_summary is REQUIRED per v6 spec — frontend always sends it.
     # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
     ai_summary: Dict[str, Any]
+    modified_recommendation: Optional[str] = None
 
 
 class ReportRequest(BaseModel):
@@ -849,6 +894,22 @@ class CopilotRequest(BaseModel):
     # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
     ai_summary: Dict[str, Any]
     conversation_history: Optional[List[Dict[str, Any]]] = None
+    modified_recommendation: Optional[str] = None
+
+
+def _apply_modified_recommendation_to_case_data(case_data: Dict[str, Any], modified_rec: Optional[str]) -> None:
+    if modified_rec is None:
+        return
+    if not isinstance(case_data, dict):
+        return
+    case_data["modified_recommendation"] = modified_rec
+    risk_assessment = case_data.get("risk_assessment")
+    if isinstance(risk_assessment, dict):
+        risk_assessment["modified_recommendation"] = modified_rec
+    else:
+        case_data["risk_assessment"] = {
+            "modified_recommendation": modified_rec
+        }
 
 
 # -----------------------------------------------------------------------
@@ -932,7 +993,7 @@ def investigate(req: InvestigateRequest):
 
 
 @app.post("/similar_cases")
-def similar_cases(req: PlaybookRequest):
+def similar_cases(req: SimilarCasesRequest):
     """
     ON-DEMAND — Similar Cases Route (Step 2 in flow).
     Calls search_similar_cases to find historical cases with matching fraud patterns.
@@ -995,11 +1056,11 @@ def similar_cases(req: PlaybookRequest):
         }
         if similar_cases_data is not None: ai_summary["similar_cases"] = similar_cases_data
         
-        ai_summary.update({
-            "risk_rules":      risk_rules,
-            "risk_assessment": risk_assessment,
-            "provenance_trail": merged_provenance,
-        })
+        if risk_rules is not None:
+            ai_summary["risk_rules"] = risk_rules
+        if risk_assessment is not None:
+            ai_summary["risk_assessment"] = risk_assessment
+        ai_summary["provenance_trail"] = merged_provenance
         if investigation_playbook is not None:
             ai_summary["investigation_playbook"] = investigation_playbook
 
@@ -1008,8 +1069,9 @@ def similar_cases(req: PlaybookRequest):
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /risk_assessment
             "details": {
-                "agent_summary": _render_markdown_html(
-                    _swap_case_id_for_complaint(_extract_agent_summary(messages), req.case_id, ai_summary)
+                "agent_summary": _render_markdown_html_with_sources(
+                    _swap_case_id_for_complaint(_extract_agent_summary(messages), req.case_id, ai_summary),
+                    merged_provenance,
                 ),
             },
         }
@@ -1038,6 +1100,10 @@ def risk_assessment(req: PlaybookRequest):
         _validate_ai_summary_contract(req.ai_summary)
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
         case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        modified_rec = _extract_modified_recommendation_from_request(req)
+        _apply_modified_recommendation_to_case_data(case_data, modified_rec)
+        if modified_rec is not None and req.case_id in CASE_STORE:
+            _apply_modified_recommendation_to_case_data(CASE_STORE[req.case_id], modified_rec)
         runner = _get_runner()
         risk_tools = [
             tool
@@ -1059,6 +1125,43 @@ def risk_assessment(req: PlaybookRequest):
         sections = _extract_tool_results(messages)
         risk_rules = sections.get("risk_rules", {})
         risk_assessment = sections.get("risk_assessment", {})
+        # Normalize recommendation text: rename singular "recommendation" to plural "recommendations"
+        assistant_text = _extract_agent_summary(messages)
+        rec_text = None
+        try:
+            if isinstance(risk_assessment, dict):
+                # Extract from either singular or plural field
+                rec_text = risk_assessment.get("recommendation") or risk_assessment.get("recommendations")
+                # Remove the singular field to avoid duplication
+                risk_assessment.pop("recommendation", None)
+        except Exception:
+            rec_text = None
+
+        if not rec_text and isinstance(assistant_text, str):
+            # attempt to parse a recommendation section from assistant markdown
+            m = re.search(
+                r"(?:^|\n)#{1,6}\s*(?:Recommended Action|Recommendation|Recommendations)\s*\n(.*?)(?=\n#{1,6}\s|\Z)",
+                assistant_text,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if m:
+                rec_text = m.group(1).strip()
+
+        if rec_text and isinstance(risk_assessment, dict):
+            # store as both singular and plural to support downstream consumers
+            risk_assessment["recommendation"] = rec_text
+            risk_assessment["recommendations"] = rec_text
+
+        # Support optional modified_recommendation passed in the incoming request
+        if modified_rec is not None and isinstance(risk_assessment, dict):
+            risk_assessment["modified_recommendation"] = modified_rec
+        # Ensure response always includes `modified_recommendation` (empty if not provided)
+        if isinstance(risk_assessment, dict):
+            if "modified_recommendation" not in risk_assessment:
+                risk_assessment["modified_recommendation"] = ""
+        else:
+            # normalize to dict with empty field
+            risk_assessment = {"modified_recommendation": ""}
         risk_section = {
             "risk_rules":      risk_rules,
             "risk_assessment": risk_assessment
@@ -1099,14 +1202,21 @@ def risk_assessment(req: PlaybookRequest):
         if investigation_playbook is not None:
             ai_summary["investigation_playbook"] = investigation_playbook
 
+        summary_text = _swap_case_id_for_complaint(
+            _extract_agent_summary(messages), req.case_id, ai_summary
+        )
+        summary_text = _inject_modified_recommendation_section(
+            summary_text,
+            _extract_modified_recommendation_from_request(req),
+        )
+
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /playbook
             "details": {
-                "agent_summary": _render_markdown_html(
-                    _swap_case_id_for_complaint(_extract_agent_summary(messages), req.case_id, ai_summary)
-                ),
+                "agent_summary": _render_markdown_html(summary_text),
+                "recommendations": _render_markdown_html(risk_assessment.get("recommendations", "")),
             },
         }
     except HTTPException:
@@ -1133,6 +1243,10 @@ def playbook(req: PlaybookRequest):
         _validate_ai_summary_contract(req.ai_summary)
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
         case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        modified_rec = _extract_modified_recommendation_from_request(req)
+        _apply_modified_recommendation_to_case_data(case_data, modified_rec)
+        if modified_rec is not None and req.case_id in CASE_STORE:
+            _apply_modified_recommendation_to_case_data(CASE_STORE[req.case_id], modified_rec)
         runner = _get_runner()
         # Scope to playbook retrieval only (Step 4)
         playbook_tools = [
@@ -1161,7 +1275,9 @@ def playbook(req: PlaybookRequest):
             # Match section header and content until the next header or end of text
             pattern = rf"(?:^|\n)(?:#+\s*)?{header_name}.*?\n(.*?)(?=\n(?:#+\s*)|$)"
             match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-            if not match: return []
+            if not match:
+                return []
+            section_text = match.group(1).strip()
             # Extract bullet points, numbered lists, or lines starting with symbols
             items = re.findall(r"(?:^|\n)\s*[-*•\d+.]\s*(.*)", match.group(1))
             return [item.strip() for item in items if item.strip()]
@@ -1378,6 +1494,10 @@ def copilot(req: CopilotRequest):
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary
         cs4_warm = req.case_id in CASE_STORE
         case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        modified_rec = _extract_modified_recommendation_from_request(req)
+        _apply_modified_recommendation_to_case_data(case_data, modified_rec)
+        if modified_rec is not None and req.case_id in CASE_STORE:
+            _apply_modified_recommendation_to_case_data(CASE_STORE[req.case_id], modified_rec)
         conversation_history = _resolve_copilot_history(
             req.case_id,
             req.conversation_history,

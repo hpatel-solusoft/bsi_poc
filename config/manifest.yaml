@@ -151,6 +151,9 @@ tools:
       - name: "total_ordered"
         type: "number"
         description: "Total Financial_Ordered — pass 0.0 if no financial data available"
+      - name: "modified_recommendation"
+        type: "string"
+        description: "Modified recommendation override passed in from the context. If present, MUST be passed to the tool call."
 
   - name: "get_investigation_playbook"
     section: "investigation_playbook"

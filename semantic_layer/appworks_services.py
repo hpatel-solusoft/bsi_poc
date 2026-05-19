@@ -132,7 +132,8 @@ def calculate_risk_metrics(
     has_open_allegation: bool = None,
     fast_track: bool = None,
     subject_count: int = None,
-    received_age: int = None
+    received_age: int = None,
+    modified_recommendation: str = None
 ) -> dict:
     """Dispatched from 'calculate_risk_metrics'"""
     res = f4.calculate_risk_metrics(
@@ -149,7 +150,8 @@ def calculate_risk_metrics(
         has_open_allegation=has_open_allegation,
         fast_track=fast_track,
         subject_count=subject_count,
-        received_age=received_age
+        received_age=received_age,
+        modified_recommendation=modified_recommendation
     )
     return _validate(model.RiskAssessment, res, "calculate_risk_metrics")
 
