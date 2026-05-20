@@ -1,6 +1,6 @@
 # semantic_layer/services/f5_strategy_services.py
 # ----------------------------------------------------------------
-# Agent 5: Investigation Playbook Context
+# Agent 5: Investigation Plan Context
 # ----------------------------------------------------------------
 # F5 does not generate plan content. It only returns the tool inputs
 # so the LLM can generate the investigation strategy from the prompt and
@@ -10,7 +10,7 @@
 import logging
 from datetime import datetime, timezone
 
-from semantic_layer.semantic_model import InvestigationPlaybook
+from semantic_layer.semantic_model import InvestigationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def _normalize_list(values):
     return []
 
 
-def get_investigation_playbook(fraud_types: list, risk_tier: str, case_data: dict = None) -> dict:
+def get_investigation_plan(fraud_types: list, risk_tier: str, case_data: dict = None) -> dict:
     """Return the plan context skeleton only. The LLM generates the actual analysis."""
     if isinstance(fraud_types, str):
         fraud_types = [fraud_types]
@@ -39,13 +39,13 @@ def get_investigation_playbook(fraud_types: list, risk_tier: str, case_data: dic
     type_slug = "-".join(str(item).replace(" ", "_") for item in fraud_types[:2]) or "UNSPECIFIED"
 
     result_data = {
-        "playbook_id": f"PLAN-{type_slug}-{risk_tier or 'UNSPECIFIED'}-{datetime.now().strftime('%Y%m%d')}",
+        "plan_id": f"PLAN-{type_slug}-{risk_tier or 'UNSPECIFIED'}-{datetime.now().strftime('%Y%m%d')}",
         "fraud_types": fraud_types,
         "risk_tier": risk_tier,
     }
 
     logger.info("F5 plan context returned: %s", result_data)
-    validated = InvestigationPlaybook(**result_data)
+    validated = InvestigationPlan(**result_data)
 
     return {
         "result": validated.model_dump(exclude_none=True),

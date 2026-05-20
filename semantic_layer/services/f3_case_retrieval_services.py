@@ -593,7 +593,7 @@ def search_similar_cases(
                     )
 
                 summary = (
-                    wf_props.get("WorkfolderDescription")
+                    wf_props.get("WorkfolderDescription")#allegation desc
                     or wf_props.get("Workfolder_CaseDescription")
                     or f"Historical {fraud_type_desc} allegation"
                 )

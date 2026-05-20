@@ -1052,7 +1052,6 @@ def calculate_risk_metrics(
     fast_track: bool = None,
     subject_count: int = None,
     received_age: int = None,
-    modified_recommendation: str = None
 ) -> dict:
     """
     Deterministic BSI risk scoring using active_rules from AppWorks.
@@ -1166,7 +1165,7 @@ def calculate_risk_metrics(
             tier = tier_name
             break
 
-    recommendation = modified_recommendation or _load_recommendation(tier, active_rules)
+    recommendation = _load_recommendation(tier, active_rules)
 
     logger.info(
         f"Risk result: {total_earned}/{effective_max} pts = {risk_score} ({tier}), "
@@ -1226,8 +1225,7 @@ def _load_tier_thresholds(active_rules: list) -> dict:
 def _load_recommendation(tier: str, active_rules: list) -> str:
     """
     Read recommendation text for a tier from AppWorks rules metadata.
-    Returns None if AppWorks provides none — recommendations must come
-    from AppWorks or be provided by the LLM via modified_recommendation.
+    Returns None if AppWorks provides none.
     """
     for rule in active_rules:
         recs = rule.get("recommendations")
