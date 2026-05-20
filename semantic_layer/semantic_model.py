@@ -57,7 +57,7 @@ class TriggeredRule(BaseModel):
 
 
 class InvestigationStep(BaseModel):
-    """A single step in the investigation playbook."""
+    """A single step in the investigation plan."""
     step:          int
     action:        str
     owner:         str
@@ -287,11 +287,11 @@ class RiskAssessment(BaseModel):
 
 
 # ================================================================
-# TOOL 5 — get_investigation_playbook
+# TOOL 5 — get_investigation_plan
 # ================================================================
 
-class InvestigationPlaybook(BaseModel):
-    playbook_id: str
+class InvestigationPlan(BaseModel):
+    plan_id: str
     fraud_types: list[str]
     risk_tier: str
     investigation_steps: Optional[list[dict]] = None

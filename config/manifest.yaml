@@ -155,16 +155,16 @@ tools:
         type: "string"
         description: "Modified recommendation override passed in from the context. If present, MUST be passed to the tool call."
 
-  - name: "get_investigation_playbook"
-    section: "investigation_playbook"
+  - name: "get_investigation_plan"
+    section: "investigation_plan"
     description: >
       Retrieves the investigation plan context skeleton for the verified case and
-      risk profile. Returns only plan metadata (playbook_id, fraud_types, risk_tier);
+      risk profile. Returns only plan metadata (plan_id, fraud_types, risk_tier);
       the LLM is responsible for generating the detailed investigation steps,
       evidence checklist items, and escalation guidance from the route1 case
       context. Requires: fraud_types and risk_tier from prior investigation results.
     trigger: ON-DEMAND
-    python_function: "appworks_services.get_investigation_playbook"
+    python_function: "appworks_services.get_investigation_plan"
 
     required_params:
       - name: "fraud_types"
