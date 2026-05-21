@@ -10,7 +10,12 @@ import semantic_layer.services.f4_risk_services as f4
 import semantic_layer.services.f5_strategy_services as f5
 import semantic_layer.services.f6_report_services as f6
 import semantic_layer.semantic_model as model
+from semantic_layer.appworks_auth import fetch,fetch_list
+from datetime import datetime, timezone
 import logging
+from typing import List, Optional, Any
+import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -186,3 +191,154 @@ def compile_and_render_report(
         risk_indicators=risk_indicators,
     )
     return _validate(model.FinalReport, res, "generate_final_report")
+
+
+
+_ALLEGATIONS_ALL_LIST_ENDPOINT = "/entities/Allegations/lists/Allegations_All"
+
+
+def _id_from_appworks_href(href: str) -> str:
+    if not href:
+        return ""
+    match = re.search(r"/items/(\d+)", href)
+    return match.group(1) if match else ""
+
+
+def _allegation_type_from_row(row: dict) -> Optional[Any]:
+    """Extract allegation type from an Allegations_All list row."""
+    if not isinstance(row, dict):
+        return None
+
+    type_props = row.get("Allegations_AllegationsType$Properties")
+    type_identity = row.get("Allegations_AllegationsType$Identity")
+    if isinstance(type_props, dict) and type_props:
+        payload = dict(type_props)
+        if isinstance(type_identity, dict):
+            type_id = type_identity.get("Id") or type_identity.get("id")
+            if type_id is not None:
+                payload["Id"] = str(type_id)
+        elif type_identity is not None and str(type_identity).strip():
+            payload["Id"] = str(type_identity).strip()
+        return payload
+
+    props = row.get("Properties", {})
+    raw = props.get("Allegations_AllegationsType")
+    if isinstance(raw, dict) and raw:
+        return raw
+    if raw is not None and str(raw).strip():
+        return raw
+
+    type_href = (
+        row.get("_links", {})
+        .get("relationship:Allegations_AllegationsType", {})
+        .get("href", "")
+    )
+    type_id = _id_from_appworks_href(type_href)
+    if type_id:
+        return {"Id": type_id}
+    return None
+
+
+# def get_allegation_types() -> dict:
+#     """
+#     Fetch Allegations_All via AppWorks list API and return distinct
+#     Allegations_AllegationsType values (uses APPWORKS_URL from .env).
+#     """
+#     from semantic_layer.appworks_auth import fetch
+
+#     # Allegations_All is served on entityRestService (fetch), not entityservice (fetch_list).
+#     list_res = fetch(_ALLEGATIONS_ALL_LIST_ENDPOINT)
+#     rows = list_res.get("_embedded", {}).get("Allegations_All", [])
+#     if not isinstance(rows, list):
+#         rows = []
+
+#     seen: set = set()
+#     allegation_types: dict
+#     for row in rows:
+#         value = _allegation_type_from_row(row)
+#         if value is None:
+#             continue
+#         dedupe_key = json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value)
+#         if dedupe_key in seen:
+#             continue
+#         seen.add(dedupe_key)
+#         allegation_types.append(value)
+
+#     logger.info(
+#         "Fetched %s Allegations_All row(s); %s distinct allegation type(s).",
+#         len(rows),
+#         len(allegation_types),
+#     )
+#     return _validate(model.AllegationTypesResult, allegation_types, "get_allegation_types")
+
+
+def _type_id_from_row(item: dict) -> Optional[str]:
+    """Read allegation type id from an Allegations_All list row."""
+    identity = item.get("Allegations_AllegationsType$Identity")
+    if isinstance(identity, dict):
+        raw = identity.get("Id") or identity.get("id")
+    else:
+        raw = identity
+    if raw is None or not str(raw).strip():
+        return None
+    return str(raw).strip()
+
+def get_allegation_types() -> dict:
+
+    raw = fetch(_ALLEGATIONS_ALL_LIST_ENDPOINT)
+
+    items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("Allegations_All", [])
+ 
+    seen_type_ids = set()
+
+    allegation_types = []
+ 
+    for item in items:
+
+        type_props = item.get("Allegations_AllegationsType$Properties", {})
+
+        type_id    = item.get("Allegations_AllegationsType$Identity", {}).get("Id")
+ 
+        if not type_id or type_id in seen_type_ids:
+
+            continue
+ 
+        seen_type_ids.add(type_id)
+
+        allegation_types.append({
+
+            "type_id":      type_id,
+
+            "short_code":   type_props.get("AllegationType_AllegationTypeShortDesc", ""),
+
+            "description":  type_props.get("AllegationType_AllegationTypeDescription", ""),
+
+            "default_text": type_props.get("AllegationType_AllegationTypeDefaults", ""),
+
+        })
+ 
+    envelope = {
+
+        "result": {
+
+            "allegation_types": allegation_types,
+
+            "total_types":      len(allegation_types),
+
+        },
+
+        "provenance": {
+
+            "sources":      [_ALLEGATIONS_ALL_LIST_ENDPOINT],
+
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+
+            "computed_by":  "get_allegation_types",
+
+        }
+
+    }
+    print("************************************")
+    print(allegation_types)
+    return _validate(model.AllegationTypesResult, envelope, "get_allegation_types")
+ 
