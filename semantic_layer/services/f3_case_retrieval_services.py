@@ -207,6 +207,39 @@ def _allegation_date_from_item(alleg_item: dict) -> str:
         or ""
     )
 
+def _allegation_comment_from_item(alleg_item: dict) -> str:
+    """Read the business allegation description/comment from an Allegations row."""
+    props = alleg_item.get("Properties", {}) if isinstance(alleg_item, dict) else {}
+    raw = (
+        props.get("Allegations_Comment")
+        # or props.get("Allegations_AllegationCloseComment")
+        or ""
+    )
+    comment = str(raw).strip() if raw is not None else ""
+    if comment:
+        return comment
+
+    # Fallback removed: only use Allegations_Comment.
+    # links = alleg_item.get("_links", {}) if isinstance(alleg_item, dict) else {}
+    # item_href = (
+    #     links.get("item", {}).get("href", "")
+    #     or links.get("self", {}).get("href", "")
+    # )
+    # if not item_href:
+    #     return ""
+
+    # full_item = _safe_fetch(item_href)
+    # full_props = full_item.get("Properties", {}) if isinstance(full_item, dict) else {}
+    # full_raw = (
+    #     full_props.get("Allegations_Comment")
+    #     or full_props.get("Allegations_AllegationCloseComment")
+    #     or ""
+    # )
+    # return str(full_raw).strip() if full_raw is not None else ""
+
+    return ""
+
+
 def _parse_aw_date(raw: str):
     """
     Parse AppWorks date safely and ALWAYS return timezone-aware UTC datetime.
@@ -331,9 +364,26 @@ def _names_match(fraud_type: str, aw_desc: str) -> bool:
 
 # ── Step 1: Resolve AllegationType IDs from current case ─────────
 
-def _resolve_case_fraud_types(case_id: str) -> list:
+def _resolve_case_fraud_types(case_id: str, base_signatures: list = None, complaint_description: str = None) -> list:
     fraud_types: list = []
     seen: set = set()
+
+    def add_signature(value):
+        if not value:
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        if text not in seen:
+            seen.add(text)
+            fraud_types.append(text)
+
+    if base_signatures:
+        for signature in base_signatures:
+            add_signature(signature)
+
+    add_signature(complaint_description)
+
     if not case_id:
         return fraud_types
 
@@ -345,19 +395,19 @@ def _resolve_case_fraud_types(case_id: str) -> list:
             if not alleg_href:
                 continue
             alleg_res = _safe_fetch(alleg_href)
+
+            # Add the allegation row's comment/description if present.
+            alleg_comment = _allegation_comment_from_item(alleg_res)
+            add_signature(alleg_comment)
+
             type_href = _rel_href(alleg_res.get("_links", {}), "Allegations_AllegationsType")
             if not type_href:
                 continue
             type_res = _safe_fetch(type_href)
             props = type_res.get("Properties", {})
-            desc = (
-                props.get("AllegationType_AllegationTypeDescription")
-                or props.get("AllegationType_AllegationTypeShortDesc")
-                or props.get("AllegationType_AllegationTypeDefaults")
-            )
-            if desc and desc not in seen:
-                seen.add(desc)
-                fraud_types.append(desc)
+            add_signature(props.get("AllegationType_AllegationTypeDescription"))
+            add_signature(props.get("AllegationType_AllegationTypeShortDesc"))
+            add_signature(props.get("AllegationType_AllegationTypeDefaults"))
     except Exception as exc:
         logger.warning(f"Failed to resolve case fraud types from case {case_id}: {exc}")
     return fraud_types
@@ -466,8 +516,11 @@ def search_similar_cases(
         case_id, fraud_types = (str(fraud_types) if fraud_types else None), case_id
 
     fraud_types = fraud_types or []
-    if not fraud_types and case_id:
-        fraud_types = _resolve_case_fraud_types(case_id)
+    fraud_types = _resolve_case_fraud_types(
+        case_id,
+        base_signatures=fraud_types,
+        complaint_description=complaint_description,
+    )
 
     logger.info(
         f"Similar Case Retrieval: fraud_types={fraud_types} case={case_id} "
@@ -592,11 +645,13 @@ def search_similar_cases(
                         or None
                     )
 
-                summary = (
-                    wf_props.get("WorkfolderDescription")#allegation desc
+                workfolder_summary = (
+                    wf_props.get("WorkfolderDescription")
                     or wf_props.get("Workfolder_CaseDescription")
                     or f"Historical {fraud_type_desc} allegation"
                 )
+                description = _allegation_comment_from_item(alleg_row) or None
+                summary = workfolder_summary
                 if destination: summary = f"{summary} [{destination}]"
                 date_received = date_raw or wf_props.get("WorkfolderDateReceived") or None
 
@@ -607,6 +662,7 @@ def search_similar_cases(
                     "fraud_type":           fraud_type_desc,
                     "outcome":              _OUTCOME_ALLEGATION_MATCH.format(type_id=type_id),
                     "summary":              summary,
+                    "description":          description,
                     "status":               resolved_status,
                     "date_received":        date_received,
                     "financial_calculated": fin_cache[wf_id],
@@ -645,18 +701,20 @@ def search_similar_cases(
                     seen_alleg_ids.add(alleg_id)
                     type_counts[type_id] = type_counts.get(type_id, 0) + 1
                     fraud_type_desc = type_id_to_desc.get(type_id, type_id)
-                    summary = (
+                    workfolder_summary = (
                         wf_props.get("WorkfolderDescription")
                         or wf_props.get("Workfolder_CaseDescription")
                         or f"Historical {fraud_type_desc} allegation"
                     )
+                    description = match.get("comment") or None
                     candidates.append({
                         "case_id":              wf_id,
                         "allegation_id":        alleg_id,
                         "similarity_score":     1.0,
                         "fraud_type":           fraud_type_desc,
                         "outcome":              _OUTCOME_SUBJECT_TRAVERSAL.format(type_id=type_id),
-                        "summary":              summary,
+                        "summary":              workfolder_summary,
+                        "description":          description,
                         "status":               match.get("status") or None,
                         "date_received":        match.get("date_received") or None,
                         "financial_calculated": fin_calculated,
@@ -771,6 +829,11 @@ def _find_matching_allegations(wf_id: str, target_type_ids: set) -> list:
                     or None
                 ),
                 "date_received": props.get("Allegations_DateReceived") or None,
+                "comment":       (
+                    props.get("Allegations_Comment")
+                    or props.get("Allegations_AllegationCloseComment")
+                    or None
+                ),
             })
     return matches
 
