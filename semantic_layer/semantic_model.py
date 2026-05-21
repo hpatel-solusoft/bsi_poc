@@ -80,6 +80,7 @@ class SimilarCaseMatch(BaseModel):
     fraud_type:           str
     outcome:              str
     summary:              str
+    description:          Optional[str] = None
     # estimated_loss removed — not part of the canonical model (Code Review #9)
     # financial_calculated has no default — AppWorks must supply it or call is rejected (#9)
     financial_calculated: Optional[float] = None

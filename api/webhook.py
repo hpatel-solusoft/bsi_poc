@@ -2041,35 +2041,282 @@ def _build_investigation_summary(case_id: str, sections: dict, provenance_trail:
     )
 
 
-def _build_plan_summary(case_id: str, plan: dict, provenance_trail: List[dict]) -> str:
-    """Detailed deterministic summary for /plan response."""
+def _build_similar_cases_summary(
+    case_id: str,
+    case_data: dict,
+    similar_cases: dict,
+    provenance_trail: List[dict],
+) -> str:
+    """Deterministic visible summary for /similar_cases from the returned contract."""
+    if not isinstance(case_data, dict):
+        case_data = {}
+    if not isinstance(similar_cases, dict):
+        similar_cases = {}
+
+    complaint = case_data.get("complaint_intelligence", {}) if isinstance(case_data, dict) else {}
+    summary = complaint.get("summary", {}) if isinstance(complaint, dict) else {}
+    details = complaint.get("details", {}) if isinstance(complaint, dict) else {}
+    fraud_types = complaint.get("fraud_types", []) if isinstance(complaint, dict) else []
+    allegations = complaint.get("allegations", []) if isinstance(complaint, dict) else []
+    subjects = complaint.get("subjects", []) if isinstance(complaint, dict) else []
+    primary_subject = next((s for s in subjects if s.get("is_primary_subject")), subjects[0] if subjects else {})
+    primary_details = primary_subject.get("details", {}) if isinstance(primary_subject, dict) else {}
+    primary_name = (
+        " ".join(
+            part for part in [
+                primary_details.get("first_name"),
+                primary_details.get("middle_initial"),
+                primary_details.get("last_name"),
+            ]
+            if part
+        )
+        or primary_details.get("identifier")
+        or "Not recorded"
+    )
+
+    matches = similar_cases.get("matches", [])
+    if not isinstance(matches, list):
+        matches = []
+
+    lines = [
+        f"### Similar Cases for Case {case_id}",
+        "",
+        f"**Case Background:** Complaint #{summary.get('complaint_no', 'Not available')} "
+        f"({summary.get('case_description', 'Not available')}) is currently in "
+        f"'{summary.get('destination', 'Not available')}' under team "
+        f"'{summary.get('team', 'Not available')}'. Intake source is "
+        f"{details.get('source', 'Not recorded')} with referral "
+        f"{details.get('intake_referral_no', 'Not recorded')}.",
+        "",
+        f"**Primary Subject:** {primary_name} (Subject ID: {primary_subject.get('subject_id', 'Not recorded')}).",
+        "",
+        f"**Fraud Types:** {_safe_join(fraud_types)}.",
+        "",
+        "**Allegations:**",
+    ]
+
+    if allegations:
+        for idx, item in enumerate(allegations, start=1):
+            lines.append(
+                f"{idx}) {item.get('allegation_type', {}).get('description', 'Unknown')} "
+                f"(status={item.get('status', 'Unknown')}, received={item.get('date_received', 'Unknown')}, "
+                f"agency={item.get('source_agency', {}).get('name', 'Unknown')})."
+            )
+    else:
+        lines.append("No allegations recorded.")
+
+    lines.extend([
+        "",
+        "**Similar Case Analysis:**",
+        "",
+        similar_cases.get("query_summary") or "No similar case query summary was returned.",
+        "",
+        "### Similar Cases",
+        "",
+    ])
+
+    if not matches:
+        lines.append("No similar historical cases were returned.")
+    else:
+        for idx, match in enumerate(matches, start=1):
+            if not isinstance(match, dict):
+                continue
+            description = match.get("description") or "Not recorded"
+            financial = match.get("financial_calculated")
+            financial_text = "Not recorded" if financial is None else str(financial)
+            lines.extend([
+                f"{idx}. **Case ID:** {match.get('case_id', 'Not recorded')}",
+                f"   - **Allegation ID:** {match.get('allegation_id') or 'Not recorded'}",
+                f"   - **Fraud Type:** {match.get('fraud_type') or 'Not recorded'}",
+                f"   - **Date Received:** {match.get('date_received') or 'Not recorded'}",
+                f"   - **Summary:** {match.get('summary') or 'Not recorded'}",
+                f"   - **Description:** {description}",
+                f"   - **Current Investigation Stage:** {match.get('status') or 'Not recorded'}",
+                f"   - **Financial Amount:** {financial_text}",
+                f"   - **Match Basis:** {match.get('outcome') or 'Not recorded'}",
+                "",
+            ])
+
+    filters = similar_cases.get("manifest_filters_applied", {})
+    if isinstance(filters, dict) and filters:
+        lines.extend([
+            "### Search Controls",
+            "",
+            f"- **Returned Matches:** {similar_cases.get('top_n_returned', len(matches))}",
+            f"- **Raw Matches Found:** {similar_cases.get('raw_matches_found', 'Not recorded')}",
+            f"- **Required Status:** {filters.get('required_status') or 'Not recorded'}",
+            f"- **Lookback Years:** {filters.get('similarity_lookback_years') if filters.get('similarity_lookback_years') is not None else 'Not recorded'}",
+            f"- **Max Results Per Type:** {filters.get('max_results_per_type') if filters.get('max_results_per_type') is not None else 'Not recorded'}",
+            "",
+        ])
+
+    lines.extend([
+        "### Data Sources",
+        _format_provenance_lines(provenance_trail),
+    ])
+    return "\n".join(lines)
+
+
+def _parse_bsi_section(text: str, header_name: str) -> List[str]:
+    """Extract bullet/numbered list items under a markdown section header."""
+    if not text:
+        return []
+    pattern = rf"(?:^|\n)(?:#+\s*)?{header_name}.*?\n(.*?)(?=\n(?:#+\s*)|$)"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    if not match:
+        return []
+    items = re.findall(r"(?:^|\n)\s*[-*•\d+.]\s*(.*)", match.group(1))
+    return [item.strip() for item in items if item.strip()]
+
+
+def _plan_list_field(plan: dict, key: str) -> List:
+    """Return a normalized non-empty list from a plan section field."""
+    if not isinstance(plan, dict):
+        return []
+    raw = plan.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if item is not None and str(item).strip()]
+
+
+def _plan_has_substance(plan: dict) -> bool:
+    """True when parsed plan includes at least one actionable section."""
+    return any(
+        _plan_list_field(plan, key)
+        for key in ("investigation_steps", "evidence_checklist", "escalation_criteria")
+    )
+
+
+def _format_plan_markdown_item(item, index: int = 1) -> str:
+    """Render one investigation step, checklist item, or escalation line."""
+    if isinstance(item, dict):
+        label = (
+            item.get("action")
+            or item.get("item")
+            or item.get("description")
+            or item.get("text")
+            or ""
+        ).strip()
+        if not label:
+            return ""
+        step_no = item.get("step", index)
+        owner = item.get("owner")
+        deadline = item.get("deadline_days")
+        if owner or deadline is not None:
+            return (
+                f"- **Step {step_no}:** {label} "
+                f"(Owner: {owner or 'Not assigned'}; "
+                f"Deadline: {deadline if deadline is not None else 'Not specified'} day(s))"
+            )
+        mandatory = item.get("mandatory")
+        if mandatory is not None:
+            flag = "required" if mandatory else "optional"
+            return f"- {label} ({flag})"
+        return f"- {label}"
+    text = str(item).strip()
+    if not text:
+        return ""
+    return f"- {text}" if not text.startswith("-") else text
+
+
+def _complaint_label(case_id: str, context: dict) -> str:
+    """Prefer business complaint number over internal workfolder id for display."""
+    intel = context.get("complaint_intelligence") if isinstance(context, dict) else None
+    if isinstance(intel, dict):
+        summary = intel.get("summary", {})
+        if isinstance(summary, dict) and summary.get("complaint_no") is not None:
+            return str(summary["complaint_no"])
+    c_no = _get_complaint_no(context) if isinstance(context, dict) else None
+    return str(c_no) if c_no is not None else str(case_id)
+
+
+def _build_plan_summary(
+    case_id: str,
+    plan: dict,
+    case_data: dict,
+    provenance_trail: List[dict],
+) -> str:
+    """Build agent_summary markdown from the same structured plan returned in ai_summary."""
     if not isinstance(plan, dict):
         return f"Plan generation for case {case_id} completed, but no plan payload was returned."
-    steps = plan.get("investigation_steps", [])
-    owners = sorted({s.get("owner") for s in steps if isinstance(s, dict) and s.get("owner")})
-    mandatory = len([
-        item for item in plan.get("evidence_checklist", [])
-        if isinstance(item, dict) and item.get("mandatory")
-    ])
-    step_lines = []
-    for step in steps:
-        step_lines.append(
-            f"- **Step {step.get('step', '?')}:** {step.get('action', 'Not available')} "
-            f"Owner: {step.get('owner', 'Not available')}. "
-            f"Deadline: {step.get('deadline_days', 'Not available')} day(s)."
+
+    label = _complaint_label(case_id, case_data)
+    steps = _plan_list_field(plan, "investigation_steps")
+    checklist = _plan_list_field(plan, "evidence_checklist")
+    criteria = _plan_list_field(plan, "escalation_criteria")
+    risk_tier = plan.get("risk_tier") or "Not available"
+    fraud_types = _safe_join(plan.get("fraud_types", []))
+    plan_id = plan.get("plan_id", "Not available")
+
+    lines = [
+        f"### Preliminary Investigation Strategy for Case {label}",
+        "",
+        (
+            f"Investigation plan **{plan_id}** for Complaint #{label} "
+            f"({risk_tier} risk; fraud types: {fraud_types}). "
+            f"This strategy includes {len(steps)} investigation step(s), "
+            f"{len(checklist)} evidence checklist item(s), and "
+            f"{len(criteria)} escalation criterion/criteria."
+        ),
+    ]
+    if plan.get("escalation_required"):
+        lines.append(
+            "Management escalation is flagged for this case based on risk tier and escalation criteria."
         )
-    return (
-        f"### Investigation Plan for Case {case_id}\n\n"
-        f"Plan `{plan.get('plan_id', 'Not available')}` was generated for risk tier "
-        f"{plan.get('risk_tier', 'Not available')} and fraud types "
-        f"{_safe_join(plan.get('fraud_types', []))}. "
-        f"The workflow includes {len(steps)} investigation step(s):\n\n"
-        f"{chr(10).join(step_lines) if step_lines else '- No investigation steps returned.'}\n\n"
-        f"Mandatory evidence item count is {mandatory}, escalation_required is "
-        f"{plan.get('escalation_required', False)}, and owner group(s) involved are "
-        f"{_safe_join(owners)}.\n\n"
-        f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
-    )
+    lines.append("")
+
+    lines.extend(["#### Investigation Steps", ""])
+    if steps:
+        for idx, step in enumerate(steps, start=1):
+            formatted = _format_plan_markdown_item(step, idx)
+            if formatted:
+                lines.append(formatted)
+    else:
+        lines.append("- No investigation steps were returned.")
+    lines.append("")
+
+    lines.extend(["#### Evidence Checklist", ""])
+    if checklist:
+        for idx, item in enumerate(checklist, start=1):
+            formatted = _format_plan_markdown_item(item, idx)
+            if formatted:
+                lines.append(formatted)
+    else:
+        lines.append("- No evidence checklist items were returned.")
+    lines.append("")
+
+    lines.extend(["#### Escalation Criteria", ""])
+    if criteria:
+        for idx, item in enumerate(criteria, start=1):
+            formatted = _format_plan_markdown_item(item, idx)
+            if formatted:
+                lines.append(formatted)
+    else:
+        lines.append("- No escalation criteria were returned.")
+    lines.append("")
+
+    lines.extend([
+        "### Data Sources",
+        _format_provenance_lines(provenance_trail),
+    ])
+    return "\n".join(lines)
+
+
+def _resolve_plan_agent_summary(
+    assistant_text: str,
+    plan: dict,
+    case_id: str,
+    case_data: dict,
+    provenance_trail: List[dict],
+) -> str:
+    """
+    Prefer markdown synthesized from parsed investigation_plan so agent_summary
+    cannot contradict ai_summary.investigation_plan. Fall back to LLM prose only
+    when no plan sections were parsed.
+    """
+    if _plan_has_substance(plan):
+        return _build_plan_summary(case_id, plan, case_data, provenance_trail)
+    return assistant_text or _build_plan_summary(case_id, plan, case_data, provenance_trail)
 
 
 def _build_report_summary(case_id: str, final_report: dict, case_data: dict, provenance_trail: List[dict]) -> str:
@@ -2563,15 +2810,19 @@ def similar_cases(req: SimilarCasesRequest):
         if investigation_plan is not None:
             ai_summary["investigation_plan"] = investigation_plan
 
+        summary_text = _build_similar_cases_summary(
+            req.case_id,
+            case_data,
+            similar_cases_data,
+            merged_provenance,
+        )
+
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /risk_assessment
             "details": {
-                "agent_summary": _render_markdown_html_with_sources(
-                    _swap_case_id_for_complaint(_extract_agent_summary(messages), req.case_id, ai_summary),
-                    merged_provenance,
-                ),
+                "agent_summary": _render_markdown_html(summary_text),
             },
         }
     except HTTPException:
@@ -2747,20 +2998,8 @@ def plan(req: PlanRequest):
         investigation_plan = sections.get("investigation_plan", {})
 
         assistant_text = _extract_agent_summary(messages)
-        
-        # Parse markdown prose into structured fields (Service-layer logic to fill plan)
-        def _parse_bsi_section(text, header_name):
-            import re
-            # Match section header and content until the next header or end of text
-            pattern = rf"(?:^|\n)(?:#+\s*)?{header_name}.*?\n(.*?)(?=\n(?:#+\s*)|$)"
-            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-            if not match:
-                return []
-            section_text = match.group(1).strip()
-            # Extract bullet points, numbered lists, or lines starting with symbols
-            items = re.findall(r"(?:^|\n)\s*[-*•\d+.]\s*(.*)", match.group(1))
-            return [item.strip() for item in items if item.strip()]
 
+        # Parse markdown prose into structured fields (same source used for agent_summary)
         steps = _parse_bsi_section(assistant_text, "Investigation Steps")
         checklist = _parse_bsi_section(assistant_text, "Evidence Checklist")
         criteria = _parse_bsi_section(assistant_text, "Escalation Criteria")
@@ -2820,14 +3059,23 @@ def plan(req: PlanRequest):
             "provenance_trail":        merged_provenance,
         })
 
+        summary_text = _resolve_plan_agent_summary(
+            assistant_text,
+            investigation_plan,
+            req.case_id,
+            case_data,
+            merged_provenance,
+        )
+        summary_text = _swap_case_id_for_complaint(summary_text, req.case_id, ai_summary)
+
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /report, /copilot
             "details": {
                 "agent_summary": _render_markdown_html_with_sources(
-                    _swap_case_id_for_complaint(_extract_agent_summary(messages), req.case_id, ai_summary),
-                    merged_provenance
+                    summary_text,
+                    merged_provenance,
                 ),
             },
         }
