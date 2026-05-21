@@ -315,3 +315,55 @@ class FinalReport(BaseModel):
     sections:     dict
     status:       str
     model_config = {"extra": "forbid"}
+
+
+
+# ================================================================
+
+# TOOL — get_allegation_types
+
+# ================================================================
+ 
+class AllegationTypeDefinition(BaseModel):
+
+    """
+
+    A single distinct allegation type definition from AppWorks.
+
+    Deduplicated from the Allegations_All list by type_id.
+
+    """
+
+    type_id:      str
+
+    short_code:   str        # AllegationType_AllegationTypeShortDesc — e.g. "ATS", "CHK"
+
+    description:  str        # AllegationType_AllegationTypeDescription — e.g. "Assets"
+
+    default_text: str        # AllegationType_AllegationTypeDefaults — plain language
+                             # definition of what conduct this type covers.
+
+                             # This is the field the LLM uses to match against the
+
+                             # current case allegation comment.
+
+    model_config = {"extra": "forbid"}
+ 
+ 
+class AllegationTypesResult(BaseModel):
+
+    """
+
+    Deduplicated list of all active allegation type definitions from AppWorks.
+
+    Used by the LLM to identify all type IDs relevant to the current case scheme
+
+    before calling search_similar_cases.
+
+    """
+
+    allegation_types: list[AllegationTypeDefinition]
+    total_types:      int    # count of distinct types returned — for traceability
+    relevant_type_ids: Optional[list[int]] = None #Populated by the LLM after reasoning over allegation_types.
+    model_config = {"extra": "forbid"}
+ 
