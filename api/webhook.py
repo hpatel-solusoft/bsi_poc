@@ -1242,6 +1242,10 @@ def similar_cases(req: SimilarCasesRequest):
         )
 
         sections = _extract_tool_results(messages)
+        # print("11111111111111111111111111")
+        # print(sections)
+        agent_summary = _extract_agent_summary(messages)
+        print(agent_summary)
         similar_cases_data = sections.get("similar_cases", {})
         similar_section = {
             "similar_cases": similar_cases_data
@@ -1279,20 +1283,24 @@ def similar_cases(req: SimilarCasesRequest):
         ai_summary["provenance_trail"] = merged_provenance
         if investigation_plan is not None:
             ai_summary["investigation_plan"] = investigation_plan
-
+        # print(req.case_id)
+        # print(case_data)
+        # print(similar_cases_data)
+        # print(merged_provenance)
         summary_text = _build_similar_cases_summary(
             req.case_id,
             case_data,
             similar_cases_data,
             merged_provenance,
         )
-
+        logger.info(f"SIMILAR CASES NARRATIVE LENGTH: {len(summary_text)}") 
+        logger.info(f"SIMILAR CASES NARRATIVE TAIL: {summary_text[-500:]}")
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /risk_assessment
             "details": {
-                "agent_summary": _render_markdown_html(summary_text),
+                "agent_summary": _render_markdown_html(agent_summary),
             },
         }
     except HTTPException:
