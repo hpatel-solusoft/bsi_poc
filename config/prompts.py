@@ -110,7 +110,11 @@ actionable without any technical interpretation.
   that names the specific subjects, entities, or records involved and states what
 
   the step should establish.
- 
+
+- Do not prefix investigation steps with a bold label or title. Each step is a  single plain sentence — no heading, no colon-separated  title, no bold introduction. The step text begins immediately with the action. 
+
+- Present investigation steps as a plain numbered list only. Do not nest  sub-bullets, sub-points, or indented items inside any step.
+
 - For every checklist item: state why it matters for this specific case, not
 
   just what it is.

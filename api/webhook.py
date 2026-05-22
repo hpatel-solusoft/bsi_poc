@@ -1488,7 +1488,11 @@ def plan(req: PlanRequest):
         assistant_text = _extract_agent_summary(messages)
 
         # Parse markdown prose into structured fields (same source used for agent_summary)
+        # print("%%%%%%%%%-before")
+        # print(steps)
         steps = _parse_bsi_section(assistant_text, "Investigation Steps")
+        # print(steps)
+        # print("%%%%%%%%%-after")
         checklist = _parse_bsi_section(assistant_text, "Evidence Checklist")
         criteria = _parse_bsi_section(assistant_text, "Escalation Criteria")
         
@@ -1562,7 +1566,7 @@ def plan(req: PlanRequest):
             "ai_summary": ai_summary,          # ← pass this object to /report, /copilot
             "details": {
                 "agent_summary": _render_markdown_html_with_sources(
-                    summary_text,
+                    assistant_text,
                     merged_provenance,
                 ),
             },
@@ -1706,7 +1710,9 @@ def copilot(req: CopilotRequest):
     """
     try:
         from agent_service.agent_runner import build_copilot_prompt
-
+        print(req)
+        print(req.ai_summary)
+        print(req.modified_ai_investigation_plan)
         _validate_ai_summary_contract(req.ai_summary)
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary
         cs4_warm = req.case_id in CASE_STORE
