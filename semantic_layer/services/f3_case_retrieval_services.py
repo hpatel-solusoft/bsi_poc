@@ -8,7 +8,7 @@
 #     - Fetch Allegations_All rows per type ID (list endpoint)
 #     - Read wf_id + allegation status from list-row Properties
 #       (no extra per-row API call needed for status)
-#     - EARLY-EXIT per type once (max_results_per_type * OVERFETCH_FACTOR)
+#     - EARLY-EXIT per type once (allocated quota * OVERFETCH_FACTOR)
 #       unique workfolders have been accumulated — avoids scanning hundreds
 #       of rows when only a handful of results are needed
 #     - Fetch Workfolder + FinancialRelationship only for kept candidates
@@ -16,7 +16,7 @@
 #   Stage B (manifest filters):
 #     - required_status  — matched against allegation status from list row
 #     - similarity_lookback_years
-#     - max_results_per_type
+#     - max_total_results split across fraud types
 #
 # All filter parameters are read from manifest at runtime — no hardcoding.
 # ----------------------------------------------------------------
@@ -25,11 +25,12 @@ import logging
 import re
 import yaml
 import os
+import json 
+from typing import List, Optional, Any  
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from semantic_layer.appworks_auth import fetch
+from semantic_layer.appworks_auth import fetch, fetch_list
 from semantic_layer.semantic_model import SimilarCasesResult
-
 logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.yaml")
@@ -37,6 +38,7 @@ _MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.
 # How many candidates to collect per type before stopping the list scan.
 # e.g. max_per_type=3, factor=5 → stop after 15 unique workfolders per type.
 _OVERFETCH_FACTOR = 5
+_DEFAULT_TOTAL_RESULTS_LIMIT = 10
 
 # Outcome string templates for similar-case candidates.
 # Defined here so wording has a single edit point (Issue #12).
@@ -296,9 +298,10 @@ def _fetch_financial_calculated(wf_id: str) -> float:
 
 def _apply_manifest_filters(
     candidates: list,
-    max_per_type: int,
     required_status: str,
     lookback_years: int,
+    type_quotas: dict = None,
+    max_total_results: int = _DEFAULT_TOTAL_RESULTS_LIMIT,
 ) -> list:
     """Apply manifest constraints. All parameters come from manifest config."""
     now = datetime.now(timezone.utc)
@@ -310,8 +313,12 @@ def _apply_manifest_filters(
     filtered = []
     per_type_counts = {}
     seen_alleg = set()
+    type_quotas = type_quotas or {}
 
     for row in candidates:
+        if max_total_results > 0 and len(filtered) >= max_total_results:
+            break
+
         # Filter 1: required_status
         if required_status_norm:
             case_status = (row.get("status") or "").strip().lower()
@@ -335,15 +342,42 @@ def _apply_manifest_filters(
         if alleg_id:
             seen_alleg.add(alleg_id)
 
-        # Filter 4: max_results_per_type
+        # Filter 4: allocated per-type quota under the aggregate result cap
         ftype = row.get("fraud_type", "UNKNOWN")
         cnt = per_type_counts.get(ftype, 0)
-        if max_per_type > 0 and cnt >= max_per_type:
+        quota = type_quotas.get(ftype, max_total_results)
+        if quota <= 0 or cnt >= quota:
             continue
         per_type_counts[ftype] = cnt + 1
         filtered.append(row)
 
     return filtered
+
+
+def _allocate_type_quotas(allegation_types: list, total_limit: int) -> tuple[dict, dict]:
+    """
+    Split the aggregate similar-case cap evenly across fraud types.
+
+    Examples:
+      2 types, total 10 -> 5 + 5
+      3 types, total 10 -> 4 + 3 + 3
+    """
+    if not allegation_types or total_limit <= 0:
+        return {}, {}
+
+    type_count = len(allegation_types)
+    base = total_limit // type_count
+    remainder = total_limit % type_count
+    by_id = {}
+    by_desc = {}
+
+    for index, (type_id, desc) in enumerate(allegation_types):
+        quota = base + (1 if index < remainder else 0)
+        fraud_type_desc = desc or str(type_id)
+        by_id[type_id] = quota
+        by_desc[fraud_type_desc] = quota
+
+    return by_id, by_desc
 
 
 def _names_match(fraud_type: str, aw_desc: str) -> bool:
@@ -502,54 +536,65 @@ def search_similar_cases(
     Stage B (manifest filters — all values from manifest config):
       - required_status  (allegation status, resolved from list row)
       - similarity_lookback_years
-      - max_results_per_type
+      - max_total_results split across fraud types
     """
+    print("===============================")
+    print(fraud_types)
+
     cfg = _load_f3_config()
     max_per_type        = int(cfg.get("max_results_per_type", 5))
+    max_total_results   = int(cfg.get("max_total_results", _DEFAULT_TOTAL_RESULTS_LIMIT))
     required_status     = str(cfg.get("required_status", "") or "")
-    lookback_years      = int(cfg.get("similarity_lookback_years", 3))
-    enable_broad_fetch  = bool(cfg.get("enable_broad_fetch_stage", False))
-    fallback_to_raw     = bool(cfg.get("fallback_to_raw_when_filtered_empty", False))
+    lookback_years      = int(cfg.get("similarity_lookback_years", 10))
+    enable_broad_fetch  = bool(cfg.get("enable_broad_fetch_stage", True))
+    fallback_to_raw     = bool(cfg.get("fallback_to_raw_when_filtered_empty", True))
 
     # Guard against positional call swap
     if isinstance(case_id, list) and (fraud_types is None or isinstance(fraud_types, str)):
         case_id, fraud_types = (str(fraud_types) if fraud_types else None), case_id
 
     fraud_types = fraud_types or []
-    fraud_types = _resolve_case_fraud_types(
-        case_id,
-        base_signatures=fraud_types,
-        complaint_description=complaint_description,
-    )
+    # fraud_types = _resolve_case_fraud_types(
+    #     case_id,
+    #     base_signatures=fraud_types,
+    #     complaint_description=complaint_description,
+    # )
 
     logger.info(
         f"Similar Case Retrieval: fraud_types={fraud_types} case={case_id} "
-        f"max_per_type={max_per_type} lookback_years={lookback_years} "
+        f"max_per_type={max_per_type} max_total_results={max_total_results} "
+        f"lookback_years={lookback_years} "
         f"required_status={required_status or 'ANY'}"
     )
 
     # Step 1: Resolve target AllegationType IDs
-    allegation_types = _resolve_allegation_type_ids(case_id, fraud_types)
+    # allegation_types = _resolve_allegation_type_ids(case_id, fraud_types)
+    allegation_types = _normalise_to_type_dicts(fraud_types)
+    # allegation_types = fraud_types
     logger.info(
         f"Resolved {len(allegation_types)} type(s): "
-        f"{[(t['id'], t['description']) for t in allegation_types]}"
+        f"{[(t[0], t[1]) for t in allegation_types]}"
     )
 
     if not allegation_types:
         logger.warning("No AllegationType IDs resolved — returning empty result.")
         return _build_result([], allegation_types, fraud_types, cfg=cfg)
 
-    target_type_ids: set  = {t["id"] for t in allegation_types}
-    type_id_to_desc: dict = {t["id"]: t["description"] for t in allegation_types}
+    target_type_ids: set  = {t[0] for t in allegation_types}
+    type_id_to_desc: dict = {t[0]: t[1] for t in allegation_types}
+    type_quotas_by_id, type_quotas_by_desc = _allocate_type_quotas(
+        allegation_types,
+        max_total_results,
+    )
+    logger.info(f"Similar Case Retrieval quotas by type: {type_quotas_by_id}")
 
     candidates: list = []
 
     if enable_broad_fetch:
         # ── Stage A: broad fetch with per-type early-exit ─────────────────
-        # Collecting budget = max_per_type * OVERFETCH_FACTOR unique workfolders
+        # Collecting budget = allocated quota * OVERFETCH_FACTOR unique workfolders
         # per type.  Once the budget is hit we break out of the row loop for
         # that type, capping the number of expensive workfolder fetches.
-        collection_budget    = max(max_per_type * _OVERFETCH_FACTOR, max_per_type + 1)
         required_status_norm = required_status.strip().lower()
 
         now    = datetime.now(timezone.utc)
@@ -569,6 +614,10 @@ def search_similar_cases(
         all_wf_ids_to_fetch = set()
         
         for type_id in target_type_ids:
+            type_quota = type_quotas_by_id.get(type_id, max_per_type)
+            if type_quota <= 0:
+                continue
+            collection_budget = max(type_quota * _OVERFETCH_FACTOR, type_quota + 1)
             list_href = f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
             list_res = _safe_fetch(list_href)
             rows = list_res.get("_embedded", {}).get("Allegations_All", [])
@@ -606,8 +655,12 @@ def search_similar_cases(
 
         # Step A3: Build candidates
         for type_id in target_type_ids:
+            type_quota = type_quotas_by_id.get(type_id, max_per_type)
+            if type_quota <= 0:
+                continue
+            collection_budget = max(type_quota * _OVERFETCH_FACTOR, type_quota + 1)
             rows = type_to_rows.get(type_id, [])
-            fraud_type_desc = type_id_to_desc.get(type_id, type_id)
+            fraud_type_desc = type_id_to_desc.get(type_id) or str(type_id)
             seen_wf_for_type = set()
             
             for alleg_row in rows:
@@ -677,7 +730,9 @@ def search_similar_cases(
         # ── Legacy traversal path (used when enable_broad_fetch_stage=false) ──
         seen_wf_ids:   set = {str(case_id)} if case_id else set()
         seen_alleg_ids: set = set()
-        type_counts:   dict = {t["id"]: 0 for t in allegation_types}
+        # type_counts:   dict = {t["id"]: 0 for t in allegation_types}
+        type_counts:   dict = {t[0]: 0 for t in allegation_types}
+        type_quotas:   dict = type_quotas_by_id or {t[0]: max_per_type for t in allegation_types}
         subject_ids = _get_subjects_for_case(case_id) if case_id else []
         for subject_id in subject_ids:
             hist_wf_ids = _get_historical_workfolders(
@@ -686,7 +741,7 @@ def search_similar_cases(
             for wf_id in hist_wf_ids:
                 if wf_id in seen_wf_ids:
                     continue
-                if all(count >= max_per_type for count in type_counts.values()):
+                if all(count >= type_quotas.get(type_id, max_per_type) for type_id, count in type_counts.items()):
                     break
                 seen_wf_ids.add(wf_id)
                 wf_res   = _safe_fetch(f"/entities/Workfolder/items/{wf_id}")
@@ -696,11 +751,11 @@ def search_similar_cases(
                 for match in matches:
                     type_id  = match["type_id"]
                     alleg_id = match["allegation_id"]
-                    if alleg_id in seen_alleg_ids or type_counts.get(type_id, 0) >= max_per_type:
+                    if alleg_id in seen_alleg_ids or type_counts.get(type_id, 0) >= type_quotas.get(type_id, max_per_type):
                         continue
                     seen_alleg_ids.add(alleg_id)
                     type_counts[type_id] = type_counts.get(type_id, 0) + 1
-                    fraud_type_desc = type_id_to_desc.get(type_id, type_id)
+                    fraud_type_desc = type_id_to_desc.get(type_id) or str(type_id)
                     workfolder_summary = (
                         wf_props.get("WorkfolderDescription")
                         or wf_props.get("Workfolder_CaseDescription")
@@ -723,9 +778,10 @@ def search_similar_cases(
     # ── Stage B: manifest post-filtering ─────────────────────────────────
     similar_cases = _apply_manifest_filters(
         candidates=candidates,
-        max_per_type=max_per_type,
         required_status=required_status,
         lookback_years=lookback_years,
+        type_quotas=type_quotas_by_desc,
+        max_total_results=max_total_results,
     )
 
     if fallback_to_raw and not similar_cases and candidates:
@@ -733,13 +789,20 @@ def search_similar_cases(
             "[Fallback] Filters removed all similar cases; returning raw candidate pool "
             "(fallback_to_raw_when_filtered_empty=true)"
         )
-        similar_cases = candidates
+        similar_cases = _apply_manifest_filters(
+            candidates=candidates,
+            required_status="",
+            lookback_years=0,
+            type_quotas=type_quotas_by_desc,
+            max_total_results=max_total_results,
+        )
 
     logger.info(
         f"search_similar_cases done: raw={len(candidates)} filtered={len(similar_cases)} "
         f"| type_ids={list(target_type_ids)} | input={fraud_types} "
         f"| filters(status={required_status or 'ANY'}, lookback_years={lookback_years}, "
-        f"max_per_type={max_per_type}) "
+        f"max_per_type={max_per_type}, max_total_results={max_total_results}, "
+        f"type_quotas={type_quotas_by_id}) "
         f"| broad_fetch={enable_broad_fetch} fallback_to_raw={fallback_to_raw}"
     )
 
@@ -749,6 +812,7 @@ def search_similar_cases(
         fraud_types=fraud_types,
         raw_count=len(candidates),
         cfg=cfg,
+        type_quotas=type_quotas_by_id,
     )
 
 
@@ -818,11 +882,12 @@ def _find_matching_allegations(wf_id: str, target_type_ids: set) -> list:
         alleg_res = _safe_fetch(alleg_href)
         type_href = _rel_href(alleg_res.get("_links", {}), "Allegations_AllegationsType")
         type_id   = _extract_id(type_href)
-        if type_id and type_id in target_type_ids:
+        type_key  = int(type_id) if str(type_id).isdigit() else type_id
+        if type_key and type_key in target_type_ids:
             props = alleg_res.get("Properties", {})
             matches.append({
                 "allegation_id": alleg_id,
-                "type_id":       type_id,
+                "type_id":       type_key,
                 "status": (
                     props.get("Allegations_Status")
                     or props.get("Allegations_AllegationStatus")
@@ -846,12 +911,17 @@ def _build_result(
     fraud_types: list,
     raw_count: int = 0,
     cfg: dict = None,
+    type_quotas: dict = None,
 ) -> dict:
     cfg = cfg or {}
     required_status = str(cfg.get("required_status", "") or "")
     lookback_years  = int(cfg.get("similarity_lookback_years", 0))
     max_per_type    = int(cfg.get("max_results_per_type", 0))
-    type_id_list    = [t["id"] for t in allegation_types]
+    max_total_results = int(cfg.get("max_total_results", _DEFAULT_TOTAL_RESULTS_LIMIT))
+    type_quotas = type_quotas or {}
+    # type_id_list    = [t["id"] for t in allegation_types]
+    type_id_list = [t[0] for t in allegation_types]
+ 
 
     query_summary = (
         f"Found {len(similar_cases)} similar archive match(es) "
@@ -868,6 +938,8 @@ def _build_result(
                 "required_status":           required_status,
                 "similarity_lookback_years": lookback_years,
                 "max_results_per_type":      max_per_type,
+                "max_total_results":         max_total_results,
+                "type_quotas":               type_quotas,
             },
         ).model_dump(),
         "provenance": {
@@ -879,3 +951,46 @@ def _build_result(
             "computed_by":  "AppWorks REST retrieval + manifest post-filtering",
         },
     }
+
+def _normalise_to_type_dicts(fraud_types: list) -> list:
+    result = []
+    seen = set()
+ 
+    for ft in (fraud_types or []):
+        type_id = ""
+        desc = ""
+ 
+        if isinstance(ft, dict):
+            type_id = str(ft.get("type_id") or ft.get("id", "")).strip()
+            desc    = ft.get("description", "")
+ 
+        elif isinstance(ft, str) and ft.strip().startswith("{"):
+            try:
+                parsed  = json.loads(ft)
+                type_id = str(parsed.get("type_id") or parsed.get("id", "")).strip()
+                desc    = parsed.get("description", "")
+            except Exception:
+                logger.warning(f"[normalise] failed to parse JSON string: {ft}")
+                continue
+ 
+        elif isinstance(ft, str) and ":" in ft and ft.split(":")[0].strip().isdigit():
+            parts   = ft.split(":", 1)
+            type_id = parts[0].strip()
+            desc    = parts[1].strip() if len(parts) > 1 else ""
+ 
+        elif isinstance(ft, str) and ft.strip().isdigit():
+            type_id = ft.strip()
+            desc    = ""
+ 
+        elif isinstance(ft, (int, float)):
+            type_id = str(int(ft))
+            desc    = ""
+ 
+        else:
+            logger.warning(f"[normalise] skipping unresolvable: {ft}")
+            continue
+        type_id = int(type_id)
+        if type_id and type_id not in seen:
+            seen.add(type_id)
+            result.append((type_id, desc))
+    return result
