@@ -25,12 +25,11 @@ import logging
 import re
 import yaml
 import os
-import json 
-from typing import List, Optional, Any  
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from semantic_layer.appworks_auth import fetch, fetch_list
+from semantic_layer.appworks_auth import fetch
 from semantic_layer.semantic_model import SimilarCasesResult
+
 logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.yaml")

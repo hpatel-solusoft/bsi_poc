@@ -40,45 +40,41 @@ tools:
         type: "string"
         description: "Current case identifier from verify_case_intake output — excludes this case from prior_cases and prior_case_count so the active investigation is not counted as its own prior history"
 
-  - name: "get_allegation_types"
-    section: "allegation_types"
-    description: >
-      Fetches the complete list of active allegation type definitions from AppWorks.
-      Returns each allegation type identifier and its description text.
-      Call this first to identify all allegation types that share the same scheme
-      or conduct pattern as the current case. Pass the relevant allegation type
-      labels to search_similar_cases to ensure the archive search is not bounded
-      by a single fraud type label — the same scheme often appears under different
-      labels across the BSI archive.
-    trigger: AUTO
-    python_function: "appworks_services.get_allegation_types"
-    required_params: []
-    optional_params: []
-    
   - name: "search_similar_cases"
     section: "similar_cases"
     description: >
-      Searches the BSI AppWorks archive for historical cases that share
-      characteristics with the current investigation. Returns closed and
-      active cases with summaries, investigation status, and financial data.
-      Requires fraud_types — pass all relevant allegation type labels
-      identified from get_allegation_types output, not just the current
-      case fraud type label. Multiple fraud types produce a broader
-      cross-label candidate pool that surfaces scheme matches regardless
-      of how prior cases were classified.
+      Searches AppWorks for historical cases involving the same subjects and fraud types.
+      Uses subject history traversal to find archived cases with matching allegation types.
+      Requires: fraud_types list from verify_case_intake output.
+      Always pass fraud_types from verify_case_intake output.
     trigger: AUTO
     python_function: "appworks_services.search_similar_cases"
+
     required_params:
       - name: "fraud_types"
         type: "list[string]"
-        description: "All relevant fraud type labels identified from 
-                      get_allegation_types — drives the archive search 
-                      across related scheme categories"
+        description: "List of fraud types from verify_case_intake — drives the similarity search"
     optional_params:
       - name: "case_id"
         type: "string"
-        description: "Current case identifier — excludes this case from results"
- 
+        description: "Current case identifier from verify_case_intake — used to exclude the current case from results"
+      - name: "complaint_description"
+        type: "string"
+        description: "Optional complaint description text for additional keyword filtering of matches"
+    config:
+      similarity_lookback_years: 10
+      max_results_per_type: 5
+      required_status: "Open or Closed"
+      # Permission-gated rollout flags (keep false until approval):
+      # - enable_broad_fetch_stage: fetch broad candidate pool first
+      #   (other_dev_api style), then apply manifest filters.
+      # - fallback_to_raw_when_filtered_empty: if filtered result is empty,
+      #   return raw candidate pool for analyst visibility.
+      enable_broad_fetch_stage: true
+      # Set true only for debugging — returning unfiltered raw results defeats
+      # the purpose of required_status / lookback filtering.
+      fallback_to_raw_when_filtered_empty: true
+
   - name: "get_risk_rules"
     section: "risk_rules"
     description: >
