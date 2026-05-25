@@ -238,40 +238,6 @@ def _allegation_type_from_row(row: dict) -> Optional[Any]:
         return {"Id": type_id}
     return None
 
-
-# def get_allegation_types() -> dict:
-#     """
-#     Fetch Allegations_All via AppWorks list API and return distinct
-#     Allegations_AllegationsType values (uses APPWORKS_URL from .env).
-#     """
-#     from semantic_layer.appworks_auth import fetch
-
-#     # Allegations_All is served on entityRestService (fetch), not entityservice (fetch_list).
-#     list_res = fetch(_ALLEGATIONS_ALL_LIST_ENDPOINT)
-#     rows = list_res.get("_embedded", {}).get("Allegations_All", [])
-#     if not isinstance(rows, list):
-#         rows = []
-
-#     seen: set = set()
-#     allegation_types: dict
-#     for row in rows:
-#         value = _allegation_type_from_row(row)
-#         if value is None:
-#             continue
-#         dedupe_key = json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value)
-#         if dedupe_key in seen:
-#             continue
-#         seen.add(dedupe_key)
-#         allegation_types.append(value)
-
-#     logger.info(
-#         "Fetched %s Allegations_All row(s); %s distinct allegation type(s).",
-#         len(rows),
-#         len(allegation_types),
-#     )
-#     return _validate(model.AllegationTypesResult, allegation_types, "get_allegation_types")
-
-
 def _type_id_from_row(item: dict) -> Optional[str]:
     """Read allegation type id from an Allegations_All list row."""
     identity = item.get("Allegations_AllegationsType$Identity")
@@ -284,59 +250,35 @@ def _type_id_from_row(item: dict) -> Optional[str]:
     return str(raw).strip()
 
 def get_allegation_types_original() -> dict:
-
     raw = fetch(_ALLEGATIONS_ALL_LIST_ENDPOINT)
-
     items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("Allegations_All", [])
- 
     seen_type_ids = set()
-
     allegation_types = []
- 
+    
     for item in items:
-
         type_props = item.get("Allegations_AllegationsType$Properties", {})
-
         type_id    = item.get("Allegations_AllegationsType$Identity", {}).get("Id")
- 
         if not type_id or type_id in seen_type_ids:
-
             continue
- 
         seen_type_ids.add(type_id)
-
         allegation_types.append({
-
             "type_id":      type_id,
-
             "short_code":   type_props.get("AllegationType_AllegationTypeShortDesc", ""),
-
             "description":  type_props.get("AllegationType_AllegationTypeDescription", ""),
-
             "default_text": type_props.get("AllegationType_AllegationTypeDefaults", ""),
-
         })
- 
+    
     envelope = {
-
         "result": {
-
             "allegation_types": allegation_types,
-
             "total_types":      len(allegation_types),
-
         },
 
         "provenance": {
-
             "sources":      [_ALLEGATIONS_ALL_LIST_ENDPOINT],
-
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
-
             "computed_by":  "get_allegation_types",
-
         }
-
     }
     print("************************************")
     print(allegation_types)
@@ -344,64 +286,37 @@ def get_allegation_types_original() -> dict:
  
 
 def get_allegation_types() -> dict:
- 
     raw = fetch(_ALLEGATIONS_TYPE_LIST_ENDPOINT)
- 
     items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])
- 
     seen_type_ids = set()
- 
     allegation_types = []
- 
+    
     for item in items:
- 
         type_props = item.get("Properties", {})
- 
         href = item.get("_links", {}).get("item", {}).get("href", "")
-       
         type_id = href.rstrip("/").split("/")[-1] if href else None
-       
         if not type_id or type_id in seen_type_ids:
- 
             continue
- 
         seen_type_ids.add(type_id)
- 
+        
         allegation_types.append({
- 
             "type_id":      type_id,
- 
             "short_code":   type_props.get("AllegationType_AllegationTypeShortDesc", ""),
- 
             "description":  type_props.get("AllegationType_AllegationTypeDescription", ""),
- 
             "default_text": type_props.get("AllegationType_AllegationTypeDefaults", ""),
- 
         })
- 
     envelope = {
- 
         "result": {
- 
             "allegation_types": allegation_types,
- 
             "total_types":      len(allegation_types),
- 
         },
- 
+
         "provenance": {
- 
             "sources":      [_ALLEGATIONS_TYPE_LIST_ENDPOINT],
- 
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
- 
             "computed_by":  "get_allegation_types",
- 
         }
- 
     }
     print("************************************")
     print(allegation_types)
     return _validate(model.AllegationTypesResult, envelope, "get_allegation_types")
- 
- 

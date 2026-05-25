@@ -198,6 +198,9 @@ class PriorCaseHeader(BaseModel):
     status:             Optional[str] = None
     description:        Optional[str] = None
     case_description:   Optional[str] = None
+    allegation_comment:   Optional[str] = None
+    analyst_comment:     Optional[str] = None
+    reviewer_comment:    Optional[str] = None
     destination:        Optional[str] = None
     is_primary_subject: Optional[bool] = None
     date_received:      Optional[str] = None
@@ -283,7 +286,7 @@ class RiskAssessment(BaseModel):
     max_points:           Optional[float] = None
     prior_case_count:     Optional[int] = None
     recommendation:       Optional[str] = None  # LLM generates this from context; AppWorks can provide
-    active_rules:         Optional[list[RiskRuleDef]] = None
+    # active_rules:         Optional[list[RiskRuleDef]] = None
     model_config = {"extra": "allow"}
 
 
@@ -325,45 +328,26 @@ class FinalReport(BaseModel):
 # ================================================================
  
 class AllegationTypeDefinition(BaseModel):
-
     """
-
     A single distinct allegation type definition from AppWorks.
-
     Deduplicated from the Allegations_All list by type_id.
-
     """
-
     type_id:      str       # AllegationType_AllegationTypeID — unique numeric ID for the type definition
-
     short_code:   str        # AllegationType_AllegationTypeShortDesc — e.g. "ATS", "CHK"
-
     description:  str        # AllegationType_AllegationTypeDescription — e.g. "Assets"
-
     default_text: str        # AllegationType_AllegationTypeDefaults — plain language
                              # definition of what conduct this type covers.
-
                              # This is the field the LLM uses to match against the
-
                              # current case allegation comment.
-
     model_config = {"extra": "forbid"}
  
- 
 class AllegationTypesResult(BaseModel):
-
     """
-
     Deduplicated list of all active allegation type definitions from AppWorks.
-
     Used by the LLM to identify all type IDs relevant to the current case scheme
-
     before calling search_similar_cases.
-
     """
-
     allegation_types: list[AllegationTypeDefinition]
     total_types:      int    # count of distinct types returned — for traceability
     relevant_type_ids: Optional[list[int]] = None #Populated by the LLM after reasoning over allegation_types.
     model_config = {"extra": "forbid"}
- 

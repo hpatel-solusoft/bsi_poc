@@ -20,6 +20,83 @@ def _fetch_props_and_links(href: str) -> tuple[dict, dict]:
     res = _safe_fetch(href)
     return res.get("Properties", {}), res.get("_links", {})
 
+def _extract_workfolder_core_props(wf_props: dict) -> dict:
+    """
+    Step 1: Extracts core properties and extended text fields from a Workfolder properties dict.
+    """
+    return {
+        "complaint_no":                      wf_props.get("WorkfolderComplaintNumber"),
+        "status":                            wf_props.get("WorkfolderStatus"),
+        "description":                       wf_props.get("WorkfolderDescription"),
+        "case_description":                  wf_props.get("Workfolder_CaseDescription"),
+        "date_received":                     wf_props.get("WorkfolderDateReceived"),
+        "date_reported":                     wf_props.get("WorkfolderDateReported"),
+        "allegation":                        wf_props.get("WorkFolderAllegation"),
+        "team":                              wf_props.get("TEAM_DISPLAY_NAME"),
+        "destination":                       wf_props.get("DESTINATION"),
+        "workfolder_allegations_description": wf_props.get("WorkfolderAllegationsDescription"),
+        "workfolder_reviewer_comments":       wf_props.get("WorkfolderReviewerComments"),
+        "workfolder_analyst_comments":        wf_props.get("WorkfolderAnalystComments"),
+    }
+
+
+def _fetch_workfolder_commentary(wf_id: str) -> list[dict]:
+    """
+    Step 2: Fetches commentary entries for a Workfolder and returns a list of
+    {commentary_text, commentary_type} dicts.
+    """
+    commentary_href = (
+        f"/entities/Workfolder/items/{wf_id}"
+        f"/relationships/Workfolder_WorkfolderCommentaryNewRelationship"
+    )
+    logger.info(f"💬 Fetching commentary for Workfolder: {wf_id}")
+    res = _safe_fetch(commentary_href)
+
+    items = (
+        res
+        .get("_embedded", {})
+        .get("Workfolder_WorkfolderCommentaryNewRelationship", [])
+    )
+
+    commentary_list = []
+    for item in items:
+        props = item.get("Properties", {})
+        commentary_list.append({
+            "commentary_text": props.get("WorkfolderCommentaryText"),
+            "commentary_type": props.get("WorkfolderCommentaryType"),
+        })
+
+    logger.info(f"  → {len(commentary_list)} commentary item(s) found for Workfolder {wf_id}")
+    return commentary_list
+
+
+def _fetch_workfolder_allegations(wf_id: str) -> list[str]:
+    """
+    Step 3: Fetches allegations for a Workfolder and returns a list of
+    AllegationDescription strings.
+    """
+    allegations_href = (
+        f"/entities/Workfolder/items/{wf_id}"
+        f"/relationships/Workfolder_AllegationsRelationship"
+    )
+    logger.info(f"⚖️  Fetching allegations for Workfolder: {wf_id}")
+    res = _safe_fetch(allegations_href)
+
+    items = (
+        res
+        .get("_embedded", {})
+        .get("Workfolder_AllegationsRelationship", [])
+    )
+
+    allegations_list = [
+        item.get("Properties", {}).get("AllegationDescription")
+        for item in items
+        if item.get("Properties", {}).get("AllegationDescription")
+    ]
+
+    logger.info(f"  → {len(allegations_list)} allegation(s) found for Workfolder {wf_id}")
+    return allegations_list
+
 def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
     """
     Fetches deep subject history and prior cases for a given subject_id.
@@ -98,21 +175,58 @@ def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
             logger.info(f"📂 Fetching linked Workfolder: {wf_id}")
             wf_props, _ = _fetch_props_and_links(wf_href)
 
-            prior_cases.append({
-                "workfolder_id":     wf_id,
-                "complaint_no":      wf_props.get("WorkfolderComplaintNumber"),
-                "status":            wf_props.get("WorkfolderStatus"),
-                "description":       wf_props.get("WorkfolderDescription"),
-                "case_description":  wf_props.get("Workfolder_CaseDescription"),
-                "date_received":     wf_props.get("WorkfolderDateReceived"),
-                "date_reported":     wf_props.get("WorkfolderDateReported"),
-                "allegation":        wf_props.get("WorkFolderAllegation"),
-                "team":              wf_props.get("TEAM_DISPLAY_NAME"),
-                "destination":       wf_props.get("DESTINATION"),
-                "is_primary_subject": is_primary,
-                "mapping_title":     title_text,
-            })
+            """
+            TO DO :
+            Create a seperate function for each of the following steps to keep the code clean and modular: 
+            1) From the reponse of first call to Workfolder/item/658259969, extract the following properties: WorkfolderComplaintNumber, WorkfolderStatus, WorkfolderDescription, Workfolder_CaseDescription, WorkfolderDateReceived, WorkfolderDateReported, WorkFolderAllegation, TEAM_DISPLAY_NAME, DESTINATION
+                - get the WorkfolderAllegationsDescription, WorkfolderReviewerComments , WorkfolderAnalystComments properties from the workolder properties
+                - add to the prior_cases list as workfolder_allegations_description, workfolder_reviewer_comments, workfolder_analyst_comments keys respectively
 
+            2) Call a function to fetch workfolder commentary with url "/entities/Workfolder/items/658259969/relationships/Workfolder_WorkfolderCommentaryNewRelationship"
+                - iterate through the commentary items and extract the WorkfolderCommentaryText and WorkfolderCommentaryType properties
+                - add to the prior_cases list as a list of dictionaries with keys "commentary_text" and "commentary_type"
+            3) Call a function to fetch workfolder Allegations with url "/entities/Workfolder/items/658259969/relationships/Workfolder_AllegationsRelationship"
+                - iterate through the allegations items and extract the AllegationDescription property
+                - add to the prior_cases list as a list of allegation descriptions
+            """
+            
+            # create a function to fetch workfolder commentary with url "/entities/Workfolder/items/658259969/relationships/Workfolder_WorkfolderCommentaryNewRelationship"
+            # ite
+            # prior_cases.append({
+            #     "workfolder_id":     wf_id,
+            #     "complaint_no":      wf_props.get("WorkfolderComplaintNumber"),
+            #     "status":            wf_props.get("WorkfolderStatus"),
+            #     "description":       wf_props.get("WorkfolderDescription"),
+            #     "case_description":  wf_props.get("Workfolder_CaseDescription"),
+            #     # "workfolder_allegations_description": "Grantee Denise M. Ferreira (AP-0044213) has been employed at BrightPath Home Health LLC (EIN: 04-7821334) since March 2023. DOR Wagematch confirms wages Q1 2023 through Q4 2025. Income was not reported to DTA at any point. Subject remains active on SNAP AU2 and MassHealth Standard. Prior employment closure BSI-2022-0614 on record.",
+            #     # "workfolder_analyst_comments" : "FS AU2. Referral for subject working since Mar 2023. DOR confirms wages at BrightPath Home Health LLC: 2023 total $15,400 (Q1 $3,600 / Q2 $3,900 / Q3 $4,100 / Q4 $3,800). 2024 total $16,900 (Q1 $3,950 / Q2 $4,200 / Q3 $4,450 / Q4 $4,300). 2025 total $14,900 (Q1 $3,800 / Q2 $4,100 / Q3 $3,900 / Q4 $3,100). Subject did not report this income. Recommend assignment.",
+            #     # "workfolder_reviewer_comments" :" Reviewer agrees with preliminary analysis. Prior case BSI-2022-0614 (civil recovery $8,450) confirms established pattern of unreported employment income. ",
+            #     # "case_commentary" : [{'FastTrack':'DTA referral received 02/10/2026 – Employment/DOR case. Assign to Sandra Delgado AD queue. Subject Denise M. Ferreira AP-0044213. Unreported wages BrightPath Home Health LLC confirmed via DOR Wagematch.'},{'General':'Prior case BSI-2022-0614 (closed Aug 2022) – civil recovery $8,450 – unreported part-time wages Sunrise Care Services LLC. Same pattern confirmed.'},{'Financial':'DTA calculation request sent to DTA Calculation Unit. MH calc packet submitted to MassHealth HIX'},{'Financial':'DTA calc received. FS overpayment: $38,750. MH calc pending estimated $9,100'},{'General':'BrightPath Home Health LLC employment verification received. Confirms Ferreira employed as Home Health Aide since 03/14/2023. Employer not listed in DTA record at any point.'}],
+            #     "date_received":     wf_props.get("WorkfolderDateReceived"),
+            #     "date_reported":     wf_props.get("WorkfolderDateReported"),
+            #     "allegation":        wf_props.get("WorkFolderAllegation"),
+            #     "team":              wf_props.get("TEAM_DISPLAY_NAME"),
+            #     "destination":       wf_props.get("DESTINATION"),
+            #     "is_primary_subject": is_primary,
+            #     "mapping_title":     title_text,
+            # })
+            # ── Step 1: Extract core + extended Workfolder properties ──────────
+            core_props = _extract_workfolder_core_props(wf_props)
+
+            # ── Step 2: Fetch commentary ───────────────────────────────────────
+            commentary = _fetch_workfolder_commentary(wf_id)
+
+            # ── Step 3: Fetch allegations ──────────────────────────────────────
+            allegations = _fetch_workfolder_allegations(wf_id)
+
+            prior_cases.append({
+                "workfolder_id":      wf_id,
+                "is_primary_subject": is_primary,
+                "mapping_title":      title_text,
+                **core_props,                        # unpacks all Step 1 fields
+                "commentary":         commentary,    # list of {text, type} dicts
+                "allegations":        allegations,   # list of description strings
+            })
         except Exception as exc:
             logger.warning(f"⚠️  Failed processing mapping item: {exc}")
 

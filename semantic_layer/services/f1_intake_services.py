@@ -68,7 +68,7 @@ def build_case_header_data(case_id: str) -> dict:
         except Exception as e:
             logger.warning(f"⚠️ fetch_relationship_items failed for {href}: {str(e)}")
             return []
-
+# WorkfolderComplaintNumber, WorkfolderStatus, WorkfolderDescription, Workfolder_CaseDescription, WorkfolderDateReceived, WorkfolderDateReported, WorkFolderAllegation, TEAM_DISPLAY_NAME, DESTINATION
     # 1. Fetch Main Workfolder
     try:
         endpoint = f"/entities/Workfolder/items/{case_id}"
