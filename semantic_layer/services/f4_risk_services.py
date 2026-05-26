@@ -404,7 +404,7 @@ def _resolve_evaluation_strategy(rule: dict) -> str:
 
     # Description/rule_id contains fraud type signal words
     fraud_signals = ["fraud type", "fs/snap", "mh/pca", "snap", "snap benefit",
-                     "undeclared", "non-disclosure", "billing", "terminated"]
+                     "undeclared", "non-disclosure", "billing", "terminated","Personal Care Attendant", "Employment"]
     combined = f"{dim} {description} {rule_id}"
     if any(sig in combined for sig in fraud_signals):
         return "fraud_type_match"

@@ -38,7 +38,7 @@ _MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.
 # How many candidates to collect per type before stopping the list scan.
 # e.g. max_per_type=3, factor=5 → stop after 15 unique workfolders per type.
 _OVERFETCH_FACTOR = 5
-_DEFAULT_TOTAL_RESULTS_LIMIT = 10
+_DEFAULT_TOTAL_RESULTS_LIMIT = 3
 
 # Outcome string templates for similar-case candidates.
 # Defined here so wording has a single edit point (Issue #12).
@@ -542,10 +542,10 @@ def search_similar_cases(
     print(fraud_types)
 
     cfg = _load_f3_config()
-    max_per_type        = int(cfg.get("max_results_per_type", 5))
+    max_per_type        = int(cfg.get("max_results_per_type", 3))
     max_total_results   = int(cfg.get("max_total_results", _DEFAULT_TOTAL_RESULTS_LIMIT))
-    required_status     = str(cfg.get("required_status", "") or "")
-    lookback_years      = int(cfg.get("similarity_lookback_years", 10))
+    required_status     = str(cfg.get("required_status", "Closed"))
+    lookback_years      = int(cfg.get("similarity_lookback_years", 4))
     enable_broad_fetch  = bool(cfg.get("enable_broad_fetch_stage", True))
     fallback_to_raw     = bool(cfg.get("fallback_to_raw_when_filtered_empty", True))
 
@@ -710,6 +710,7 @@ def search_similar_cases(
 
                 candidates.append({
                     "case_id":              wf_id,
+                    # "complaint_number":     str(wf_props.get("WorkfolderComplaintNumber") or wf_id),
                     "allegation_id":        alleg_id,
                     "similarity_score":     1.0,
                     "fraud_type":           fraud_type_desc,
@@ -718,7 +719,7 @@ def search_similar_cases(
                     "description":          description,
                     "status":               resolved_status,
                     "date_received":        date_received,
-                    "financial_calculated": fin_cache[wf_id],
+                    "financial_calculated": wf_props.get("WorkfolderFraudAmount") or None,
                 })
 
             logger.info(
@@ -763,7 +764,8 @@ def search_similar_cases(
                     )
                     description = match.get("comment") or None
                     candidates.append({
-                        "case_id":              wf_id,
+                        "case_id":              wf_id,  
+                          
                         "allegation_id":        alleg_id,
                         "similarity_score":     1.0,
                         "fraud_type":           fraud_type_desc,
@@ -772,7 +774,7 @@ def search_similar_cases(
                         "description":          description,
                         "status":               match.get("status") or None,
                         "date_received":        match.get("date_received") or None,
-                        "financial_calculated": fin_calculated,
+                        "financial_calculated": wf_props.get("WorkfolderFraudAmount") or None,
                     })
 
     # ── Stage B: manifest post-filtering ─────────────────────────────────

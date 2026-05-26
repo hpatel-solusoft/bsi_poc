@@ -75,6 +75,7 @@ class EvidenceItem(BaseModel):
 class SimilarCaseMatch(BaseModel):
     """A single similar case match from the archive search."""
     case_id:              str
+    # complaint_number: str
     allegation_id:        Optional[str] = None
     similarity_score:     float
     fraud_type:           str
