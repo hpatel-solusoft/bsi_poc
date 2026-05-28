@@ -1,4 +1,4 @@
-# # semantic_layer/services/f4_risk_services.py
+# # appworks/risk_scoring.py
 # # ----------------------------------------------------------------
 # # Agent 4: Fraud Risk Assessment
 # # ----------------------------------------------------------------
@@ -1526,7 +1526,7 @@
 
 # ----------------------------------------------------------------------------------
 
-# semantic_layer/services/f4_risk_services.py
+# appworks/risk_scoring.py
 # ----------------------------------------------------------------
 # Agent 4: Fraud Risk Assessment
 # ----------------------------------------------------------------
@@ -1562,7 +1562,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from semantic_layer.appworks_auth import fetch, fetch_list
+from appworks.appworks_auth import fetch, fetch_list
 
 logger = logging.getLogger(__name__)
 

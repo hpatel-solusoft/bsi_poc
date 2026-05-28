@@ -29,8 +29,8 @@ import json
 from typing import List, Optional, Any  
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from semantic_layer.appworks_auth import fetch, fetch_list
-from semantic_layer.semantic_model import SimilarCasesResult
+from appworks.appworks_auth import fetch, fetch_list
+from semantic_layer.entity_contracts import SimilarCasesResult
 logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.yaml")
@@ -49,7 +49,7 @@ _OUTCOME_SUBJECT_TRAVERSAL = "Findings: Subject history traversal — type_id={t
 
 # ── Config ────────────────────────────────────────────────────────
 
-def _load_f3_config() -> dict:
+def _load_similar_cases_config() -> dict:
     try:
         with open(_MANIFEST_PATH) as f:
             manifest = yaml.safe_load(f)
@@ -541,7 +541,7 @@ def search_similar_cases(
     print("===============================")
     print(fraud_types)
 
-    cfg = _load_f3_config()
+    cfg = _load_similar_cases_config()
     max_per_type        = int(cfg.get("max_results_per_type", 3))
     max_total_results   = int(cfg.get("max_total_results", _DEFAULT_TOTAL_RESULTS_LIMIT))
     required_status     = str(cfg.get("required_status", "Closed"))

@@ -1,8 +1,8 @@
-# semantic_layer/services/f5_strategy_services.py
+# appworks/investigation_strategy.py
 # ----------------------------------------------------------------
 # Agent 5: Investigation Plan Context
 # ----------------------------------------------------------------
-# F5 does not generate plan content. It only returns the tool inputs
+# investigation_strategy does not generate plan content. It only returns the tool inputs
 # so the LLM can generate the investigation strategy from the prompt and
 # verified case context.
 # ----------------------------------------------------------------
@@ -10,7 +10,7 @@
 import logging
 from datetime import datetime, timezone
 
-from semantic_layer.semantic_model import InvestigationPlan
+from semantic_layer.entity_contracts import InvestigationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def get_investigation_plan(fraud_types: list, risk_tier: str, case_data: dict = 
         "risk_tier": risk_tier,
     }
 
-    logger.info("F5 plan context returned: %s", result_data)
+    logger.info("investigation_strategy plan context returned: %s", result_data)
     validated = InvestigationPlan(**result_data)
 
     return {

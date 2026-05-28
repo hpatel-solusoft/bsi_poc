@@ -203,7 +203,7 @@ def _extract_tool_results(messages: list) -> dict:
                         data["dob"] = None
 
                 # Inject convenience top-level fields for downstream prompts.
-                # subject_primary_id  — used by /plan, /report, /copilot prompts.
+                # subject_primary_id  — used by /plan, , /copilot prompts.
                 # fraud_types         — flattened list for the same consumers.
                 # Both are derived from data already present in the result;
                 # nothing is fabricated.
@@ -788,29 +788,6 @@ def _resolve_plan_agent_summary(
         return _build_plan_summary(case_id, plan, case_data, provenance_trail)
     return assistant_text or _build_plan_summary(case_id, plan, case_data, provenance_trail)
 
-
-def _build_report_summary(case_id: str, final_report: dict, case_data: dict, provenance_trail: List[dict]) -> str:
-    """Detailed deterministic summary for /report response."""
-    sections = final_report.get("sections", {}) if isinstance(final_report, dict) else {}
-    complaint = case_data.get("complaint_intelligence", {}) if isinstance(case_data, dict) else {}
-    risk = case_data.get("risk_assessment", {}) if isinstance(case_data, dict) else {}
-    summary = complaint.get("summary", {}) if isinstance(complaint, dict) else {}
-    recommendation = risk.get("recommendations", "No recommendation recorded.")
-    return (
-        f"### Final Report Summary for Case {case_id}\n\n"
-        f"Report `{final_report.get('report_id', 'Not available')}` generated with status "
-        f"{final_report.get('status', 'Not available')}. "
-        f"Complaint #{summary.get('complaint_no', 'Not available')} "
-        f"({summary.get('case_description', 'Not available')}). "
-        f"Risk score {risk.get('risk_score', 'Not available')} / {risk.get('risk_tier', 'Not available')}. "
-        f"Recommended action: {recommendation}. "
-        f"The final report includes {len(sections)} populated section(s), covering case summary, "
-        f"subject history, allegation summary, financial summary, risk rationale, recommended actions, "
-        f"plan roll-up, and analyst decision status.\n\n"
-        f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
-    )
-
-
 def _risk_rule_lookup(case_data: dict) -> dict:
     rules_section = case_data.get("risk_rules", {})
     rules = rules_section.get("active_rules", []) if isinstance(rules_section, dict) else []
@@ -973,7 +950,7 @@ def _get_runner():
 
 # -----------------------------------------------------------------------
 # CS-4 RE-HYDRATION CONTRACT (v6)
-# ai_summary is REQUIRED on every /copilot, /plan, /report request.
+# ai_summary is REQUIRED on every /copilot, /plan,  request.
 # Server uses CS-4 if warm. Falls back to this field if CS-4 is cold
 # (restart / TTL expiry). Frontend NEVER omits ai_summary to optimise
 # payload size — the server decides which source to use, not the client.
@@ -1144,7 +1121,7 @@ def investigate(req: InvestigateRequest):
     Runs AUTO tools 1-2 (intake, enrichment) in dependency order
     (LLM decides sequence). Similar cases runs via /similar_cases.
     Populates CS-4 CASE_STORE for all subsequent on-demand calls.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     start = time.time()
     try:
@@ -1171,7 +1148,7 @@ def investigate(req: InvestigateRequest):
 
         # ── Response split (v6 spec) ────────────────────────────────────────
         # ai_summary: the contract object passed to the next route in the flow.
-        # Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
+        # Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
         # details: human-readable narrative + meta — NOT required by downstream.
         # ──────────────────────────────────────────────────────────────────────
         ai_summary = {
@@ -1215,7 +1192,7 @@ def similar_cases(req: SimilarCasesRequest):
     Calls search_similar_cases to find historical cases with matching fraud patterns.
     Requires case_data from a prior /investigate run (via CS-4 or ai_summary body).
     Explains historical case matches, pattern relevance, and archive findings.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     from agent_service.agent_runner import build_similar_cases_prompt
 
@@ -1320,7 +1297,7 @@ def risk_assessment(req: PlanRequest):
     Requires case_data from a prior /investigate + /similar_cases run
     (via CS-4 or ai_summary body).
     Explains case seriousness, triggered rules, and escalation thresholds.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     from agent_service.agent_runner import build_risk_assessment_prompt
 
@@ -1457,7 +1434,7 @@ def plan(req: PlanRequest):
     Calls get_investigation_plan only.
     Requires risk_tier from prior /risk_assessment run (via CS-4 or ai_summary body).
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     from agent_service.agent_runner import build_plan_prompt
 
@@ -1529,7 +1506,7 @@ def plan(req: PlanRequest):
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
 
         # ai_summary: updated contract — investigation sections separate from plan.
-        # Pass this object to /report and /copilot.
+        # Pass this object to  and /copilot.
         investigation_data = {**case_data}
         investigation_data.pop("provenance_trail", None)
         investigation_data.pop("investigation_plan", None) # Dedup
@@ -1563,7 +1540,7 @@ def plan(req: PlanRequest):
         return {
             "case_id":    req.case_id,
             "status":     "completed",
-            "ai_summary": ai_summary,          # ← pass this object to /report, /copilot
+            "ai_summary": ai_summary,          # ← pass this object to , /copilot
             "details": {
                 "agent_summary": _render_markdown_html_with_sources(
                     assistant_text,
@@ -1578,124 +1555,6 @@ def plan(req: PlanRequest):
         raise HTTPException(status_code=500, detail=f"Plan generation failed: {exc}") from exc
     finally:
         logger.info("POST /plan completed for case_id=%s", req.case_id)
-
-
-@app.post("/report")
-def report(req: ReportRequest):
-    """
-    ON-DEMAND — Report Route (Step 5 in flow, alongside /copilot).
-    Calls generate_final_report with all six v6 params:
-      case_id, subject_id, fraud_types, risk_score, risk_tier, risk_indicators.
-    Requires: risk_assessment in case data, plan, and analyst approval.
-    ai_summary is REQUIRED per v6 spec — server decides which source to use.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
-    """
-    from agent_service.agent_runner import build_report_prompt
-
-    try:
-        _validate_ai_summary_contract(req.ai_summary)
-        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
-        case_data = _resolve_case_store(req.case_id, req.ai_summary)
-        if "risk_assessment" not in case_data:
-            raise HTTPException(
-                status_code=400,
-                detail="risk_assessment section missing — run /risk_assessment first.",
-            )
-
-        plan_data = _normalize_plan_payload(req.ai_plan, case_data)
-        if not plan_data:
-            raise HTTPException(status_code=400, detail="Plan required — run /plan first.")
-        if not req.analyst_decision or req.analyst_decision.get("decision") != "APPROVED":
-            raise HTTPException(
-                status_code=400,
-                detail="Report requires analyst approval. analyst_decision.decision must be 'APPROVED'.",
-            )
-
-        runner = _get_runner()
-        # Scope to report generation only (Step 5)
-        report_tools = [
-            tool
-            for tool in runner.on_demand_tools
-            if tool["function"]["name"] in {"generate_final_report"}
-        ]
-        messages, new_provenance, _ = runner.run_scoped(
-            system_prompt=build_report_prompt(
-                case_id=req.case_id,
-                case_data=case_data,
-                ai_case_summary=req.ai_case_summary or "",
-                plan_data=plan_data,
-                analyst_decision=req.analyst_decision,
-            ),
-            user_message=(
-                f"Review the investigation context for case {req.case_id} and execute the "
-                "appropriate on-demand tool to generate the final investigation report."
-            ),
-            tools=report_tools,
-            trigger="ON-DEMAND",
-        )
-
-        sections = _extract_tool_results(messages)
-        investigation_final_report = sections.get("final_report", {})
-        report_section = _enrich_final_report_from_context(
-            sections=sections,
-            case_data=case_data,
-            plan_data=plan_data,
-            analyst_decision=req.analyst_decision,
-        )
-
-        merged_provenance = _merge_provenance(
-            case_data.get("provenance_trail", []),
-            new_provenance,
-        )
-
-        # Update CS-4 but return only the route-specific section.
-        CASE_STORE[req.case_id].update(report_section)
-        CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
-        final_report = report_section.get("final_report", {})
-
-        # ai_summary: final complete contract — investigation, plan, and report all at top level.
-        # Pass to /copilot for grounded Q&A on the final report.
-        investigation_data = {**case_data}
-        investigation_data.pop("provenance_trail", None)
-        investigation_data.pop("final_report", None)
-
-        # Carry over other sections from store
-        similar_cases = investigation_data.pop("similar_cases", None)
-        risk_rules = investigation_data.pop("risk_rules", None)
-        risk_assessment = investigation_data.pop("risk_assessment", None)
-        investigation_plan = investigation_data.pop("investigation_plan", None)
-
-        ai_summary = {
-            "investigation":   investigation_data,
-        }
-        if similar_cases is not None: ai_summary["similar_cases"] = similar_cases
-        
-        ai_summary.update({
-            "risk_rules":              risk_rules,
-            "risk_assessment":         risk_assessment,
-            "investigation_plan":  investigation_plan,
-            "final_report":            final_report,
-            "provenance_trail":        merged_provenance,
-        })
-        return {
-            "case_id":    req.case_id,
-            "status":     "completed",
-            "ai_summary": ai_summary,          # ← pass to /copilot
-            "details": {
-                "agent_summary": _render_markdown_html_with_sources(
-                    _swap_case_id_for_complaint(_extract_agent_summary(messages), req.case_id, ai_summary),
-                    merged_provenance
-                ),
-            },
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Report route failed for case_id=%s", req.case_id)
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
-    finally:
-        logger.info("POST /report completed for case_id=%s", req.case_id)
-
 
 @app.post("/copilot")
 def copilot(req: CopilotRequest):

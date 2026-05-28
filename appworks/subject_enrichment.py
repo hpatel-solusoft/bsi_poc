@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from semantic_layer.appworks_auth import fetch
+from appworks.appworks_auth import fetch
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ def _fetch_workfolder_allegations(wf_id: str) -> list[dict]:
     """
     Step 3: Fetches full allegation details for a prior-case Workfolder.
 
-    Mirrors the allegation-fetching logic in f1_intake_services.build_case_header_data
+    Mirrors the allegation-fetching logic in case_intake_intake_services.build_case_header_data
     exactly, so prior cases carry the same allegation structure as the active case.
 
     For each allegation:

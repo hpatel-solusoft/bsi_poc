@@ -3,14 +3,13 @@ AppWorks Service Router.
 Dispatches calls to the underlying feature-specific service modules.
 Every function MUST return {"result": {...}, "provenance": {...}}.
 """
-import semantic_layer.services.f1_intake_services as f1
-import semantic_layer.services.f2_enrichment_services as f2
-import semantic_layer.services.f3_case_retrieval_services as f3
-import semantic_layer.services.f4_risk_services as f4
-import semantic_layer.services.f5_strategy_services as f5
-import semantic_layer.services.f6_report_services as f6
-import semantic_layer.semantic_model as model
-from semantic_layer.appworks_auth import fetch,fetch_list
+import appworks.case_intake as case_intake
+import appworks.subject_enrichment as subject_enrichment
+import appworks.similar_cases as similar_cases
+import appworks.risk_scoring as risk_scoring
+import appworks.investigation_strategy as investigation_strategy
+import semantic_layer.entity_contracts as contracts
+from appworks.appworks_auth import fetch,fetch_list
 from datetime import datetime, timezone
 import logging
 from typing import List, Optional, Any
@@ -47,8 +46,8 @@ def _validate(model_class, envelope: dict, tool_name: str) -> dict:
 
 def get_case_header(case_id: str) -> dict:
     """Dispatched from 'verify_case_intake'"""
-    res = f1.build_case_header_data(case_id)
-    return _validate(model.CaseHeader, res, "verify_case_intake")
+    res = case_intake.build_case_header_data(case_id)
+    return _validate(contracts.CaseHeader, res, "verify_case_intake")
 
 
 def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict:
@@ -68,7 +67,7 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
     last_computed_by = ""
 
     for sid in subject_ids:
-        res = f2.get_enriched_subject_profile(sid, case_id=case_id)
+        res = subject_enrichment.get_enriched_subject_profile(sid, case_id=case_id)
         result = res.get("result", {})
         prov = res.get("provenance", {})
 
@@ -100,7 +99,7 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
             "computed_by": last_computed_by,
         },
     }
-    return _validate(model.SubjectHistory, combined, "fetch_subject_history")
+    return _validate(contracts.SubjectHistory, combined, "fetch_subject_history")
 
 
 def search_similar_cases(
@@ -109,18 +108,18 @@ def search_similar_cases(
     complaint_description: str = None,
 ) -> dict:
     """Dispatched from 'search_similar_cases'"""
-    res = f3.search_similar_cases(
+    res = similar_cases.search_similar_cases(
         fraud_types=fraud_types,
         case_id=case_id,
         complaint_description=complaint_description,
     )
-    return _validate(model.SimilarCasesResult, res, "search_similar_cases")
+    return _validate(contracts.SimilarCasesResult, res, "search_similar_cases")
 
 
 def get_risk_rules() -> dict:
     """Dispatched from 'get_risk_rules'"""
-    res = f4.get_risk_rules()
-    return _validate(model.RiskRulesResult, res, "get_risk_rules")
+    res = risk_scoring.get_risk_rules()
+    return _validate(contracts.RiskRulesResult, res, "get_risk_rules")
 
 
 def calculate_risk_metrics(
@@ -140,7 +139,7 @@ def calculate_risk_metrics(
     received_age: int = None,
 ) -> dict:
     """Dispatched from 'calculate_risk_metrics'"""
-    res = f4.calculate_risk_metrics(
+    res = risk_scoring.calculate_risk_metrics(
         case_id=case_id,
         subject_id=subject_id,
         fraud_types=fraud_types,
@@ -156,7 +155,7 @@ def calculate_risk_metrics(
         subject_count=subject_count,
         received_age=received_age,
     )
-    return _validate(model.RiskAssessment, res, "calculate_risk_metrics")
+    return _validate(contracts.RiskAssessment, res, "calculate_risk_metrics")
 
 
 def get_investigation_plan(
@@ -165,34 +164,12 @@ def get_investigation_plan(
     case_data: dict = None,
 ) -> dict:
     """Dispatched from 'get_investigation_plan'"""
-    res = f5.get_investigation_plan(
+    res = investigation_strategy.get_investigation_plan(
         fraud_types=fraud_types,
         risk_tier=risk_tier,
         case_data=case_data,
     )
-    return _validate(model.InvestigationPlan, res, "get_investigation_plan")
-
-
-def compile_and_render_report(
-    case_id: str,
-    subject_id: str,
-    fraud_types: list,
-    risk_score: float,
-    risk_tier: str,
-    risk_indicators: list,
-) -> dict:
-    """Dispatched from 'generate_final_report'"""
-    res = f6.compile_and_render_report(
-        case_id=case_id,
-        subject_id=subject_id,
-        fraud_types=fraud_types,
-        risk_score=risk_score,
-        risk_tier=risk_tier,
-        risk_indicators=risk_indicators,
-    )
-    return _validate(model.FinalReport, res, "generate_final_report")
-
-
+    return _validate(contracts.InvestigationPlan, res, "get_investigation_plan")
 
 _ALLEGATIONS_ALL_LIST_ENDPOINT = "/entities/Allegations/lists/Allegations_All"
 
@@ -282,7 +259,7 @@ def get_allegation_types_original() -> dict:
     }
     print("************************************")
     print(allegation_types)
-    return _validate(model.AllegationTypesResult, envelope, "get_allegation_types")
+    return _validate(contracts.AllegationTypesResult, envelope, "get_allegation_types")
  
 
 def get_allegation_types() -> dict:
@@ -319,4 +296,4 @@ def get_allegation_types() -> dict:
     }
     print("************************************")
     print(allegation_types)
-    return _validate(model.AllegationTypesResult, envelope, "get_allegation_types")
+    return _validate(contracts.AllegationTypesResult, envelope, "get_allegation_types")

@@ -171,45 +171,6 @@ def build_similar_cases_prompt(case_data: dict) -> str:
         },
     )
 
-
-def build_report_prompt(
-    case_id: str,
-    case_data: dict,
-    ai_case_summary: str,
-    plan_data: dict,
-    analyst_decision: dict,
-) -> str:
-    """
-    Section 3.3 - ON-DEMAND /report prompt.
-    Prompt text lives in config/prompts.py; dynamic values are injected here.
-    """
-    risk = case_data.get("risk_assessment") or {}
-    complaint = case_data.get("complaint_intelligence") or {}
-
-    subject_id = complaint.get("subject_primary_id") or risk.get("subject_id") or ""
-    fraud_types = complaint.get("fraud_types") or []
-    risk_score = risk.get("risk_score", 0.0)
-    risk_tier = risk.get("risk_tier") or ""
-    risk_indicators = risk.get("risk_indicators") or []
-
-    return _render_prompt(
-        REPORT_GENERATION_TOOL,
-        {
-            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
-            "ai_case_summary or \"Not provided.\"": ai_case_summary or "Not provided.",
-            "json.dumps(plan_data, indent=2)": json.dumps(plan_data, indent=2),
-            "json.dumps(analyst_decision, indent=2)": json.dumps(analyst_decision, indent=2),
-            "case_id": case_id,
-            "subject_id": subject_id,
-            "json.dumps(fraud_types)": json.dumps(fraud_types),
-            "risk_score": str(risk_score),
-            "risk_tier": risk_tier,
-            "json.dumps(triggered_rules)": json.dumps(risk_indicators),
-            "json.dumps(risk_indicators)": json.dumps(risk_indicators),
-        },
-    )
-
-
 def build_copilot_prompt(case_id: str, case_data: dict) -> str:
     """
     Section 3.4 - ON-DEMAND /copilot prompt.

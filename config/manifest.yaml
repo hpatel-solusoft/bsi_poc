@@ -16,7 +16,7 @@ tools:
       complaint narrative. Returns structured case data including fraud_types (list),
       subject_ids (list[string]), allegations, subjects, and case metadata. Requires: case_id.
     trigger: AUTO
-    python_function: "appworks_services.get_case_header"
+    python_function: "appworks.appworks_services.get_case_header"
 
     required_params:
       - name: "case_id"
@@ -29,7 +29,7 @@ tools:
       Fetches the full history of the subject under investigation. Returns all prior cases,
       prior_case_count, and subject profile. Requires: subject_ids identifiers from verify_case_intake subjects list.
     trigger: AUTO
-    python_function: "appworks_services.get_enriched_subject_profile"
+    python_function: "appworks.appworks_services.get_enriched_subject_profile"
 
     required_params:
       - name: "subject_ids"
@@ -45,7 +45,7 @@ tools:
     description: >   
       Fetches all active allegation type definitions from AppWorks. Returns each type with its description and default conduct text. Use the returned    list and the current case allegations to identify all types whose conduct    description is semantically related to the current case — including types    that describe the same scheme under a different label or variant name.    Pass all related type descriptions to the archive search.
     trigger: AUTO
-    python_function: "appworks_services.get_allegation_types"
+    python_function: "appworks.appworks_services.get_allegation_types"
     required_params: []
     optional_params: []
     
@@ -61,7 +61,7 @@ tools:
       cross-label candidate pool that surfaces scheme matches regardless
       of how prior cases were classified.
     trigger: AUTO
-    python_function: "appworks_services.search_similar_cases"
+    python_function: "appworks.appworks_services.search_similar_cases"
     required_params:
       - name: "fraud_types"
         type: "list[string]"
@@ -84,7 +84,7 @@ tools:
       This demonstrates that rules are fetched from AppWorks at runtime — BSI can modify
       rules without a code change.
     trigger: ON-DEMAND
-    python_function: "appworks_services.get_risk_rules"
+    python_function: "appworks.appworks_services.get_risk_rules"
 
     required_params: []
 
@@ -105,7 +105,7 @@ tools:
       has_open_allegation (true if any allegation has no date_closed), subject_count (count of
       subjects from verify_case_intake), received_age (date_received_age from verify_case_intake details).
     trigger: ON-DEMAND
-    python_function: "appworks_services.calculate_risk_metrics"
+    python_function: "appworks.appworks_services.calculate_risk_metrics"
 
     required_params:
       - name: "case_id"
@@ -164,7 +164,7 @@ tools:
       evidence checklist items, and escalation guidance from the route1 case
       context. Requires: fraud_types and risk_tier from prior investigation results.
     trigger: ON-DEMAND
-    python_function: "appworks_services.get_investigation_plan"
+    python_function: "appworks.appworks_services.get_investigation_plan"
 
     required_params:
       - name: "fraud_types"
@@ -178,33 +178,4 @@ tools:
         type: "dict"
         description: "Verified route1 investigation case context including complaint_intelligence and risk_assessment"
 
-  - name: "generate_final_report"
-    section: "final_report"
-    description: >
-      Compiles and renders the full investigation report from live AppWorks data,
-      enriched with validated risk context from prior tool calls.
-      Returns structured report sections for narrative synthesis.
-      Requires: case_id, subject_id, fraud_types, risk_score, risk_tier, risk_indicators.
-      All these values come from prior tool call outputs — pass them explicitly.
-    trigger: ON-DEMAND
-    python_function: "appworks_services.compile_and_render_report"
-
-    required_params:
-      - name: "case_id"
-        type: "string"
-        description: "Case identifier from verify_case_intake output"
-      - name: "subject_id"
-        type: "string"
-        description: "Primary subject identifier from verify_case_intake output"
-      - name: "fraud_types"
-        type: "list[string]"
-        description: "Final verified fraud types from verify_case_intake output"
-      - name: "risk_score"
-        type: "number"
-        description: "Numerical risk score (0.0 to 1.0) from calculate_risk_metrics output"
-      - name: "risk_tier"
-        type: "string"
-        description: "Risk tier (LOW/MEDIUM/HIGH/CRITICAL) from calculate_risk_metrics output"
-      - name: "risk_indicators"
-        type: "list[dict]"
-        description: "Full risk indicator objects from calculate_risk_metrics output (risk_indicators field)"
+  

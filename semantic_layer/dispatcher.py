@@ -87,7 +87,7 @@ class SemanticDispatcher:
         module_name, func_name = python_function.rsplit(".", 1)
         try:
             # Note: The spec says 'semantic_layer.{module_name}'
-            module = importlib.import_module(f"semantic_layer.{module_name}")
+            module = importlib.import_module(module_name)
             func = getattr(module, func_name)
         except (ImportError, AttributeError) as exc:
             return {

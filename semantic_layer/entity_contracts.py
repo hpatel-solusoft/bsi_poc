@@ -1,4 +1,4 @@
-#  semantic_layer/semantic_model.py
+#  semantic_layer/entity_contracts.py
 # ----------------------------------------------------------------
 # BSI Fraud Investigation Platform — Canonical Entity Model
 #
@@ -181,7 +181,7 @@ class CaseHeader(BaseModel):
     details:            CaseDetails
     allegations:        list[AllegationHeader]
     subjects:           list[SubjectHeader]
-    subject_ids:        list[str]   # populated by f1 for LLM convenience
+    subject_ids:        list[str]   # populated by case_intake for LLM convenience
     subject_primary_id: Optional[str] = None
     fraud_types:        Optional[list[str]] = None
     # Typed financial block — previously arrived as an unvalidated extra (Issue #11)
@@ -236,7 +236,7 @@ class SimilarCasesResult(BaseModel):
     query_summary:             str
     matches:                   list[SimilarCaseMatch]
     top_n_returned:            int
-    # Filtering provenance — always populated by f3 for traceability
+    # Filtering provenance — always populated by similar_cases for traceability
     raw_matches_found:         Optional[int] = None
     manifest_filters_applied:  Optional[dict] = None
     model_config = {"extra": "forbid"}
