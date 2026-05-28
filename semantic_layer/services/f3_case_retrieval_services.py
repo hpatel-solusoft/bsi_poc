@@ -710,7 +710,7 @@ def search_similar_cases(
 
                 candidates.append({
                     "case_id":              wf_id,
-                    # "complaint_number":     str(wf_props.get("WorkfolderComplaintNumber") or wf_id),
+                    "complaint_no":         wf_props.get("WorkfolderComplaintNumber"),
                     "allegation_id":        alleg_id,
                     "similarity_score":     1.0,
                     "fraud_type":           fraud_type_desc,
@@ -765,7 +765,7 @@ def search_similar_cases(
                     description = match.get("comment") or None
                     candidates.append({
                         "case_id":              wf_id,  
-                          
+                        "complaint_no":         wf_props.get("WorkfolderComplaintNumber"),
                         "allegation_id":        alleg_id,
                         "similarity_score":     1.0,
                         "fraud_type":           fraud_type_desc,

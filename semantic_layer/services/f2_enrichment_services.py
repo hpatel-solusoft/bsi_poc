@@ -40,10 +40,30 @@ def _extract_workfolder_core_props(wf_props: dict) -> dict:
     }
 
 
+def _fetch_commentary_type(type_href: str) -> str | None:
+    """
+    Fetches a CommentaryType entity and returns its type name.
+    URL pattern: /OSABSIACM/entities/CommentaryType/items/{id}
+    """
+    if not type_href:
+        return None
+    props, _ = _fetch_props_and_links(type_href)
+    # CommentaryType entity uses "Type" as the name field.
+    return props.get("Type")
+
+
 def _fetch_workfolder_commentary(wf_id: str) -> list[dict]:
     """
     Step 2: Fetches commentary entries for a Workfolder and returns a list of
     {commentary_text, commentary_type} dicts.
+
+    Strategy:
+      - The relationship list already embeds full Properties, so
+        WorkfolderCommentary_Comment is read directly from each embedded item.
+      - Each item's self href is fetched individually to obtain the full
+        _links block, which contains the CommentaryType relationship link.
+      - That link is followed to resolve the human-readable type name
+        (e.g. "Disposition", "Analyst Notes", "Reviewer Notes").
     """
     commentary_href = (
         f"/entities/Workfolder/items/{wf_id}"
@@ -60,20 +80,51 @@ def _fetch_workfolder_commentary(wf_id: str) -> list[dict]:
 
     commentary_list = []
     for item in items:
-        props = item.get("Properties", {})
-        commentary_list.append({
-            "commentary_text": props.get("WorkfolderCommentaryText"),
-            "commentary_type": props.get("WorkfolderCommentaryType"),
-        })
+        try:
+            # ── Step A: read comment text from the embedded Properties ─────────
+            # The relationship list already includes full Properties, so no
+            # extra fetch is needed just for the text.
+            embedded_props = item.get("Properties", {})
+            comment_text = embedded_props.get("WorkfolderCommentary_Comment")
+
+            # ── Step B: fetch the individual item to get its full _links ───────
+            # The embedded item only carries a self link; the CommentaryType
+            # relationship link is only present on the fully-fetched entity.
+            self_href = item.get("_links", {}).get("self", {}).get("href", "")
+            commentary_type = None
+            if self_href:
+                _, item_links = _fetch_props_and_links(self_href)
+                type_href = (
+                    item_links
+                    .get("relationship:WorkfolderCommentary_CommentaryTypeRelationship", {})
+                    .get("href", "")
+                )
+                if type_href:
+                    logger.info(f"  🏷️  Fetching CommentaryType from: {type_href}")
+                    commentary_type = _fetch_commentary_type(type_href)
+
+            commentary_list.append({
+                "commentary_text": comment_text,
+                "commentary_type": commentary_type,
+            })
+        except Exception as exc:
+            logger.warning(f"⚠️  Failed processing commentary item for Workfolder {wf_id}: {exc}")
 
     logger.info(f"  → {len(commentary_list)} commentary item(s) found for Workfolder {wf_id}")
     return commentary_list
 
 
-def _fetch_workfolder_allegations(wf_id: str) -> list[str]:
+def _fetch_workfolder_allegations(wf_id: str) -> list[dict]:
     """
-    Step 3: Fetches allegations for a Workfolder and returns a list of
-    AllegationDescription strings.
+    Step 3: Fetches full allegation details for a prior-case Workfolder.
+
+    Mirrors the allegation-fetching logic in f1_intake_services.build_case_header_data
+    exactly, so prior cases carry the same allegation structure as the active case.
+
+    For each allegation:
+      - Fetch the Allegations entity via its self link  → full props + _links
+      - Follow relationship:Allegations_AllegationsType → allegation type name/desc
+      - Follow relationship:Allegations_Source          → source agency name
     """
     allegations_href = (
         f"/entities/Workfolder/items/{wf_id}"
@@ -88,13 +139,77 @@ def _fetch_workfolder_allegations(wf_id: str) -> list[str]:
         .get("Workfolder_AllegationsRelationship", [])
     )
 
-    allegations_list = [
-        item.get("Properties", {}).get("AllegationDescription")
-        for item in items
-        if item.get("Properties", {}).get("AllegationDescription")
-    ]
+    logger.info(f"  → {len(items)} allegation(s) found for Workfolder {wf_id}")
+    allegations_list = []
 
-    logger.info(f"  → {len(allegations_list)} allegation(s) found for Workfolder {wf_id}")
+    for alleg_item in items:
+        try:
+            alleg_self_href = alleg_item.get("_links", {}).get("self", {}).get("href", "")
+
+            # AllegationType href may be present on the embedded item directly
+            alleg_type_href = alleg_item.get("_links", {}).get(
+                "relationship:Allegations_AllegationsType", {}
+            ).get("href", "")
+
+            # Fetch the full Allegations entity to get props + complete _links
+            alleg_props, alleg_links = (
+                _fetch_props_and_links(alleg_self_href) if alleg_self_href else ({}, {})
+            )
+
+            # Fall back to the fetched entity's _links if not on the embedded item
+            if not alleg_type_href:
+                alleg_type_href = alleg_links.get(
+                    "relationship:Allegations_AllegationsType", {}
+                ).get("href", "")
+
+            allegation_type_id = (
+                alleg_type_href.rstrip("/").split("/")[-1] if alleg_type_href else None
+            )
+            alleg_type_props, _ = (
+                _fetch_props_and_links(alleg_type_href) if alleg_type_href else ({}, {})
+            )
+
+            agency_href = alleg_links.get("relationship:Allegations_Source", {}).get("href", "")
+            agency_props, _ = (
+                _fetch_props_and_links(agency_href) if agency_href else ({}, {})
+            )
+
+            allegation_description = (
+                alleg_type_props.get("AllegationType_AllegationTypeDescription")
+                or alleg_type_props.get("AllegationType_AllegationTypeShortDesc")
+                or alleg_type_props.get("AllegationType_AllegationTypeDefaults")
+                or alleg_props.get("Allegations_AllegationType")
+                or alleg_props.get("Allegations_Comment")
+                or f"Unknown allegation type {allegation_type_id or 'unknown'}"
+            )
+
+            allegations_list.append({
+                "status":                  alleg_props.get("Allegations_Status"),
+                "allegation_status":       alleg_props.get("Allegations_AllegationStatus"),
+                "date_received":           alleg_props.get("Allegations_DateReceived"),
+                "date_reported":           alleg_props.get("Allegations_DateReported"),
+                "date_closed":             alleg_props.get("Allegations_DateClosed"),
+                "closure_date_reported":   alleg_props.get("Allegations_ClosureDateReported"),
+                "close_comment":           alleg_props.get("Allegations_AllegationCloseComment"),
+                "comment":                 alleg_props.get("Allegations_Comment"),
+                "agency_referral_no":      alleg_props.get("Allegations_AgencyReferralNumber"),
+                "is_intake":               alleg_props.get("Allegations_IsIntakeAllegation"),
+                "disposition_norris_code": alleg_props.get("Allegations_DispositionNorrisCode"),
+                "dta_closure_report":      alleg_props.get("Allegations_DTAClosureReport"),
+                "allegation_type": {
+                    "id":          allegation_type_id,
+                    "description": allegation_description,
+                    "short_desc":  alleg_type_props.get("AllegationType_AllegationTypeShortDesc"),
+                    "defaults":    alleg_type_props.get("AllegationType_AllegationTypeDefaults"),
+                },
+                "source_agency": {
+                    "name":              agency_props.get("Agency_AgencyName"),
+                    "short_description": agency_props.get("Agency_AgencyShortDescription"),
+                },
+            })
+        except Exception as exc:
+            logger.warning(f"⚠️  Failed processing allegation for Workfolder {wf_id}: {exc}")
+
     return allegations_list
 
 def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
