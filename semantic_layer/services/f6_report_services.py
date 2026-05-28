@@ -331,7 +331,7 @@ def compile_and_render_report(
         "financial_summary":   financial_summary,
         "risk_assessment":     risk_assessment_text,
         "recommended_actions": (
-            "Refer to risk tier recommendation and investigation playbook steps "
+            "Refer to risk tier recommendation and investigation plan steps "
             "from the preceding workflow phases."
         ),
         "analyst_notes":       analyst_notes,

@@ -1144,7 +1144,7 @@ def investigate(req: InvestigateRequest):
     Runs AUTO tools 1-2 (intake, enrichment) in dependency order
     (LLM decides sequence). Similar cases runs via /similar_cases.
     Populates CS-4 CASE_STORE for all subsequent on-demand calls.
-    Flow: /investigate → /similar_cases → /risk_assessment → /playbook → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
     """
     start = time.time()
     try:
@@ -1215,7 +1215,7 @@ def similar_cases(req: SimilarCasesRequest):
     Calls search_similar_cases to find historical cases with matching fraud patterns.
     Requires case_data from a prior /investigate run (via CS-4 or ai_summary body).
     Explains historical case matches, pattern relevance, and archive findings.
-    Flow: /investigate → /similar_cases → /risk_assessment → /playbook → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
     """
     from agent_service.agent_runner import build_similar_cases_prompt
 
@@ -1320,7 +1320,7 @@ def risk_assessment(req: PlanRequest):
     Requires case_data from a prior /investigate + /similar_cases run
     (via CS-4 or ai_summary body).
     Explains case seriousness, triggered rules, and escalation thresholds.
-    Flow: /investigate → /similar_cases → /risk_assessment → /playbook → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
     """
     from agent_service.agent_runner import build_risk_assessment_prompt
 
@@ -1588,7 +1588,7 @@ def report(req: ReportRequest):
       case_id, subject_id, fraud_types, risk_score, risk_tier, risk_indicators.
     Requires: risk_assessment in case data, plan, and analyst approval.
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
-    Flow: /investigate → /similar_cases → /risk_assessment → /playbook → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
     """
     from agent_service.agent_runner import build_report_prompt
 
@@ -1653,7 +1653,7 @@ def report(req: ReportRequest):
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
         final_report = report_section.get("final_report", {})
 
-        # ai_summary: final complete contract — investigation, playbook, and report all at top level.
+        # ai_summary: final complete contract — investigation, plan, and report all at top level.
         # Pass to /copilot for grounded Q&A on the final report.
         investigation_data = {**case_data}
         investigation_data.pop("provenance_trail", None)
@@ -1706,7 +1706,7 @@ def copilot(req: CopilotRequest):
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     If provenance_trail is absent from ai_summary, source citations degrade
     gracefully — no crash.
-    Flow: /investigate → /similar_cases → /risk_assessment → /playbook → /copilot | /report
+    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
     """
     try:
         from agent_service.agent_runner import build_copilot_prompt

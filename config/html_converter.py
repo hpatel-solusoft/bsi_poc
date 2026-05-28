@@ -245,7 +245,7 @@ _BSI_STYLE = """<style>
     color: #0C1A5B;
 }
 
-/* ── Step label (Investigation playbook) ─────────────────── */
+/* ── Step label (Investigation plan) ─────────────────── */
 .bsi-step-label {
     font-weight: 700;
     color: #0C1A5B;
@@ -474,7 +474,7 @@ def _style_score_metrics(html: str) -> str:
 # ---------------------------------------------------------------------------
 # Matches headings like: "Similar Cases", "Related Cases",
 # "Returned Historical Cases", "Historical Cases", "Prior Cases"
-# Does NOT match: Investigation Steps, Allegations, Playbook checklists.
+# Does NOT match: Investigation Steps, Allegations, plan checklists.
 
 _SIMILAR_SECTION_RE = re.compile(
     r'(<h[23][^>]*>'
