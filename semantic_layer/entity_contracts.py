@@ -57,20 +57,29 @@ class TriggeredRule(BaseModel):
 
 
 class InvestigationStep(BaseModel):
-    """A single step in the investigation plan."""
-    step:          int
+    """
+    A single investigation step in the LLM-generated plan.
+    'action' carries the plain instruction sentence from the LLM.
+    'owner' and 'deadline_days' are Optional — populated during
+    human review in the subsequent analyst step.
+    extra='allow' — human review may add additional metadata fields.
+    """
+    step:          Optional[int] = None
     action:        str
-    owner:         str
-    deadline_days: int
-    model_config = {"extra": "forbid"}
+    owner:         Optional[str] = None
+    deadline_days: Optional[int] = None
+    model_config = {"extra": "allow"}
 
 
 class EvidenceItem(BaseModel):
-    """A single item in the evidence checklist."""
+    """
+    A single item in the LLM-generated evidence checklist.
+    'mandatory' is Optional — the LLM may not always specify it.
+    extra='allow' — LLM output shape may vary.
+    """
     item:      str
-    mandatory: Optional[bool] = True
-    model_config = {"extra": "forbid"}
-
+    mandatory: Optional[bool] = None
+    model_config = {"extra": "allow"}
 
 class SimilarCaseMatch(BaseModel):
     """A single similar case match from the archive search."""
@@ -130,6 +139,28 @@ class CaseDetails(BaseModel):
     subject_city:           Optional[str] = None
     model_config = {"extra": "allow"}
 
+class AllegationType(BaseModel):
+    """
+    Allegation type classification nested within AllegationHeader.
+    Sourced from AppWorks AllegationType entity via relationship:Allegations_AllegationsType.
+    extra='allow' — AppWorks may return additional type fields.
+    """
+    id:          Optional[str] = None
+    description: Optional[str] = None
+    short_desc:  Optional[str] = None
+    defaults:    Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
+class SourceAgency(BaseModel):
+    """
+    Referring agency nested within AllegationHeader.
+    Sourced from AppWorks Agency entity via relationship:Allegations_Source.
+    extra='allow' — AppWorks may return additional agency fields.
+    """
+    name:              Optional[str] = None
+    short_description: Optional[str] = None
+    model_config = {"extra": "allow"}
 
 class AllegationHeader(BaseModel):
     status:                  Optional[str] = None
@@ -144,18 +175,44 @@ class AllegationHeader(BaseModel):
     is_intake:               Optional[bool] = None
     disposition_norris_code: Optional[str] = None
     dta_closure_report:      Optional[bool] = None
-    allegation_type:         dict
-    source_agency:           dict
+    allegation_type:         AllegationType
+    source_agency:           SourceAgency
     model_config = {"extra": "allow"}
 
-
+class SubjectDetails(BaseModel):
+    """
+    Personal and identity fields from the AppWorks Subject entity
+    (fetched via relationship:Subjects_Subject — separate endpoint from SubjectHeader).
+    extra='allow' — AppWorks may add subject attributes without breaking the contract.
+    """
+    identifier:             str
+    first_name:             str
+    middle_initial:         Optional[str] = None
+    last_name:              Optional[str] = None
+    ssn:                    Optional[str] = None
+    ein:                    Optional[str] = None
+    gender:                 Optional[str] = None
+    dob:                    Optional[str] = None
+    dod:                    Optional[str] = None
+    phone_number:           Optional[str] = None
+    subject_type:           Optional[str] = None
+    company_name:           Optional[str] = None
+    provider_number:        Optional[str] = None
+    pob:                    Optional[str] = None
+    driving_license_number: Optional[str] = None
+    comment:                Optional[str] = None
+    destination:            Optional[str] = None
+    date_entered:           Optional[str] = None
+    aliases:                Optional[str] = None
+    model_config = {"extra": "allow"}
+    
 class SubjectHeader(BaseModel):
     subject_id:         str
     subject_type:       Optional[str] = None
     is_primary_subject: Optional[bool] = None
     role:               Optional[str] = None
-    details:            dict
-    addresses:          list[dict]
+    details:            SubjectDetails
+    addresses:          list[AddressEntry]
     alias_records:      list[str]
     model_config = {"extra": "allow"}
 
@@ -299,9 +356,9 @@ class InvestigationPlan(BaseModel):
     plan_id: str
     fraud_types: list[str]
     risk_tier: str
-    investigation_steps: Optional[list[dict]] = None
-    evidence_checklist: Optional[list[dict]] = None
-    escalation_criteria: Optional[list[dict]] = None
+    investigation_steps: Optional[list[InvestigationStep]] = None
+    evidence_checklist:  Optional[list[EvidenceItem]] = None
+    escalation_criteria: Optional[list[str]] = None    # plain strings — no typed model yet
     escalation_required: Optional[bool] = None
     data_sources: Optional[list[str]] = None
     plan_narrative: Optional[str] = None

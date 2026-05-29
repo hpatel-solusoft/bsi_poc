@@ -213,7 +213,7 @@ def _fetch_workfolder_allegations(wf_id: str) -> list[dict]:
 
     return allegations_list
 
-def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
+def get_enriched_subject_profile(subject_id: str, case_id: str | None = None) -> dict:
     """
     Fetches deep subject history and prior cases for a given subject_id.
     The current case (case_id) is excluded from prior_cases and prior_case_count

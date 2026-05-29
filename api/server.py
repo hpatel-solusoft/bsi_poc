@@ -18,6 +18,8 @@ from config import html_converter
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
+from agent_service.agent_runner import build_similar_cases_prompt
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -315,25 +317,6 @@ def _merge_provenance(existing: List[dict], new_entries: List[dict]) -> List[dic
     return merged
 
 
-def _validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
-    """Validate required v6 ai_summary payload shape for ON-DEMAND requests."""
-    if not isinstance(ai_summary, dict):
-        raise HTTPException(
-            status_code=400,
-            detail="ai_summary is required and must be an object.",
-        )
-    if "investigation" not in ai_summary or not isinstance(ai_summary.get("investigation"), dict):
-        raise HTTPException(
-            status_code=400,
-            detail="ai_summary.investigation is required and must be an object.",
-        )
-    # v6 session-recovery rule: if provenance_trail is absent, continue with warning
-    # and degrade source citations gracefully (no crash).
-    if "provenance_trail" in ai_summary and not isinstance(ai_summary.get("provenance_trail"), list):
-        raise HTTPException(
-            status_code=400,
-            detail="ai_summary.provenance_trail must be an array when provided.",
-        )
 
 def _validate_conversation_history(
     conversation_history: Optional[List[Dict[str, Any]]],
@@ -657,7 +640,6 @@ def _plan_has_substance(plan: dict) -> bool:
         for key in ("investigation_steps", "evidence_checklist", "escalation_criteria")
     )
 
-
 def _format_plan_markdown_item(item, index: int = 1) -> str:
     """Render one investigation step, checklist item, or escalation line."""
     if isinstance(item, dict):
@@ -670,25 +652,32 @@ def _format_plan_markdown_item(item, index: int = 1) -> str:
         ).strip()
         if not label:
             return ""
-        step_no = item.get("step", index)
-        owner = item.get("owner")
-        deadline = item.get("deadline_days")
-        if owner or deadline is not None:
-            return (
-                f"- **Step {step_no}:** {label} "
-                f"(Owner: {owner or 'Not assigned'}; "
-                f"Deadline: {deadline if deadline is not None else 'Not specified'} day(s))"
-            )
-        mandatory = item.get("mandatory")
-        if mandatory is not None:
-            flag = "required" if mandatory else "optional"
-            return f"- {label} ({flag})"
-        return f"- {label}"
+
+        if "action" in item:
+            # Investigation step — always show step number.
+            # Owner and deadline are Optional; shown only when present
+            # (populated during human analyst review).
+            step_no = item.get("step", index)
+            meta = []
+            if item.get("owner"):
+                meta.append(f"Owner: {item['owner']}")
+            if item.get("deadline_days") is not None:
+                meta.append(f"Deadline: {item['deadline_days']} day(s)")
+            if meta:
+                return f"- **Step {step_no}:** {label} ({', '.join(meta)})"
+            return f"- **Step {step_no}:** {label}"
+        else:
+            # Evidence checklist item or other dict — no step number.
+            mandatory = item.get("mandatory")
+            if mandatory is not None:
+                flag = "required" if mandatory else "optional"
+                return f"- {label} ({flag})"
+            return f"- {label}"
+
     text = str(item).strip()
     if not text:
         return ""
     return f"- {text}" if not text.startswith("-") else text
-
 
 def _complaint_label(case_id: str, context: dict) -> str:
     """Prefer business complaint number over internal workfolder id for display."""
@@ -981,7 +970,6 @@ def _rehydrate_case_store(case_id: str, ai_summary: dict) -> None:
             f"— Copilot source citations will be unavailable for this session."
         )
 
-
 def _validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
     """Validate required v6 ai_summary payload shape for ON-DEMAND requests."""
     if not isinstance(ai_summary, dict):
@@ -1195,7 +1183,7 @@ def similar_cases(req: SimilarCasesRequest):
     Explains historical case matches, pattern relevance, and archive findings.
     Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
-    from agent_service.agent_runner import build_similar_cases_prompt
+    
 
     try:
         _validate_ai_summary_contract(req.ai_summary)
@@ -1471,14 +1459,15 @@ def plan(req: PlanRequest):
         assistant_text = _extract_agent_summary(messages)
 
         # Parse markdown prose into structured fields (same source used for agent_summary)
-        # print("%%%%%%%%%-before")
-        # print(steps)
         steps = _parse_bsi_section(assistant_text, "Investigation Steps")
-        # print(steps)
-        # print("%%%%%%%%%-after")
         checklist = _parse_bsi_section(assistant_text, "Evidence Checklist")
         criteria = _parse_bsi_section(assistant_text, "Escalation Criteria")
-        
+
+        # Convert parsed strings to typed dicts.
+        # 'owner' and 'deadline_days' are intentionally absent —
+        # they are populated during the human analyst review step.
+        steps_dicts     = [{"step": i + 1, "action": s} for i, s in enumerate(steps)]     if steps     else None
+        checklist_dicts = [{"item": s}                  for s in checklist]                 if checklist else None
         # Build structured plan from parsed prose
         # Start with metadata from tool result if available
         plan_result = sections.get("investigation_plan", {})
@@ -1489,14 +1478,24 @@ def plan(req: PlanRequest):
         plan_id = plan_result.get("plan_id") or f"PLAN-{cid}-{datetime.now().strftime('%Y%m%d')}"
 
         investigation_plan = {
-            "plan_id": plan_id,
-            "fraud_types": plan_result.get("fraud_types") or case_data.get("complaint_intelligence", {}).get("fraud_types", []),
-            "risk_tier": plan_result.get("risk_tier") or case_data.get("risk_assessment", {}).get("risk_tier", ""),
-            "investigation_steps": steps or None,
-            "evidence_checklist": checklist or None,
+            "plan_id":             plan_id,
+            "fraud_types":         ...,
+            "risk_tier":           ...,
+            "investigation_steps": steps_dicts,
+            "evidence_checklist":  checklist_dicts,
             "escalation_criteria": criteria or None,
-            "escalation_required": "escalate" in assistant_text.lower() or bool(criteria)
+            "escalation_required": ...
         }
+
+        try:
+           
+            validated_plan = InvestigationPlanContract(**investigation_plan)
+            investigation_plan = validated_plan.model_dump(exclude_none=True)
+        except Exception as e:
+            logger.warning(
+                f"Investigation plan schema validation failed — storing unvalidated: {e}"
+            )
+
 
         plan_section = {
             "investigation_plan": investigation_plan
