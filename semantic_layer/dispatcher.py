@@ -1,6 +1,6 @@
 import importlib
 import yaml
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class SemanticDispatcher:
@@ -13,6 +13,15 @@ class SemanticDispatcher:
             tool["name"]: tool
             for tool in self.manifest.get("tools", [])
         }
+
+        # Build section index: section → [tool_names]
+        # Enables endpoints to scope tool catalogues by section
+        # without hardcoded tool names anywhere in application code.
+        self.section_index: Dict[str, List[str]] = {}
+        for tool in self.manifest.get("tools", []):
+            section = tool.get("section", "")
+            if section:
+                self.section_index.setdefault(section, []).append(tool["name"])
 
     def get_tool_catalogue(self) -> list:
         return self.manifest.get("tools", [])

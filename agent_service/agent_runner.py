@@ -227,6 +227,10 @@ class BSIAgentRunner:
             self.dispatcher,
             trigger="ON-DEMAND",
         )
+        self.all_tools = build_openai_tools(
+            self.dispatcher,
+            # No trigger filter — full catalogue for section-based scoping
+        )
         self.client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
 
     # ------------------------------------------------------------------

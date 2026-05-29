@@ -29,13 +29,13 @@ def _normalize_list(values):
     return []
 
 
-def get_investigation_plan(fraud_types: list, risk_tier: str, case_data: dict = None) -> dict:
+def get_investigation_plan(fraud_types: list, risk_tier: str) -> dict:
     """Return the plan context skeleton only. The LLM generates the actual analysis."""
     if isinstance(fraud_types, str):
         fraud_types = [fraud_types]
     fraud_types = _normalize_list(fraud_types)
     risk_tier = risk_tier or ""
-    _normalize_case_data(case_data)
+    
     type_slug = "-".join(str(item).replace(" ", "_") for item in fraud_types[:2]) or "UNSPECIFIED"
 
     result_data = {

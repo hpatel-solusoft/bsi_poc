@@ -44,7 +44,7 @@ tools:
     section: "allegation_types"
     description: >   
       Fetches all active allegation type definitions from AppWorks. Returns each type with its description and default conduct text. Use the returned    list and the current case allegations to identify all types whose conduct    description is semantically related to the current case — including types    that describe the same scheme under a different label or variant name.    Pass all related type descriptions to the archive search.
-    trigger: AUTO
+    trigger: ON-DEMAND
     python_function: "appworks.appworks_services.get_allegation_types"
     required_params: []
     optional_params: []
@@ -60,15 +60,18 @@ tools:
       case fraud type label. Multiple fraud types produce a broader
       cross-label candidate pool that surfaces scheme matches regardless
       of how prior cases were classified.
-    trigger: AUTO
+    trigger: ON-DEMAND
     python_function: "appworks.appworks_services.search_similar_cases"
     required_params:
       - name: "fraud_types"
-        type: "list[string]"
-        description: "List of allegation type objects from get_allegation_types 
-                result relevant to the current case. Each object must 
-                include type_id and description. Do not pass description 
-                strings only — always include type_id."
+        type: "list[dict]"
+        description: "List of allegation type objects from get_allegation_types output
+          that are semantically relevant to the current case. Each object
+          must include exactly two fields: type_id (the numeric allegation
+          type identifier string) and description (the allegation type label).
+          Include all semantically related types — not only the exact fraud
+          type on the current case. Broader coverage surfaces scheme matches
+          classified under variant labels in prior cases."
     optional_params:
       - name: "case_id"
         type: "string"
@@ -173,9 +176,5 @@ tools:
       - name: "risk_tier"
         type: "string"
         description: "Risk tier from calculate_risk_metrics output: LOW/MEDIUM/HIGH/CRITICAL"
-    optional_params:
-      - name: "case_data"
-        type: "dict"
-        description: "Verified route1 investigation case context including complaint_intelligence and risk_assessment"
 
   

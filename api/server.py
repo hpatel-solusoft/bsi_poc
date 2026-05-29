@@ -124,6 +124,7 @@ TOOL_TO_SECTION = _build_tool_to_section()
 # tool is renamed in manifest.yaml the constant updates automatically on restart.
 _SECTION_COMPLAINT_INTEL = TOOL_TO_SECTION.get("verify_case_intake",  "complaint_intelligence")
 _SECTION_CONTEXT_ENRICH  = TOOL_TO_SECTION.get("fetch_subject_history", "context_enrichment")
+_SIMILAR_CASES_SECTIONS  = {"allegation_types", "similar_cases"}
 
 
 # -----------------------------------------------------------------------
@@ -1201,6 +1202,11 @@ def similar_cases(req: SimilarCasesRequest):
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
         case_data = _resolve_case_store(req.case_id, req.ai_summary)
         runner = _get_runner()
+        _sc_names = {
+            name
+            for sec in _SIMILAR_CASES_SECTIONS
+            for name in runner.dispatcher.section_index.get(sec, [])
+        }
         similar_tools = [
             tool
             for tool in runner.auto_tools
@@ -1215,14 +1221,14 @@ def similar_cases(req: SimilarCasesRequest):
                 "the pattern matches found."
             ),
             tools=similar_tools,
-            trigger="AUTO",
+            trigger="ON-DEMAND",
         )
 
         sections = _extract_tool_results(messages)
         # print("11111111111111111111111111")
         # print(sections)
         agent_summary = _extract_agent_summary(messages)
-        print(agent_summary)
+        
         similar_cases_data = sections.get("similar_cases", {})
         similar_section = {
             "similar_cases": similar_cases_data
