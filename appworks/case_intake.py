@@ -7,6 +7,7 @@ Manifest tool: verify_case_intake
 
 import json
 import logging
+from appworks.appworks_paths import AppWorksPaths
 from datetime import datetime, timezone
 
 from appworks.appworks_auth import fetch
@@ -71,7 +72,7 @@ def build_case_header_data(case_id: str) -> dict:
 # WorkfolderComplaintNumber, WorkfolderStatus, WorkfolderDescription, Workfolder_CaseDescription, WorkfolderDateReceived, WorkfolderDateReported, WorkFolderAllegation, TEAM_DISPLAY_NAME, DESTINATION
     # 1. Fetch Main Workfolder
     try:
-        endpoint = f"/entities/Workfolder/items/{case_id}"
+        endpoint = AppWorksPaths.Workfolder.item(case_id)
         logger.info(f"📡 Requesting Workfolder from: {endpoint}")
         workfolder = fetch(endpoint)
         props = workfolder.get("Properties", {})

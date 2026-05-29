@@ -31,10 +31,10 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from appworks.appworks_auth import fetch, fetch_list
 from semantic_layer.entity_contracts import SimilarCasesResult
+from appworks.appworks_paths import AppWorksPaths
 logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.yaml")
-
 # How many candidates to collect per type before stopping the list scan.
 # e.g. max_per_type=3, factor=5 → stop after 15 unique workfolders per type.
 _OVERFETCH_FACTOR = 5
@@ -274,7 +274,7 @@ def _fetch_financial_calculated(wf_id: str) -> float:
     Fetch Financial_Calculated from Workfolder_FinancialRelationship.
     Returns sum of all Financial_Calculated values found, or None.
     """
-    href = f"/entities/Workfolder/items/{wf_id}/relationships/Workfolder_FinancialRelationship"
+    href = AppWorksPaths.Workfolder.financial(wf_id)
     res = _safe_fetch(href)
     records = res.get("_embedded", {}).get("Workfolder_FinancialRelationship", [])
     if not records:
@@ -422,7 +422,8 @@ def _resolve_case_fraud_types(case_id: str, base_signatures: list = None, compla
         return fraud_types
 
     try:
-        rel_url = f"/entities/Workfolder/items/{case_id}/relationships/Workfolder_AllegationsRelationship"
+        rel_url = AppWorksPaths.Workfolder.allegations(case_id)
+        
         items = _fetch_embedded(rel_url, "Workfolder_AllegationsRelationship")
         for item in items:
             alleg_href = item.get("_links", {}).get("self", {}).get("href", "")
@@ -453,7 +454,7 @@ def _resolve_allegation_type_ids(case_id, fraud_types: list) -> list:
 
     if case_id:
         try:
-            rel_url = f"/entities/Workfolder/items/{case_id}/relationships/Workfolder_AllegationsRelationship"
+            rel_url = AppWorksPaths.Workfolder.allegations(case_id)
             rel_res = _safe_fetch(rel_url)
             alleg_items = rel_res.get("_embedded", {}).get("Workfolder_AllegationsRelationship", [])
             logger.info(f"[Path1] {len(alleg_items)} allegation item(s) for type resolution")
@@ -491,7 +492,7 @@ def _resolve_allegation_type_ids(case_id, fraud_types: list) -> list:
 
     logger.info(f"[Path2] name-match for {fraud_types}")
     try:
-        res = _safe_fetch("/entities/AllegationType/lists/AllegationType_All")
+        res = _safe_fetch(AppWorksPaths.Allegations.allegation_type_all())
         items = res.get("_embedded", {}).get("AllegationType_All", [])
         logger.info(f"[Path2] {len(items)} AllegationType items")
         for item in items:
@@ -618,7 +619,7 @@ def search_similar_cases(
             if type_quota <= 0:
                 continue
             collection_budget = max(type_quota * _OVERFETCH_FACTOR, type_quota + 1)
-            list_href = f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
+            list_href = AppWorksPaths.Allegations.allegations_by_type(type_id)
             list_res = _safe_fetch(list_href)
             rows = list_res.get("_embedded", {}).get("Allegations_All", [])
             type_to_rows[type_id] = rows
@@ -640,7 +641,7 @@ def search_similar_cases(
 
         # Step A2: Parallel fetch for Workfolders and Financials
         def _fetch_full_wf(wid):
-            res = _safe_fetch(f"/entities/Workfolder/items/{wid}")
+            res = _safe_fetch(AppWorksPaths.Workfolder.item(wid))
             props = res.get("Properties", {})
             fins = _fetch_financial_calculated(wid)
             return wid, props, fins
@@ -745,7 +746,7 @@ def search_similar_cases(
                 if all(count >= type_quotas.get(type_id, max_per_type) for type_id, count in type_counts.items()):
                     break
                 seen_wf_ids.add(wf_id)
-                wf_res   = _safe_fetch(f"/entities/Workfolder/items/{wf_id}")
+                wf_res   = _safe_fetch(AppWorksPaths.Workfolder.item(wf_id))
                 wf_props = wf_res.get("Properties", {})
                 matches  = _find_matching_allegations(wf_id, target_type_ids)
                 fin_calculated = _fetch_financial_calculated(wf_id)
@@ -823,7 +824,7 @@ def search_similar_cases(
 def _get_subjects_for_case(case_id: str) -> list:
     subject_ids: list = []
     seen: set = set()
-    rel_href = f"/entities/Workfolder/items/{case_id}/relationships/Workfolder_SubjectsRelationship"
+    rel_href = AppWorksPaths.Workfolder.subjects(case_id)
     subj_items = _fetch_embedded(rel_href, "Workfolder_SubjectsRelationship")
     logger.info(f"[Traversal] {len(subj_items)} subject link(s) for case {case_id}")
     for item in subj_items:
@@ -844,8 +845,7 @@ def _get_historical_workfolders(subject_id: str, exclude_case_id: str) -> list:
     wf_ids: list = []
     seen: set = set()
     mapping_href = (
-        f"/entities/Subject/items/{subject_id}"
-        f"/childEntities/Subject_SubjectWorkfolderMapping"
+         AppWorksPaths.Subject.workfolder_mappings(subject_id)
     )
     mappings = _fetch_embedded(mapping_href, "Subject_SubjectWorkfolderMapping")
     logger.info(f"[Traversal]   Subject {subject_id}: {len(mappings)} mapping(s)")
@@ -854,8 +854,7 @@ def _get_historical_workfolders(subject_id: str, exclude_case_id: str) -> list:
         if not mapping_id:
             continue
         item_url = (
-            f"/entities/Subject/items/{subject_id}"
-            f"/childEntities/Subject_SubjectWorkfolderMapping/items/{mapping_id}"
+           AppWorksPaths.Subject.workfolder_mapping_item(subject_id, mapping_id)
         )
         item_res = _safe_fetch(item_url)
         wf_link  = _rel_href(
@@ -872,8 +871,8 @@ def _get_historical_workfolders(subject_id: str, exclude_case_id: str) -> list:
 def _find_matching_allegations(wf_id: str, target_type_ids: set) -> list:
     matches: list = []
     alleg_rel = (
-        f"/entities/Workfolder/items/{wf_id}"
-        f"/relationships/Workfolder_AllegationsRelationship"
+        
+        AppWorksPaths.Workfolder.allegations(wf_id)
     )
     alleg_items = _fetch_embedded(alleg_rel, "Workfolder_AllegationsRelationship")
     for item in alleg_items:
@@ -996,3 +995,37 @@ def _normalise_to_type_dicts(fraud_types: list) -> list:
             seen.add(type_id)
             result.append((type_id, desc))
     return result
+
+def get_allegation_types() -> dict:
+    raw = fetch(AppWorksPaths.Allegations.allegation_type_manage())
+    items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])
+    seen_type_ids = set()
+    allegation_types = []
+    
+    for item in items:
+        type_props = item.get("Properties", {})
+        href = item.get("_links", {}).get("item", {}).get("href", "")
+        type_id = href.rstrip("/").split("/")[-1] if href else None
+        if not type_id or type_id in seen_type_ids:
+            continue
+        seen_type_ids.add(type_id)
+        
+        allegation_types.append({
+            "type_id":      type_id,
+            "short_code":   type_props.get("AllegationType_AllegationTypeShortDesc", ""),
+            "description":  type_props.get("AllegationType_AllegationTypeDescription", ""),
+            "default_text": type_props.get("AllegationType_AllegationTypeDefaults", ""),
+        })
+    envelope = {
+        "result": {
+            "allegation_types": allegation_types,
+            "total_types":      len(allegation_types),
+        },
+
+        "provenance": {
+            "sources":      [AppWorksPaths.Allegations.allegation_type_manage()],
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "computed_by":  "get_allegation_types",
+        }
+    }
+    return envelope

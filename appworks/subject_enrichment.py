@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from appworks.appworks_auth import fetch
+from appworks.appworks_paths import AppWorksPaths
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,8 @@ def _fetch_workfolder_commentary(wf_id: str) -> list[dict]:
         (e.g. "Disposition", "Analyst Notes", "Reviewer Notes").
     """
     commentary_href = (
-        f"/entities/Workfolder/items/{wf_id}"
-        f"/relationships/Workfolder_WorkfolderCommentaryNewRelationship"
+        
+        AppWorksPaths.Workfolder.commentary(wf_id)
     )
     logger.info(f"💬 Fetching commentary for Workfolder: {wf_id}")
     res = _safe_fetch(commentary_href)
@@ -127,8 +128,8 @@ def _fetch_workfolder_allegations(wf_id: str) -> list[dict]:
       - Follow relationship:Allegations_Source          → source agency name
     """
     allegations_href = (
-        f"/entities/Workfolder/items/{wf_id}"
-        f"/relationships/Workfolder_AllegationsRelationship"
+       
+        AppWorksPaths.Workfolder.allegations(wf_id)
     )
     logger.info(f"⚖️  Fetching allegations for Workfolder: {wf_id}")
     res = _safe_fetch(allegations_href)
@@ -228,7 +229,7 @@ def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
     logger.info(f"🚀 [LIVE] Context Enrichment for Subject ID: {subject_id}")
 
     # ── Step 1: Fetch Base Subject Info ──────────────────────────────────────
-    subject_href = f"/entities/Subject/items/{subject_id}"
+    subject_href =  AppWorksPaths.Subject.item(subject_id)
     subj_props, subj_links = _fetch_props_and_links(subject_href)
 
     first_name = subj_props.get("Subject_FirstName", "")
@@ -236,10 +237,7 @@ def get_enriched_subject_profile(subject_id: str, case_id: str = None) -> dict:
     dob        = subj_props.get("Subject_DOB")
 
     # ── Step 2: Get Subject_SubjectWorkfolderMapping list ───────────────
-    mapping_href = (
-        f"/entities/Subject/items/{subject_id}"
-        f"/childEntities/Subject_SubjectWorkfolderMapping"
-    )
+    mapping_href = AppWorksPaths.Subject.workfolder_mappings(subject_id)
     mapping_res  = _safe_fetch(mapping_href)
     mapping_items = (
         mapping_res
