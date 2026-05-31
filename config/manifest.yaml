@@ -76,7 +76,9 @@ tools:
       - name: "case_id"
         type: "string"
         description: "Current case identifier — excludes this case from results"
-      
+      - name: "max_total_results"
+        type: "integer"
+        description: "The maximum number of closest matching cases to return. Defaults to 5 if not specified."
  
   - name: "get_risk_rules"
     section: "risk_rules"

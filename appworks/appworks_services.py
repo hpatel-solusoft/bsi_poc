@@ -105,13 +105,13 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
 def search_similar_cases(
     case_id: str = None,
     fraud_types: list = None,
-    complaint_description: str = None,
+    max_total_results: int = 3,
 ) -> dict:
     """Dispatched from 'search_similar_cases'"""
     res = similar_cases.search_similar_cases(
         fraud_types=fraud_types,
         case_id=case_id,
-        complaint_description=complaint_description,
+        max_total_results=max_total_results,
     )
     return _validate(contracts.SimilarCasesResult, res, "search_similar_cases")
 

@@ -1,98 +1,94 @@
+# appworks/similar_cases.py
 # ----------------------------------------------------------------
-# Agent 3: Similar Case Retrieval — Broad Fetch + Manifest Filtering
-# ----------------------------------------------------------------
-#
-# Strategy:
-#   Stage A (broad candidate pool — with early-exit guard):
-#     - Resolve AllegationType IDs from current case allegations
-#     - Fetch Allegations_All rows per type ID (list endpoint)
-#     - Read wf_id + allegation status from list-row Properties
-#       (no extra per-row API call needed for status)
-#     - EARLY-EXIT per type once (allocated quota * OVERFETCH_FACTOR)
-#       unique workfolders have been accumulated — avoids scanning hundreds
-#       of rows when only a handful of results are needed
-#     - Fetch Workfolder + FinancialRelationship only for kept candidates
-#
-#   Stage B (manifest filters):
-#     - required_status  — matched against allegation status from list row
-#     - similarity_lookback_years
-#     - max_total_results split across fraud types
-#
-# All filter parameters are read from manifest at runtime — no hardcoding.
+# Agent 3: Similar Case Retrieval — Heuristic Ranking Engine
 # ----------------------------------------------------------------
 
 import logging
-import re
-import yaml
-import os
-import json 
-from typing import List, Optional, Any  
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from appworks.appworks_auth import fetch, fetch_list
-from semantic_layer.entity_contracts import SimilarCasesResult
+
+import config.settings as settings
+from appworks.appworks_auth import fetch
 from appworks.appworks_paths import AppWorksPaths
+
 logger = logging.getLogger(__name__)
 
-_MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../../config/manifest.yaml")
-# How many candidates to collect per type before stopping the list scan.
-# e.g. max_per_type=3, factor=5 → stop after 15 unique workfolders per type.
-_OVERFETCH_FACTOR = 5
-_DEFAULT_TOTAL_RESULTS_LIMIT = 3
-
-# Outcome string templates for similar-case candidates.
-# Defined here so wording has a single edit point (Issue #12).
-# Use .format(type_id=...) when building each candidate dict.
-_OUTCOME_ALLEGATION_MATCH = "Findings: Allegation type match — type_id={type_id}"
-_OUTCOME_SUBJECT_TRAVERSAL = "Findings: Subject history traversal — type_id={type_id}"
-
-
-# ── Config ────────────────────────────────────────────────────────
-
-def _load_similar_cases_config() -> dict:
-    try:
-        with open(_MANIFEST_PATH) as f:
-            manifest = yaml.safe_load(f)
-        for tool in manifest.get("tools", []):
-            if tool.get("name") == "search_similar_cases":
-                return tool.get("config", {})
-    except Exception as exc:
-        logger.warning(f"Could not load manifest config: {exc}")
-    return {}
-
-
-# ── Low-level helpers ─────────────────────────────────────────────
-
 def _extract_id(href: str) -> str:
-    if href:
-        return href.rstrip("/").split("/")[-1]
-    return ""
-
+    return href.rstrip("/").split("/")[-1] if href else ""
 
 def _safe_fetch(href: str) -> dict:
     try:
         return fetch(href)
     except Exception as exc:
-        logger.warning(f"fetch failed [{href}]: {exc}")
+        logger.warning(f"Fetch failed [{href}]: {exc}")
         return {}
 
+def _build_case_summary(wf_props: dict) -> str:
+    """
+    Combines the distinct AppWorks comment fields into a single summary
+    context block for the LLM to reason over.
+    """
+    allegation_desc = (wf_props.get("WorkfolderAllegationsDescription") or "").strip()
+    analyst_note    = (wf_props.get("WorkfolderAnalystComments") or "").strip()
+    reviewer_note   = (wf_props.get("WorkfolderReviewerComments") or "").strip()
 
-def _rel_href(links: dict, key: str) -> str:
-    for k in (f"relationship:{key}", key):
-        v = links.get(k)
-        if isinstance(v, dict):
-            h = v.get("href", "")
-            if h:
-                return h
-    return ""
+    parts = []
+    if allegation_desc: parts.append(f"Allegation Details: {allegation_desc}")
+    if analyst_note:    parts.append(f"Analyst Notes: {analyst_note}")
+    if reviewer_note:   parts.append(f"Reviewer Notes: {reviewer_note}")
+
+    # Fallback to general description if all specific notes are empty
+    if not parts:
+        fallback = wf_props.get("WorkfolderDescription") or wf_props.get("Workfolder_CaseDescription") or ""
+        if fallback: parts.append(f"General Description: {fallback}")
+
+    return " | ".join(parts)
+
+def _calculate_heuristic_score(candidate_props: dict, active_case_props: dict) -> float:
+    """
+    Calculates a baseline similarity score so the Python tool can truncate 
+    the pool before handing the Top N to the LLM for final reasoning.
+    """
+    if not active_case_props: 
+        return 1.0 
+
+    score = 0.0
+    
+    # 1. Narrative Overlap (High weight)
+    cand_narrative = str(candidate_props.get("WorkFolderAllegation", "")).lower()
+    active_narrative = str(active_case_props.get("WorkFolderAllegation", "")).lower()
+    if active_narrative and active_narrative in cand_narrative:
+        score += 0.4
+
+    # 2. Financial Exposure Proximity (Medium weight)
+    try:
+        cand_amt = float(candidate_props.get("WorkfolderFraudAmount") or 0)
+        active_amt = float(active_case_props.get("WorkfolderFraudAmount") or 0)
+        if active_amt > 0 and cand_amt > 0:
+            if abs(cand_amt - active_amt) / active_amt <= 0.25:
+                score += 0.3
+    except ValueError: 
+        pass
+
+    # 3. Source/Destination Routing (Low weight)
+    if candidate_props.get("DESTINATION") == active_case_props.get("DESTINATION"):
+        score += 0.15
+    if candidate_props.get("WorkfolderSource") == active_case_props.get("WorkfolderSource"):
+        score += 0.15
+
+    return min(score, 1.0)
 
 
-def _fetch_embedded(href: str, key: str) -> list:
-    if not href:
-        return []
-    res = _safe_fetch(href)
-    return res.get("_embedded", {}).get(key, [])
-
+def _normalise_to_type_dicts(fraud_types: list) -> list:
+    """Extracts target IDs and descriptions from the LLM's list of dicts."""
+    result = []
+    for ft in (fraud_types or []):
+        if isinstance(ft, dict):
+            type_id = str(ft.get("id") or ft.get("type_id", "")).strip()
+            desc = ft.get("desc") or ft.get("description", "")
+            if type_id: 
+                result.append((type_id, desc))
+    return result
 
 def _workfolder_id_from_allegation_item(alleg_item: dict) -> str:
     """Extract parent workfolder ID from Allegations list row (no extra fetch)."""
@@ -138,110 +134,6 @@ def _workfolder_id_from_allegation_item(alleg_item: dict) -> str:
             
     return ""
 
-
-def _allegation_id_from_item(alleg_item: dict) -> str:
-    """Extract allegation ID from an Allegations list row using multiple fallback patterns."""
-    if not isinstance(alleg_item, dict):
-        return ""
-    links = alleg_item.get("_links", {})
-    href = links.get("self", {}).get("href", "")
-    if href:
-        alleg_id = _extract_id(href)
-        if alleg_id:
-            return alleg_id
-    props = alleg_item.get("Properties", {})
-    for key in (
-        "Allegations_Id",
-        "Allegation_Id",
-        "Id",
-        "allegation_id",
-        "Allegations_AllegationId",
-        "Allegations_Allegation$Identity",
-        "Allegation$Identity",
-    ):
-        raw = props.get(key) or alleg_item.get(key)
-        if isinstance(raw, dict):
-            raw_id = raw.get("Id") or raw.get("id")
-            if raw_id:
-                return str(raw_id).strip()
-        elif raw:
-            return str(raw).strip()
-    for key in (
-        "relationship:Allegations",
-        "relationship:Allegations_Self",
-        "relationship:Allegations_Allegation",
-        "relationship:Allegation",
-    ):
-        href = links.get(key, {}).get("href", "")
-        if href:
-            alleg_id = _extract_id(href)
-            if alleg_id:
-                return alleg_id
-    item_href = links.get("item", {}).get("href", "")
-    if item_href:
-        alleg_id = _extract_id(item_href)
-        if alleg_id:
-            return alleg_id
-    return ""
-
-
-def _allegation_status_from_item(alleg_item: dict) -> str:
-    """
-    Read allegation status directly from list-row Properties.
-    Returns lower-cased status string or '' if not present.
-    No extra API call required.
-    """
-    props = alleg_item.get("Properties", {})
-    raw = (
-        props.get("Allegations_Status")
-        or props.get("Allegations_AllegationStatus")
-        or ""
-    )
-    return str(raw).strip().lower()
-
-
-def _allegation_date_from_item(alleg_item: dict) -> str:
-    """Read date_received from list-row Properties — no extra fetch."""
-    props = alleg_item.get("Properties", {})
-    return (
-        props.get("Allegations_DateReceived")
-        or props.get("Allegations_DateReported")
-        or ""
-    )
-
-def _allegation_comment_from_item(alleg_item: dict) -> str:
-    """Read the business allegation description/comment from an Allegations row."""
-    props = alleg_item.get("Properties", {}) if isinstance(alleg_item, dict) else {}
-    raw = (
-        props.get("Allegations_Comment")
-        # or props.get("Allegations_AllegationCloseComment")
-        or ""
-    )
-    comment = str(raw).strip() if raw is not None else ""
-    if comment:
-        return comment
-
-    # Fallback removed: only use Allegations_Comment.
-    # links = alleg_item.get("_links", {}) if isinstance(alleg_item, dict) else {}
-    # item_href = (
-    #     links.get("item", {}).get("href", "")
-    #     or links.get("self", {}).get("href", "")
-    # )
-    # if not item_href:
-    #     return ""
-
-    # full_item = _safe_fetch(item_href)
-    # full_props = full_item.get("Properties", {}) if isinstance(full_item, dict) else {}
-    # full_raw = (
-    #     full_props.get("Allegations_Comment")
-    #     or full_props.get("Allegations_AllegationCloseComment")
-    #     or ""
-    # )
-    # return str(full_raw).strip() if full_raw is not None else ""
-
-    return ""
-
-
 def _parse_aw_date(raw: str):
     """
     Parse AppWorks date safely and ALWAYS return timezone-aware UTC datetime.
@@ -267,734 +159,110 @@ def _parse_aw_date(raw: str):
 
     return dt.astimezone(timezone.utc)
 
-# ── Financial fetch per API guide ─────────────────────────────────
-
-def _fetch_financial_calculated(wf_id: str) -> float:
-    """
-    Fetch Financial_Calculated from Workfolder_FinancialRelationship.
-    Returns sum of all Financial_Calculated values found, or None.
-    """
-    href = AppWorksPaths.Workfolder.financial(wf_id)
-    res = _safe_fetch(href)
-    records = res.get("_embedded", {}).get("Workfolder_FinancialRelationship", [])
-    if not records:
-        return None
-
-    total = 0.0
-    found = False
-    for rec in records:
-        props = rec.get("Properties", {})
-        raw = props.get("Financial_Calculated")
-        if raw is not None:
-            try:
-                total += float(raw)
-                found = True
-            except (TypeError, ValueError):
-                pass
-    return round(total, 4) if found else None
-
-
-# ── Manifest filter (Stage B) ─────────────────────────────────────
-
-def _apply_manifest_filters(
-    candidates: list,
-    required_status: str,
-    lookback_years: int,
-    type_quotas: dict = None,
-    max_total_results: int = _DEFAULT_TOTAL_RESULTS_LIMIT,
-) -> list:
-    """Apply manifest constraints. All parameters come from manifest config."""
-    now = datetime.now(timezone.utc)
-    min_dt = datetime(
-        now.year - max(0, int(lookback_years)), now.month, now.day, tzinfo=timezone.utc
-    )
-    required_status_norm = (required_status or "").strip().lower()
-
-    filtered = []
-    per_type_counts = {}
-    seen_alleg = set()
-    type_quotas = type_quotas or {}
-
-    for row in candidates:
-        if max_total_results > 0 and len(filtered) >= max_total_results:
-            break
-
-        # Filter 1: required_status
-        if required_status_norm:
-            case_status = (row.get("status") or "").strip().lower()
-            # BSI specific: "open or closed" is a compound requirement.
-            # If specified, we allow any case that has a status (non-empty).
-            if required_status_norm == "open or closed":
-                if not case_status:
-                    continue
-            elif case_status != required_status_norm:
-                continue
-
-        # Filter 2: lookback window
-        dt = _parse_aw_date(row.get("date_received"))
-        if lookback_years > 0 and dt and dt < min_dt:
-            continue
-
-        # Filter 3: deduplicate by allegation_id
-        alleg_id = row.get("allegation_id")
-        if alleg_id and alleg_id in seen_alleg:
-            continue
-        if alleg_id:
-            seen_alleg.add(alleg_id)
-
-        # Filter 4: allocated per-type quota under the aggregate result cap
-        ftype = row.get("fraud_type", "UNKNOWN")
-        cnt = per_type_counts.get(ftype, 0)
-        quota = type_quotas.get(ftype, max_total_results)
-        if quota <= 0 or cnt >= quota:
-            continue
-        per_type_counts[ftype] = cnt + 1
-        filtered.append(row)
-
-    return filtered
-
-
-def _allocate_type_quotas(allegation_types: list, total_limit: int) -> tuple[dict, dict]:
-    """
-    Split the aggregate similar-case cap evenly across fraud types.
-
-    Examples:
-      2 types, total 10 -> 5 + 5
-      3 types, total 10 -> 4 + 3 + 3
-    """
-    if not allegation_types or total_limit <= 0:
-        return {}, {}
-
-    type_count = len(allegation_types)
-    base = total_limit // type_count
-    remainder = total_limit % type_count
-    by_id = {}
-    by_desc = {}
-
-    for index, (type_id, desc) in enumerate(allegation_types):
-        quota = base + (1 if index < remainder else 0)
-        fraud_type_desc = desc or str(type_id)
-        by_id[type_id] = quota
-        by_desc[fraud_type_desc] = quota
-
-    return by_id, by_desc
-
-
-def _names_match(fraud_type: str, aw_desc: str) -> bool:
-    ft = fraud_type.strip().upper()
-    aw = aw_desc.strip().upper()
-    if ft in aw or aw in ft:
-        return True
-    ft_base = re.sub(r'[\d_\-]+$', '', ft).strip()
-    aw_base = re.sub(r'[\d_\-]+$', '', aw).strip()
-    if ft_base and aw_base and (ft_base in aw_base or aw_base in ft_base):
-        return True
-    fw = ft.split()[0] if ft.split() else ""
-    aw_w = aw.split()[0] if aw.split() else ""
-    if len(fw) >= 4 and fw == aw_w:
-        return True
-    return False
-
-
-# ── Step 1: Resolve AllegationType IDs from current case ─────────
-
-def _resolve_case_fraud_types(case_id: str, base_signatures: list = None, complaint_description: str = None) -> list:
-    fraud_types: list = []
-    seen: set = set()
-
-    def add_signature(value):
-        if not value:
-            return
-        text = str(value).strip()
-        if not text:
-            return
-        if text not in seen:
-            seen.add(text)
-            fraud_types.append(text)
-
-    if base_signatures:
-        for signature in base_signatures:
-            add_signature(signature)
-
-    add_signature(complaint_description)
-
-    if not case_id:
-        return fraud_types
-
-    try:
-        rel_url = AppWorksPaths.Workfolder.allegations(case_id)
-        
-        items = _fetch_embedded(rel_url, "Workfolder_AllegationsRelationship")
-        for item in items:
-            alleg_href = item.get("_links", {}).get("self", {}).get("href", "")
-            if not alleg_href:
-                continue
-            alleg_res = _safe_fetch(alleg_href)
-
-            # Add the allegation row's comment/description if present.
-            alleg_comment = _allegation_comment_from_item(alleg_res)
-            add_signature(alleg_comment)
-
-            type_href = _rel_href(alleg_res.get("_links", {}), "Allegations_AllegationsType")
-            if not type_href:
-                continue
-            type_res = _safe_fetch(type_href)
-            props = type_res.get("Properties", {})
-            add_signature(props.get("AllegationType_AllegationTypeDescription"))
-            add_signature(props.get("AllegationType_AllegationTypeShortDesc"))
-            add_signature(props.get("AllegationType_AllegationTypeDefaults"))
-    except Exception as exc:
-        logger.warning(f"Failed to resolve case fraud types from case {case_id}: {exc}")
-    return fraud_types
-
-
-def _resolve_allegation_type_ids(case_id, fraud_types: list) -> list:
-    seen_ids: set = set()
-    result: list = []
-
-    if case_id:
-        try:
-            rel_url = AppWorksPaths.Workfolder.allegations(case_id)
-            rel_res = _safe_fetch(rel_url)
-            alleg_items = rel_res.get("_embedded", {}).get("Workfolder_AllegationsRelationship", [])
-            logger.info(f"[Path1] {len(alleg_items)} allegation item(s) for type resolution")
-
-            for item in alleg_items:
-                alleg_href = item.get("_links", {}).get("self", {}).get("href", "")
-                if not alleg_href:
-                    continue
-                alleg_res = _safe_fetch(alleg_href)
-                type_href = _rel_href(alleg_res.get("_links", {}), "Allegations_AllegationsType")
-                type_id = _extract_id(type_href)
-                if not type_id or type_id in seen_ids:
-                    continue
-
-                type_res = _safe_fetch(type_href)
-                props = type_res.get("Properties", {})
-                desc = (
-                    props.get("AllegationType_AllegationTypeDescription")
-                    or props.get("AllegationType_AllegationTypeShortDesc")
-                    or ""
-                )
-                logger.info(f"  Type {type_id}: '{desc}'")
-
-                if desc and any(_names_match(f, desc) for f in fraud_types):
-                    seen_ids.add(type_id)
-                    result.append({"id": type_id, "description": desc})
-                    logger.info(f"  Resolved '{desc}' -> {type_id}")
-
-            if result:
-                return result
-            logger.info("[Path1] no matches — trying Path 2")
-
-        except Exception as exc:
-            logger.warning(f"Path 1 type resolution failed: {exc}")
-
-    logger.info(f"[Path2] name-match for {fraud_types}")
-    try:
-        res = _safe_fetch(AppWorksPaths.Allegations.allegation_type_all())
-        items = res.get("_embedded", {}).get("AllegationType_All", [])
-        logger.info(f"[Path2] {len(items)} AllegationType items")
-        for item in items:
-            type_id = _extract_id(item.get("_links", {}).get("self", {}).get("href", ""))
-            if not type_id or type_id in seen_ids:
-                continue
-            props = item.get("Properties", {})
-            desc = (
-                props.get("AllegationType_AllegationTypeDescription")
-                or props.get("AllegationType_AllegationTypeShortDesc")
-                or ""
-            )
-            if desc and any(_names_match(f, desc) for f in fraud_types):
-                seen_ids.add(type_id)
-                result.append({"id": type_id, "description": desc})
-                logger.info(f"  [Path2] '{desc}' -> {type_id}")
-    except Exception as exc:
-        logger.warning(f"Path 2 type resolution failed: {exc}")
-
-    return result
-
-
-# ── Main service ──────────────────────────────────────────────────
-
 def search_similar_cases(
-    case_id=None,
-    fraud_types=None,
-    complaint_description=None,
-) -> dict:
-    """
-    Broad fetch from Allegations_All per allegation type, then manifest filtering.
-
-    Stage A (broad — with early-exit guard):
-      - Resolve allegation type IDs from current case
-      - Query Allegations_All by each type ID (one request per type)
-      - Read wf_id + status + date directly from list-row Properties
-        (zero extra fetches for filtering decisions)
-      - STOP collecting per type once (max_per_type * OVERFETCH_FACTOR)
-        unique workfolders accumulated — avoids hundreds of HTTP calls
-      - Fetch Workfolder + FinancialRelationship only for kept candidates
-
-    Stage B (manifest filters — all values from manifest config):
-      - required_status  (allegation status, resolved from list row)
-      - similarity_lookback_years
-      - max_total_results split across fraud types
-    """
-    print("===============================")
-    print(fraud_types)
-
-    cfg = _load_similar_cases_config()
-    max_per_type        = int(cfg.get("max_results_per_type", 3))
-    max_total_results   = int(cfg.get("max_total_results", _DEFAULT_TOTAL_RESULTS_LIMIT))
-    required_status     = str(cfg.get("required_status", "Closed"))
-    lookback_years      = int(cfg.get("similarity_lookback_years", 4))
-    enable_broad_fetch  = bool(cfg.get("enable_broad_fetch_stage", True))
-    fallback_to_raw     = bool(cfg.get("fallback_to_raw_when_filtered_empty", True))
-
-    # Guard against positional call swap
-    if isinstance(case_id, list) and (fraud_types is None or isinstance(fraud_types, str)):
-        case_id, fraud_types = (str(fraud_types) if fraud_types else None), case_id
-
-    fraud_types = fraud_types or []
-    # fraud_types = _resolve_case_fraud_types(
-    #     case_id,
-    #     base_signatures=fraud_types,
-    #     complaint_description=complaint_description,
-    # )
-
-    logger.info(
-        f"Similar Case Retrieval: fraud_types={fraud_types} case={case_id} "
-        f"max_per_type={max_per_type} max_total_results={max_total_results} "
-        f"lookback_years={lookback_years} "
-        f"required_status={required_status or 'ANY'}"
-    )
-
-    # Step 1: Resolve target AllegationType IDs
-    # allegation_types = _resolve_allegation_type_ids(case_id, fraud_types)
-    allegation_types = _normalise_to_type_dicts(fraud_types)
-    # allegation_types = fraud_types
-    logger.info(
-        f"Resolved {len(allegation_types)} type(s): "
-        f"{[(t[0], t[1]) for t in allegation_types]}"
-    )
-
-    if not allegation_types:
-        logger.warning("No AllegationType IDs resolved — returning empty result.")
-        return _build_result([], allegation_types, fraud_types, cfg=cfg)
-
-    target_type_ids: set  = {t[0] for t in allegation_types}
-    type_id_to_desc: dict = {t[0]: t[1] for t in allegation_types}
-    type_quotas_by_id, type_quotas_by_desc = _allocate_type_quotas(
-        allegation_types,
-        max_total_results,
-    )
-    logger.info(f"Similar Case Retrieval quotas by type: {type_quotas_by_id}")
-
-    candidates: list = []
-
-    if enable_broad_fetch:
-        # ── Stage A: broad fetch with per-type early-exit ─────────────────
-        # Collecting budget = allocated quota * OVERFETCH_FACTOR unique workfolders
-        # per type.  Once the budget is hit we break out of the row loop for
-        # that type, capping the number of expensive workfolder fetches.
-        required_status_norm = required_status.strip().lower()
-
-        now    = datetime.now(timezone.utc)
-        min_dt = (
-            datetime(now.year - max(0, lookback_years), now.month, now.day, tzinfo=timezone.utc)
-            if lookback_years > 0
-            else None
-        )
-
-        # Shared caches across types
-        wf_cache:  dict = {}   # wf_id -> Properties dict
-        fin_cache: dict = {}   # wf_id -> Financial_Calculated (float | None)
-        global_seen_pair: set = set()
-        
-        # Step A1: Identify candidate rows and unique workfolders to fetch
-        type_to_rows = {}
-        all_wf_ids_to_fetch = set()
-        
-        for type_id in target_type_ids:
-            type_quota = type_quotas_by_id.get(type_id, max_per_type)
-            if type_quota <= 0:
-                continue
-            collection_budget = max(type_quota * _OVERFETCH_FACTOR, type_quota + 1)
-            list_href = AppWorksPaths.Allegations.allegations_by_type(type_id)
-            list_res = _safe_fetch(list_href)
-            rows = list_res.get("_embedded", {}).get("Allegations_All", [])
-            type_to_rows[type_id] = rows
-            
-            seen_wf_for_type = set()
-            for alleg_row in rows:
-                if len(seen_wf_for_type) >= collection_budget: break
-                wf_id = _workfolder_id_from_allegation_item(alleg_row)
-                if not wf_id or wf_id == str(case_id): continue
-                
-                # Check pre-filter (date)
-                date_raw = _allegation_date_from_item(alleg_row)
-                if min_dt and date_raw:
-                    dt = _parse_aw_date(date_raw)
-                    if dt and dt < min_dt: continue
-                
-                seen_wf_for_type.add(wf_id)
-                all_wf_ids_to_fetch.add(wf_id)
-
-        # Step A2: Parallel fetch for Workfolders and Financials
-        def _fetch_full_wf(wid):
-            res = _safe_fetch(AppWorksPaths.Workfolder.item(wid))
-            props = res.get("Properties", {})
-            fins = _fetch_financial_calculated(wid)
-            return wid, props, fins
-
-        logger.info(f"[Parallel Fetch] Starting batch fetch for {len(all_wf_ids_to_fetch)} workfolders...")
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            results = list(executor.map(_fetch_full_wf, all_wf_ids_to_fetch))
-        
-        for wid, props, fins in results:
-            wf_cache[wid] = props
-            fin_cache[wid] = fins
-
-        # Step A3: Build candidates
-        for type_id in target_type_ids:
-            type_quota = type_quotas_by_id.get(type_id, max_per_type)
-            if type_quota <= 0:
-                continue
-            collection_budget = max(type_quota * _OVERFETCH_FACTOR, type_quota + 1)
-            rows = type_to_rows.get(type_id, [])
-            fraud_type_desc = type_id_to_desc.get(type_id) or str(type_id)
-            seen_wf_for_type = set()
-            
-            for alleg_row in rows:
-                if len(seen_wf_for_type) >= collection_budget: break
-                wf_id = _workfolder_id_from_allegation_item(alleg_row)
-                if not wf_id or wf_id == str(case_id) or wf_id not in wf_cache: continue
-                
-                alleg_id = _allegation_id_from_item(alleg_row)
-                pair = (wf_id, alleg_id)
-                if pair in global_seen_pair: continue
-                
-                # Date pre-filter again (to stay consistent with previous logic)
-                date_raw = _allegation_date_from_item(alleg_row)
-                if min_dt and date_raw:
-                    dt = _parse_aw_date(date_raw)
-                    if dt and dt < min_dt: continue
-
-                wf_props = wf_cache[wf_id]
-                if not wf_props: continue
-                
-                seen_wf_for_type.add(wf_id)
-                global_seen_pair.add(pair)
-
-                # Resolved status
-                destination = (wf_props.get("DESTINATION") or "").strip()
-                destination_lower = destination.lower()
-                if "closed" in destination_lower:
-                    resolved_status = "closed"
-                elif destination_lower:
-                    resolved_status = destination_lower
-                else:
-                    resolved_status = (
-                        (wf_props.get("WorkfolderStatus") or "").strip().lower()
-                        or (wf_props.get("Status") or "").strip().lower()
-                        or None
-                    )
-
-                workfolder_summary = (
-                    wf_props.get("WorkfolderDescription")
-                    or wf_props.get("Workfolder_CaseDescription")
-                    or f"Historical {fraud_type_desc} allegation"
-                )
-                description = _allegation_comment_from_item(alleg_row) or None
-                summary = workfolder_summary
-                if destination: summary = f"{summary} [{destination}]"
-                date_received = date_raw or wf_props.get("WorkfolderDateReceived") or None
-
-                candidates.append({
-                    "case_id":              wf_id,
-                    "complaint_no":         wf_props.get("WorkfolderComplaintNumber"),
-                    "allegation_id":        alleg_id,
-                    "similarity_score":     1.0,
-                    "fraud_type":           fraud_type_desc,
-                    "outcome":              _OUTCOME_ALLEGATION_MATCH.format(type_id=type_id),
-                    "summary":              summary,
-                    "description":          description,
-                    "status":               resolved_status,
-                    "date_received":        date_received,
-                    "financial_calculated": wf_props.get("WorkfolderFraudAmount") or None,
-                })
-
-            logger.info(
-                f"[Broad Fetch] type={type_id} kept {len(seen_wf_for_type)} "
-                f"workfolder(s) (budget={collection_budget})"
-            )
-
-    else:
-        # ── Legacy traversal path (used when enable_broad_fetch_stage=false) ──
-        seen_wf_ids:   set = {str(case_id)} if case_id else set()
-        seen_alleg_ids: set = set()
-        # type_counts:   dict = {t["id"]: 0 for t in allegation_types}
-        type_counts:   dict = {t[0]: 0 for t in allegation_types}
-        type_quotas:   dict = type_quotas_by_id or {t[0]: max_per_type for t in allegation_types}
-        subject_ids = _get_subjects_for_case(case_id) if case_id else []
-        for subject_id in subject_ids:
-            hist_wf_ids = _get_historical_workfolders(
-                subject_id, exclude_case_id=str(case_id or "")
-            )
-            for wf_id in hist_wf_ids:
-                if wf_id in seen_wf_ids:
-                    continue
-                if all(count >= type_quotas.get(type_id, max_per_type) for type_id, count in type_counts.items()):
-                    break
-                seen_wf_ids.add(wf_id)
-                wf_res   = _safe_fetch(AppWorksPaths.Workfolder.item(wf_id))
-                wf_props = wf_res.get("Properties", {})
-                matches  = _find_matching_allegations(wf_id, target_type_ids)
-                fin_calculated = _fetch_financial_calculated(wf_id)
-                for match in matches:
-                    type_id  = match["type_id"]
-                    alleg_id = match["allegation_id"]
-                    if alleg_id in seen_alleg_ids or type_counts.get(type_id, 0) >= type_quotas.get(type_id, max_per_type):
-                        continue
-                    seen_alleg_ids.add(alleg_id)
-                    type_counts[type_id] = type_counts.get(type_id, 0) + 1
-                    fraud_type_desc = type_id_to_desc.get(type_id) or str(type_id)
-                    workfolder_summary = (
-                        wf_props.get("WorkfolderDescription")
-                        or wf_props.get("Workfolder_CaseDescription")
-                        or f"Historical {fraud_type_desc} allegation"
-                    )
-                    description = match.get("comment") or None
-                    candidates.append({
-                        "case_id":              wf_id,  
-                        "complaint_no":         wf_props.get("WorkfolderComplaintNumber"),
-                        "allegation_id":        alleg_id,
-                        "similarity_score":     1.0,
-                        "fraud_type":           fraud_type_desc,
-                        "outcome":              _OUTCOME_SUBJECT_TRAVERSAL.format(type_id=type_id),
-                        "summary":              workfolder_summary,
-                        "description":          description,
-                        "status":               match.get("status") or None,
-                        "date_received":        match.get("date_received") or None,
-                        "financial_calculated": wf_props.get("WorkfolderFraudAmount") or None,
-                    })
-
-    # ── Stage B: manifest post-filtering ─────────────────────────────────
-    similar_cases = _apply_manifest_filters(
-        candidates=candidates,
-        required_status=required_status,
-        lookback_years=lookback_years,
-        type_quotas=type_quotas_by_desc,
-        max_total_results=max_total_results,
-    )
-
-    if fallback_to_raw and not similar_cases and candidates:
-        logger.info(
-            "[Fallback] Filters removed all similar cases; returning raw candidate pool "
-            "(fallback_to_raw_when_filtered_empty=true)"
-        )
-        similar_cases = _apply_manifest_filters(
-            candidates=candidates,
-            required_status="",
-            lookback_years=0,
-            type_quotas=type_quotas_by_desc,
-            max_total_results=max_total_results,
-        )
-
-    logger.info(
-        f"search_similar_cases done: raw={len(candidates)} filtered={len(similar_cases)} "
-        f"| type_ids={list(target_type_ids)} | input={fraud_types} "
-        f"| filters(status={required_status or 'ANY'}, lookback_years={lookback_years}, "
-        f"max_per_type={max_per_type}, max_total_results={max_total_results}, "
-        f"type_quotas={type_quotas_by_id}) "
-        f"| broad_fetch={enable_broad_fetch} fallback_to_raw={fallback_to_raw}"
-    )
-
-    return _build_result(
-        similar_cases=similar_cases,
-        allegation_types=allegation_types,
-        fraud_types=fraud_types,
-        raw_count=len(candidates),
-        cfg=cfg,
-        type_quotas=type_quotas_by_id,
-    )
-
-
-# ── Legacy traversal helpers (used when enable_broad_fetch_stage=false) ──
-
-def _get_subjects_for_case(case_id: str) -> list:
-    subject_ids: list = []
-    seen: set = set()
-    rel_href = AppWorksPaths.Workfolder.subjects(case_id)
-    subj_items = _fetch_embedded(rel_href, "Workfolder_SubjectsRelationship")
-    logger.info(f"[Traversal] {len(subj_items)} subject link(s) for case {case_id}")
-    for item in subj_items:
-        subjects_href = item.get("_links", {}).get("self", {}).get("href", "")
-        if not subjects_href:
-            continue
-        subjects_res  = _safe_fetch(subjects_href)
-        subject_href  = _rel_href(subjects_res.get("_links", {}), "Subjects_Subject")
-        subject_id    = _extract_id(subject_href)
-        if subject_id and subject_id not in seen:
-            seen.add(subject_id)
-            subject_ids.append(subject_id)
-    logger.info(f"[Traversal] Resolved subject IDs: {subject_ids}")
-    return subject_ids
-
-
-def _get_historical_workfolders(subject_id: str, exclude_case_id: str) -> list:
-    wf_ids: list = []
-    seen: set = set()
-    mapping_href = (
-         AppWorksPaths.Subject.workfolder_mappings(subject_id)
-    )
-    mappings = _fetch_embedded(mapping_href, "Subject_SubjectWorkfolderMapping")
-    logger.info(f"[Traversal]   Subject {subject_id}: {len(mappings)} mapping(s)")
-    for m in mappings:
-        mapping_id = m.get("Identity", {}).get("Id")
-        if not mapping_id:
-            continue
-        item_url = (
-           AppWorksPaths.Subject.workfolder_mapping_item(subject_id, mapping_id)
-        )
-        item_res = _safe_fetch(item_url)
-        wf_link  = _rel_href(
-            item_res.get("_links", {}), "SubjectWorkfolderMapping_WorkfolderRelation"
-        )
-        wf_id = _extract_id(wf_link)
-        if wf_id and wf_id != str(exclude_case_id) and wf_id not in seen:
-            seen.add(wf_id)
-            wf_ids.append(wf_id)
-    logger.info(f"[Traversal]   Subject {subject_id}: historical WF IDs = {wf_ids}")
-    return wf_ids
-
-
-def _find_matching_allegations(wf_id: str, target_type_ids: set) -> list:
-    matches: list = []
-    alleg_rel = (
-        
-        AppWorksPaths.Workfolder.allegations(wf_id)
-    )
-    alleg_items = _fetch_embedded(alleg_rel, "Workfolder_AllegationsRelationship")
-    for item in alleg_items:
-        alleg_href = item.get("_links", {}).get("self", {}).get("href", "")
-        if not alleg_href:
-            continue
-        alleg_id  = _extract_id(alleg_href)
-        alleg_res = _safe_fetch(alleg_href)
-        type_href = _rel_href(alleg_res.get("_links", {}), "Allegations_AllegationsType")
-        type_id   = _extract_id(type_href)
-        type_key  = int(type_id) if str(type_id).isdigit() else type_id
-        if type_key and type_key in target_type_ids:
-            props = alleg_res.get("Properties", {})
-            matches.append({
-                "allegation_id": alleg_id,
-                "type_id":       type_key,
-                "status": (
-                    props.get("Allegations_Status")
-                    or props.get("Allegations_AllegationStatus")
-                    or None
-                ),
-                "date_received": props.get("Allegations_DateReceived") or None,
-                "comment":       (
-                    props.get("Allegations_Comment")
-                    or props.get("Allegations_AllegationCloseComment")
-                    or None
-                ),
-            })
-    return matches
-
-
-# ── Result builder ────────────────────────────────────────────────
-
-def _build_result(
-    similar_cases: list,
-    allegation_types: list,
+    case_id: str,
     fraud_types: list,
-    raw_count: int = 0,
-    cfg: dict = None,
-    type_quotas: dict = None,
+    max_total_results: int = 3,  # Manifest default
+    **kwargs  # Absorbs legacy parameters to prevent TypeErrors
 ) -> dict:
-    cfg = cfg or {}
-    required_status = str(cfg.get("required_status", "") or "")
-    lookback_years  = int(cfg.get("similarity_lookback_years", 0))
-    max_per_type    = int(cfg.get("max_results_per_type", 0))
-    max_total_results = int(cfg.get("max_total_results", _DEFAULT_TOTAL_RESULTS_LIMIT))
-    type_quotas = type_quotas or {}
-    # type_id_list    = [t["id"] for t in allegation_types]
-    type_id_list = [t[0] for t in allegation_types]
- 
+    
+    max_per_type = settings.SIMILAR_CASES_MAX_PER_TYPE
+    required_status = settings.SIMILAR_CASES_REQUIRED_STATUS.lower()
+    
+    # 1. Baseline context for scoring
+    active_case_props = {}
+    if case_id:
+        active_res = _safe_fetch(AppWorksPaths.Workfolder.item(case_id))
+        active_case_props = active_res.get("Properties", {})
 
-    query_summary = (
-        f"Found {len(similar_cases)} similar archive match(es) "
-        f"after filtering {raw_count} broad candidate(s) "
-        f"across {len(allegation_types)} fraud types."
-    )
-    return {
-        "result": SimilarCasesResult(
-            query_summary=query_summary,
-            matches=similar_cases,
-            top_n_returned=len(similar_cases),
-            raw_matches_found=raw_count,
-            manifest_filters_applied={
-                "required_status":           required_status,
-                "similarity_lookback_years": lookback_years,
-                "max_results_per_type":      max_per_type,
-                "max_total_results":         max_total_results,
-                "type_quotas":               type_quotas,
-            },
-        ).model_dump(),
-        "provenance": {
-            "sources": [
-                f"AppWorks Allegations_All broad fetch "
-                f"(type IDs: {type_id_list}, resolved from: {fraud_types})"
-            ],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by":  "AppWorks REST retrieval + manifest post-filtering",
-        },
-    }
+    allegation_types = _normalise_to_type_dicts(fraud_types)
+    candidates = []
+    sources_hit = []
 
-def _normalise_to_type_dicts(fraud_types: list) -> list:
-    result = []
-    seen = set()
- 
-    for ft in (fraud_types or []):
-        type_id = ""
-        desc = ""
- 
-        if isinstance(ft, dict):
-            type_id = str(ft.get("type_id") or ft.get("id", "")).strip()
-            desc    = ft.get("description", "")
- 
-        elif isinstance(ft, str) and ft.strip().startswith("{"):
-            try:
-                parsed  = json.loads(ft)
-                type_id = str(parsed.get("type_id") or parsed.get("id", "")).strip()
-                desc    = parsed.get("description", "")
-            except Exception:
-                logger.warning(f"[normalise] failed to parse JSON string: {ft}")
+    def _fetch_wf(row):
+        wid = _workfolder_id_from_allegation_item(row)
+        if not wid or str(wid) == str(case_id): return None
+        res = _safe_fetch(AppWorksPaths.Workfolder.item(wid))
+        return wid, res.get("Properties", {})
+    
+    # 2. Broad Fetch per Fraud Type
+    for type_id, type_desc in allegation_types:
+        list_href = AppWorksPaths.Allegations.allegations_by_type(type_id)
+        sources_hit.append(f"AppWorks Allegations By Type (ID: {type_id})")
+        list_res = _safe_fetch(list_href)
+        rows = list_res.get("_embedded", {}).get("Allegations_All", [])
+
+        type_candidates = []
+        
+        # Fetch properties for up to 3x the max_per_type to find enough "Closed" cases quickly.
+        # We use a ThreadPool to prevent blocking sequential calls.
+        fetch_limit = max_per_type * 3 
+        
+        def _fetch_wf(row):
+            wid = _workfolder_id_from_allegation_item(row)
+            if not wid or str(wid) == str(case_id): return None
+            res = _safe_fetch(AppWorksPaths.Workfolder.item(wid))
+            return wid, res.get("Properties", {})
+            
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(_fetch_wf, rows[:fetch_limit]))
+            
+        # 3. Filter for 'Closed' and map dates
+        for res in results:
+            if not res: continue
+            wid, props = res
+            status = str(props.get("WorkfolderStatus") or props.get("Status") or "").strip().lower()
+            dest = str(props.get("DESTINATION") or "").strip().lower()
+            is_closed = (status == "closed" or "closed" in dest)
+            
+            if required_status == "closed" and not is_closed:
                 continue
- 
-        elif isinstance(ft, str) and ":" in ft and ft.split(":")[0].strip().isdigit():
-            parts   = ft.split(":", 1)
-            type_id = parts[0].strip()
-            desc    = parts[1].strip() if len(parts) > 1 else ""
- 
-        elif isinstance(ft, str) and ft.strip().isdigit():
-            type_id = ft.strip()
-            desc    = ""
- 
-        elif isinstance(ft, (int, float)):
-            type_id = str(int(ft))
-            desc    = ""
- 
-        else:
-            logger.warning(f"[normalise] skipping unresolvable: {ft}")
-            continue
-        type_id = int(type_id)
-        if type_id and type_id not in seen:
-            seen.add(type_id)
-            result.append((type_id, desc))
-    return result
+                
+            date_received = props.get("WorkfolderDateReceived") or ""
+            type_candidates.append({
+                "wf_id": wid,
+                "wf_props": props,
+                "date_received":date_received
+            })
+
+        # Sort by date received descending (most recent first)
+        type_candidates.sort(key=lambda x: _parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
+            reverse=True)
+
+        # 4. Take Top N recent, fetch financials, and calculate heuristic score
+        for cand in type_candidates[:max_per_type]:
+            wf_props = cand["wf_props"]
+            
+            sim_score = _calculate_heuristic_score(wf_props, active_case_props)
+
+            candidates.append({
+                "complaint_no": wf_props.get("WorkfolderComplaintNumber"),
+                "allegation_type": type_desc,
+                "summary": _build_case_summary(wf_props),
+                "date_received": cand["date_received"],
+                "date_closed": wf_props.get("WorkfolderDateClosed") or "", 
+                "fraud_amount": wf_props.get("WorkfolderFraudAmount"),
+                "similarity_score": round(sim_score, 2)
+            })
+
+    # 5. Global Rank & Truncate
+    # Sort ALL collected candidates primarily by the heuristic similarity score (descending)
+    candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+    final_matches = candidates[:max_total_results]
+
+    # 6. Build the Standard Envelope
+    return {
+        "result": {
+            "matches": final_matches,
+            "top_n_returned": len(final_matches),
+            "total_candidates_scored": len(candidates)
+        },
+        "provenance": {
+            "sources": sources_hit,
+            "computed_by": "AppWorks REST API",
+            "active_case_context": case_id
+        }
+    }
 
 def get_allegation_types() -> dict:
     raw = fetch(AppWorksPaths.Allegations.allegation_type_manage())
