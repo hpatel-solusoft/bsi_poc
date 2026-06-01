@@ -36,24 +36,6 @@ class AddressEntry(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
 
 
-class TriggeredRule(BaseModel):
-    """A single BSI business rule activated during risk assessment."""
-    rule_id:    str
-    rule_name:  Optional[str] = Field(default=None, alias="description")
-    weight:     float = 0.0
-    max_weight: Optional[float] = None
-    display:    Optional[str] = None
-    findings:   Optional[str] = None   # business-facing match description (formerly condition_matched)
-    flags:      Optional[list] = None
-    model_config = {"populate_by_name": True, "extra": "allow"}
-
-    @field_validator("weight", mode="before")
-    @classmethod
-    def parse_weight(cls, v):
-        if isinstance(v, str):
-            match = re.search(r"(\d+(\.\d+)?)", v)
-            return float(match.group(1)) if match else 0.0
-        return float(v) if v is not None else 0.0
 
 
 class InvestigationStep(BaseModel):
@@ -292,51 +274,92 @@ class SimilarCasesResult(BaseModel):
 # ================================================================
 # TOOL 4a — get_risk_rules
 # ================================================================
+class TriggeredRule(BaseModel):
+    """
+    A single BSI business rule activated during risk assessment.
+    Maintains 'weight' terminology to preserve frontend/LLM contracts.
+    """
+    rule_id:    str
+    rule_name:  Optional[str] = Field(default=None, alias="description")
+    weight:     float = 0.0          
+    max_weight: Optional[float] = None
+    display:    Optional[str] = None
+    findings:   Optional[str] = None
+    
+    # Strictly typed to strings, adhering to Rule 2 (defaults to None)
+    flags:      Optional[list[str]] = None 
+    
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+class RiskRuleThreshold(BaseModel):
+    """Strictly typed breakpoint sub-model to replace untyped lists."""
+    condition: Optional[str] = None
+    min_value: Optional[float] = None
+    points:    float
+    model_config = {"extra": "allow"}
+
+
 
 class RiskRuleDef(BaseModel):
     """
     A single active BSI fraud-detection rule dimension from AppWorks.
-    extra="allow" ensures that weight, tier_thresholds, recommendations,
-    and any future AppWorks fields are preserved through _validate()
-    and delivered intact to the LLM.
     """
-    rule_id:          str
-    description:      Optional[str] = None
-    dimension_key:    str
-    thresholds:       list                      # parsed breakpoints list
-    bonus_condition:  Optional[str] = None
-    bonus_pts:        float = 0.0
-    max_pts:          float = 0.0
-    weight:           float = 0.0              # AppWorks rule weight (informational)
-    tier_thresholds:  Optional[Any] = None     # optional tier config from AppWorks
-    recommendations:  Optional[Any] = None     # optional recommendation text from AppWorks
-    active:           bool = True
-    model_config = {"extra": "allow"}          # preserve any additional AppWorks fields
+    rule_id:             str
+    dimension_key:       str
+    description:         Optional[str] = None
+    
+    # Explicitly typed to inform the Strategy Engine how to process it
+    evaluation_strategy: Optional[str] = None 
+    
+    # Strictly typed to the new sub-model, adhering to Rule 2 (defaults to None)
+    thresholds:          Optional[list[RiskRuleThreshold]] = None
+    
+    # Required for 'fraud_type_match' strategy
+    target_fraud_types:  Optional[list[str]] = None
+    
+    max_pts:             float = 0.0
+    bonus_condition:     Optional[str] = None
+    bonus_pts:           float = 0.0
+    weight:              float = 0.0
+    
+    # Safely typed from Any to dict
+    tier_thresholds:     Optional[dict] = None 
+    recommendations:     Optional[dict] = None
+    
+    active:              bool = True
+    model_config = {"extra": "allow"}
 
 
 class RiskRulesResult(BaseModel):
+    """Envelope for get_risk_rules."""
     active_rules: list[RiskRuleDef]
     model_config = {"extra": "forbid"}
-
 
 # ================================================================
 # TOOL 4b — calculate_risk_metrics
 # ================================================================
 
 class RiskAssessment(BaseModel):
+    """
+    The final deterministic risk evaluation.
+    Lists are strictly typed, and the mutable default anti-pattern 
+    (list = []) is fixed using default_factory for thread safety.
+    """
     case_id:              str
     subject_id:           str
     risk_score:           float
     risk_tier:            str
-    fraud_types:          list = []           # full list of fraud types for LLM context
-    risk_indicators:      list = []           # list of TriggeredRule-compatible dicts
+    
+    # Strictly typed; prevents LLM hallucination of schema and memory leaks
+    fraud_types:          list[str] = Field(default_factory=list)
+    risk_indicators:      list[TriggeredRule] = Field(default_factory=list)
+    
     total_points:         Optional[float] = None
     max_points:           Optional[float] = None
     prior_case_count:     Optional[int] = None
-    recommendation:       Optional[str] = None  # LLM generates this from context; AppWorks can provide
-    # active_rules:         Optional[list[RiskRuleDef]] = None
+    recommendation:       Optional[str] = None
+    
     model_config = {"extra": "allow"}
-
 
 # ================================================================
 # TOOL 5 — get_investigation_plan
