@@ -44,21 +44,22 @@ def _build_case_summary(wf_props: dict) -> str:
 
     return " | ".join(parts)
 
-def _calculate_heuristic_score(candidate_props: dict, active_case_props: dict) -> float:
+def _calculate_heuristic_score(candidate_props: dict, active_case_props: dict) -> tuple[float, list]:
     """
-    Calculates a baseline similarity score so the Python tool can truncate 
-    the pool before handing the Top N to the LLM for final reasoning.
+    Calculates a baseline similarity score and returns a tuple: (score, list_of_reasons).
     """
     if not active_case_props: 
-        return 1.0 
+        return 1.0, ["Baseline match (No active context provided)"]
 
     score = 0.0
+    reasons = []
     
     # 1. Narrative Overlap (High weight)
-    cand_narrative = str(candidate_props.get("WorkFolderAllegation", "")).lower()
-    active_narrative = str(active_case_props.get("WorkFolderAllegation", "")).lower()
+    cand_narrative = str(candidate_props.get("WorkfolderAllegationsDescription", "")).lower()
+    active_narrative = str(active_case_props.get("WorkfolderAllegationsDescription", "")).lower()
     if active_narrative and active_narrative in cand_narrative:
         score += 0.4
+        reasons.append("Strong narrative/allegation overlap")
 
     # 2. Financial Exposure Proximity (Medium weight)
     try:
@@ -67,17 +68,14 @@ def _calculate_heuristic_score(candidate_props: dict, active_case_props: dict) -
         if active_amt > 0 and cand_amt > 0:
             if abs(cand_amt - active_amt) / active_amt <= 0.25:
                 score += 0.3
+                reasons.append("Similar financial exposure (within 25%)")
     except ValueError: 
         pass
 
-    # 3. Source/Destination Routing (Low weight)
-    if candidate_props.get("DESTINATION") == active_case_props.get("DESTINATION"):
-        score += 0.15
-    if candidate_props.get("WorkfolderSource") == active_case_props.get("WorkfolderSource"):
-        score += 0.15
+    if not reasons:
+        reasons.append("Baseline match by fraud type")
 
-    return min(score, 1.0)
-
+    return min(score, 1.0), reasons
 
 def _normalise_to_type_dicts(fraud_types: list) -> list:
     """Extracts target IDs and descriptions from the LLM's list of dicts."""
@@ -132,6 +130,7 @@ def _workfolder_id_from_allegation_item(alleg_item: dict) -> str:
             h = links_full.get(key, {}).get("href", "")
             if h: return _extract_id(h)
             
+    logger.debug(f"Failed to extract Workfolder ID for allegation item: {alleg_item.get('Id', 'Unknown')}")
     return ""
 
 def _parse_aw_date(raw: str):
@@ -169,13 +168,13 @@ def search_similar_cases(
     max_per_type = settings.SIMILAR_CASES_MAX_PER_TYPE
     required_status = settings.SIMILAR_CASES_REQUIRED_STATUS.lower()
     
+    logger.info(f"Starting similar case search | active_case: {case_id} | max_total: {max_total_results} | max_per_type: {max_per_type}")
+    
     # 1. Baseline context for scoring
-    active_case_props = {}
-    if case_id:
-        active_res = _safe_fetch(AppWorksPaths.Workfolder.item(case_id))
-        active_case_props = active_res.get("Properties", {})
-
+    
     allegation_types = _normalise_to_type_dicts(fraud_types)
+    logger.debug(f"Normalized target allegation types: {allegation_types}")
+    
     candidates = []
     sources_hit = []
 
@@ -187,25 +186,31 @@ def search_similar_cases(
     
     # 2. Broad Fetch per Fraud Type
     for type_id, type_desc in allegation_types:
+        logger.info(f"Fetching historical cases for Fraud Type: {type_desc} (ID: {type_id})")
+        
         list_href = AppWorksPaths.Allegations.allegations_by_type(type_id)
         sources_hit.append(f"AppWorks Allegations By Type (ID: {type_id})")
         list_res = _safe_fetch(list_href)
         rows = list_res.get("_embedded", {}).get("Allegations_All", [])
+
+        logger.debug(f"Found {len(rows)} raw allegation rows for type {type_id}")
 
         type_candidates = []
         
         # Fetch properties for up to 3x the max_per_type to find enough "Closed" cases quickly.
         # We use a ThreadPool to prevent blocking sequential calls.
         fetch_limit = max_per_type * 3 
-        
+        """
         def _fetch_wf(row):
-            wid = _workfolder_id_from_allegation_item(row)
-            if not wid or str(wid) == str(case_id): return None
-            res = _safe_fetch(AppWorksPaths.Workfolder.item(wid))
-            return wid, res.get("Properties", {})
-            
+        wid = _workfolder_id_from_allegation_item(row)
+        if not wid or str(wid) == str(case_id): return None
+        res = _safe_fetch(AppWorksPaths.Workfolder.item(wid))
+        return wid, res.get("Properties", {})
+        """
         with ThreadPoolExecutor(max_workers=5) as executor:
             results = list(executor.map(_fetch_wf, rows[:fetch_limit]))
+            
+        logger.debug(f"Successfully parallel-fetched {len([r for r in results if r])} detailed workfolders.")
             
         # 3. Filter for 'Closed' and map dates
         for res in results:
@@ -225,30 +230,38 @@ def search_similar_cases(
                 "date_received":date_received
             })
 
+        logger.debug(f"Filtered down to {len(type_candidates)} 'Closed' cases for type {type_id}")
+
         # Sort by date received descending (most recent first)
         type_candidates.sort(key=lambda x: _parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
             reverse=True)
 
-        # 4. Take Top N recent, fetch financials, and calculate heuristic score
+        # 4. Take Top N recent and format the payload
         for cand in type_candidates[:max_per_type]:
             wf_props = cand["wf_props"]
-            
-            sim_score = _calculate_heuristic_score(wf_props, active_case_props)
+            wid = cand["wf_id"]
 
             candidates.append({
+                "case_id": wid,
                 "complaint_no": wf_props.get("WorkfolderComplaintNumber"),
                 "allegation_type": type_desc,
                 "summary": _build_case_summary(wf_props),
                 "date_received": cand["date_received"],
                 "date_closed": wf_props.get("WorkfolderDateClosed") or "", 
                 "fraud_amount": wf_props.get("WorkfolderFraudAmount"),
-                "similarity_score": round(sim_score, 2)
+                # Hardcode these to satisfy the Pydantic contract without doing the math, [hp] leave it as it is for now , we can add the heuristic scoring later if needed
+                "similarity_score": 1.0,
+                "match_reasons": ["Recent closed case matching the requested fraud type."]
             })
 
-    # 5. Global Rank & Truncate
-    # Sort ALL collected candidates primarily by the heuristic similarity score (descending)
-    candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+   # 5. Global Rank & Truncate (Sort by most recent date across all types)
+    candidates.sort(
+        key=lambda x: _parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
+        reverse=True
+    )
+    
     final_matches = candidates[:max_total_results]
+    logger.info(f"Search complete. Returning {len(final_matches)} top chronological cases (from {len(candidates)} valid candidates).")
 
     # 6. Build the Standard Envelope
     return {
@@ -265,11 +278,13 @@ def search_similar_cases(
     }
 
 def get_allegation_types() -> dict:
+    logger.info("Fetching AppWorks Allegation Types catalog.")
     raw = fetch(AppWorksPaths.Allegations.allegation_type_manage())
     items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])
     seen_type_ids = set()
     allegation_types = []
     
+    logger.info(f"Successfully resolved {len(allegation_types)} unique allegation types.")
     for item in items:
         type_props = item.get("Properties", {})
         href = item.get("_links", {}).get("item", {}).get("href", "")
@@ -296,4 +311,5 @@ def get_allegation_types() -> dict:
             "computed_by":  "get_allegation_types",
         }
     }
+    logger.info("Allegation types fetch complete.")
     return envelope

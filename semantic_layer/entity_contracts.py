@@ -83,20 +83,15 @@ class EvidenceItem(BaseModel):
 
 class SimilarCaseMatch(BaseModel):
     """A single similar case match from the archive search."""
-    case_id:              str
-    complaint_no:         Optional[int] = None
-    allegation_id:        Optional[str] = None
-    similarity_score:     float
-    fraud_type:           str
-    outcome:              str
+    case_id:              Optional[str]
+    complaint_no:         str
+    allegation_type:      str                   # Renamed from fraud_type
     summary:              str
-    description:          Optional[str] = None
-    # estimated_loss removed — not part of the canonical model (Code Review #9)
-    # financial_calculated has no default — AppWorks must supply it or call is rejected (#9)
-    financial_calculated: Optional[float] = None
-    # Workfolder metadata carried through from AppWorks for filtering and display
-    status:               Optional[str] = None
     date_received:        Optional[str] = None
+    date_closed:          Optional[str] = None  # Replaces 'status'
+    fraud_amount:         Optional[float] = None # Replaces 'financial_calculated'
+    similarity_score:     float
+    match_reasons:        list[str]             # Replaces 'outcome'
     model_config = {"extra": "forbid"}
 
 
@@ -290,15 +285,10 @@ class SubjectHistory(BaseModel):
 # ================================================================
 
 class SimilarCasesResult(BaseModel):
-    query_summary:             str
     matches:                   list[SimilarCaseMatch]
     top_n_returned:            int
-    # Filtering provenance — always populated by similar_cases for traceability
-    raw_matches_found:         Optional[int] = None
-    manifest_filters_applied:  Optional[dict] = None
+    total_candidates_scored:   Optional[int] = None # Replaces raw_matches_found
     model_config = {"extra": "forbid"}
-
-
 # ================================================================
 # TOOL 4a — get_risk_rules
 # ================================================================
