@@ -268,8 +268,8 @@ class BSIAgentRunner:
         messages.append({"role": "user", "content": user_message})
 
         return self._run_loop(
-            messages,
-            tools=tools or self.on_demand_tools,
+             messages,
+            tools=tools if tools is not None else self.on_demand_tools,  # ← explicit None check
             trigger=trigger,
         )
 

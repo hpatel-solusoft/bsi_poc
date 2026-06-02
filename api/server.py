@@ -1198,7 +1198,7 @@ def similar_cases(req: SimilarCasesRequest):
         similar_tools = [
             tool
             for tool in runner.auto_tools
-            if tool["function"]["name"] in {"get_allegation_types", "search_similar_cases"}
+            if tool["function"]["name"] in _sc_names
         ]
 
         messages, new_provenance, _ = runner.run_scoped(
