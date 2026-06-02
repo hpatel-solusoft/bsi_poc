@@ -61,9 +61,6 @@ class AppWorksPaths:
             )
 
     class Allegations:
-        @staticmethod
-        def allegations_all() -> str:
-            return "/entities/Allegations/lists/Allegations_All"
 
         @staticmethod
         def allegations_by_type(type_id: str) -> str:

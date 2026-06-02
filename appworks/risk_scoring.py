@@ -25,7 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 # =======================================================================
-# 1. UTILITIES & CONTEXT BUILDER (Data Fetching Boundary)
+# 0. CONSTANTS & FALLBACKS
+# =======================================================================
+
+# Used ONLY as fallback because the AppWorks row has no DimensionKey column.
+_DESC_TO_DIM: dict = {
+    "subject history":     "subject_history",
+    "financial exposure":  "financial_exposure",
+    "similar case":        "similar_case_volume",
+    "allegation severity": "allegation_severity",
+    "case characteristic": "case_characteristics",
+}
+
+
+# =======================================================================
+# 1. UTILITIES, PARSERS & CONTEXT BUILDER
 # =======================================================================
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -34,13 +48,119 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+def _parse_pts_string(s) -> float:
+    if s is None:
+        return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
+    m = re.search(r'(\d+(?:\.\d+)?)', str(s))
+    return float(m.group(1)) if m else 0.0
+
+def _parse_bonus_from_condition(cond_str: str) -> tuple[str, float]:
+    """
+    Extracts bonus condition key and points from the parent CONDITION field.
+    Returns (bonus_condition_key: str, bonus_pts: float).
+    """
+    s = (cond_str or "").strip().lower()
+    m = re.search(r'\+\s*(\d+(?:\.\d+)?)\s*bonus', s)
+    bonus_pts = float(m.group(1)) if m else 0.0
+
+    if bonus_pts > 0:
+        if "primary" in s and ("prior" in s or "case" in s):
+            return "primary_ge2", bonus_pts
+        if "ordered" in s or "unrealised" in s or "2x" in s or "2×" in s:
+            return "ordered_gt_2x_calculated", bonus_pts
+        if "open" in s and "allegation" in s:
+            return "open_allegation", bonus_pts
+
+    return "", 0.0
+
+def _parse_condition_to_threshold(condition_str: str, pts: float, dimension_key: str) -> dict:
+    """
+    Converts raw AppWorks child text strings (e.g. "≥ 5 cases") into
+    structured threshold dictionaries with 'min_value' or 'condition'.
+    """
+    s = condition_str.strip()
+    s_lower = s.lower()
+
+    # Additive named conditions
+    if dimension_key == "case_characteristics" or "characteristic" in dimension_key.lower():
+        if "fast track" in s_lower:
+            return {"condition": "fast_track", "points": pts}
+        if "multiple subject" in s_lower or ("subject" in s_lower and "2" in s):
+            return {"condition": "multiple_subjects", "points": pts}
+        if "received age" in s_lower or "30 day" in s_lower or "> 30" in s_lower:
+            return {"condition": "received_age_gt30", "points": pts}
+        return {"condition": s_lower, "points": pts}
+
+    # Zero sentinel
+    if re.fullmatch(r'\$?0(\.0+)?\s*(cases?|pts?|similar cases?)?', s_lower.strip()):
+        return {"condition": "0", "points": 0.0}
+
+    # "≥ N" / ">= N" / "> N"
+    m = re.search(r'[≥>]=?\s*\$?\s*(\d[\d,]*(?:\.\d+)?)', s)
+    if m:
+        num = float(m.group(1).replace(",", ""))
+        if num == 0: num = 0.01
+        return {"min_value": num, "points": pts}
+
+    # "N – M cases" (lower bound)
+    m = re.search(r'(\d+)\s*[–\-]\s*(\d+)', s)
+    if m:
+        return {"min_value": float(m.group(1)), "points": pts}
+
+    # Bare number: "2 cases", "1 case"
+    m = re.match(r'(\d+)', s.strip())
+    if m:
+        return {"min_value": float(m.group(1)), "points": pts}
+
+    logger.warning(f"_parse_condition_to_threshold: could not parse {condition_str!r}")
+    return {}
+
+def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href: str = None) -> list:
+    """
+    Fetch /entities/AgentRulesTable/items/{item_id}/childEntities/Rules
+    and convert each child row into a threshold dict.
+    """
+    thresholds = []
+    try:
+        endpoint = child_href or AppWorksPaths.FraudRules.risk_rules_by_id(item_id)
+        res = fetch(endpoint)
+        
+        # Safely extract the child items from the embedded array
+        embedded = res.get("_embedded", {})
+        child_items = embedded.get("Rules", [])
+        if not child_items:
+            child_items = next((v for v in embedded.values() if isinstance(v, list)), [])
+
+        for child in child_items:
+            cp = child.get("Properties", {})
+            cond_str = str(cp.get("CONDITION") or cp.get("Condition") or cp.get("AgentRulesTable_Condition") or "")
+            wt_str = cp.get("WEIGHT") or cp.get("Weight") or cp.get("POINTS") or cp.get("Points") or cp.get("AgentRulesTable_Weight")
+            pts = _parse_pts_string(wt_str)
+            
+            if not cond_str:
+                continue
+                
+            threshold = _parse_condition_to_threshold(cond_str, pts, dimension_key)
+            if threshold:
+                thresholds.append(threshold)
+
+        # Sort numeric descending, then named conditions
+        numeric = sorted(
+            [t for t in thresholds if "min_value" in t],
+            key=lambda t: t["min_value"], reverse=True
+        )
+        named = [t for t in thresholds if "condition" in t]
+        thresholds = numeric + named
+
+    except Exception as e:
+        logger.warning(f"Child Rules fetch failed for item {item_id}: {e}")
+
+    return thresholds
 
 def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -> dict:
-    """
-    Fetches all live domain data from AppWorks upfront.
-    Outputs keys that perfectly match AppWorks dimension_keys to allow 
-    for dynamic, blind evaluation downstream.
-    """
+    """Fetches all live domain data from AppWorks upfront."""
     logger.info(f"Building universal case context for Case {case_id}, Subject {subject_id}")
     context = {
         "case_id": case_id,
@@ -62,12 +182,9 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -
                 1 for m in mappings if m.get("Properties", {}).get("SubjectWorkfolderMapping_IsPrimary")
             )
             logger.debug(f"Subject History found: {prior_case_count} prior cases, {primary_in_prior_cases} as primary.")
-        else:
-            logger.debug("No SubjectWorkfolderMapping href found for subject.")
     except Exception as e:
         logger.warning(f"Failed to fetch subject history context for {subject_id}: {e}")
 
-    # Map directly to expected AppWorks dimension strings
     context["subject_history"] = prior_case_count
     context["primary_in_prior_cases"] = primary_in_prior_cases
 
@@ -78,8 +195,6 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -
         logger.debug(f"Fetching Workfolder & Financial properties for case: {case_id}")
         wf_res = fetch(AppWorksPaths.Workfolder.item(case_id))
         wf_props = wf_res.get("Properties", {})
-        
-        # Stash the full properties payload for the dynamic additive evaluator
         context["workfolder_properties"] = wf_props
         logger.debug(f"Cached {len(wf_props)} raw properties from Workfolder.")
         
@@ -89,14 +204,33 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -
             total_calculated = sum(_safe_float(i.get("Properties", {}).get("Financial_Calculated")) for i in fin_items)
             total_ordered = sum(_safe_float(i.get("Properties", {}).get("Financial_Ordered")) for i in fin_items)
             logger.debug(f"Financials found: Calculated=${total_calculated}, Ordered=${total_ordered}")
-        else:
-            logger.debug("No FinancialRelationship href found for workfolder.")
     except Exception as e:
         logger.warning(f"Failed to fetch financial/workfolder context for {case_id}: {e}")
         
-    # Map directly to expected AppWorks dimension strings
     context["financial_exposure"] = total_calculated
     context["total_ordered"] = total_ordered
+
+    # -- Allegation Severity (Added for open_allegation bonus) --
+    has_open_allegation = False
+    try:
+        wf_links = wf_res.get("_links", {}) if 'wf_res' in locals() else {}
+        alleg_href = wf_links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
+        if alleg_href:
+            alleg_items = fetch(alleg_href).get("_embedded", {}).get("Workfolder_AllegationsRelationship", [])
+            for alleg_item in alleg_items:
+                a_self = alleg_item.get("_links", {}).get("self", {}).get("href", "")
+                if a_self:
+                    a_res = fetch(a_self)
+                    a_props = a_res.get("Properties", {})
+                    date_closed = a_props.get("Allegations_DateClosed")
+                    status = (a_props.get("Allegations_AllegationStatus") or "").lower()
+                    if not date_closed and status in ("open", "active", ""):
+                        has_open_allegation = True
+                        break
+    except Exception as e:
+        logger.warning(f"Failed to fetch allegation severity: {e}")
+        
+    context["has_open_allegation"] = has_open_allegation
 
     logger.debug(f"Final Case Context built: keys={list(context.keys())}")
     return context
@@ -107,18 +241,17 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -
 # =======================================================================
 
 def _evaluate_numeric(rule: RiskRuleDef, context: dict) -> TriggeredRule:
-    """Scores a single numeric value dynamically based on its dimension key."""
+    """Scores a single numeric value dynamically and applies business bonuses."""
     logger.debug(f"Executing [NUMERIC] strategy for rule '{rule.rule_id}' (dimension: {rule.dimension_key})")
     
-    # 100% DYNAMIC LOOKUP
     value = float(context.get(rule.dimension_key, 0.0))
     logger.debug(f"Rule {rule.rule_id}: Extracted context value for '{rule.dimension_key}' = {value}")
     
     weight = 0.0
+    bonus_applied = 0.0
     finding_msg = f"Value {value} did not meet any thresholds."
 
     if rule.thresholds:
-        # Sort breakpoints highest to lowest to hit the top tier first
         numeric_bps = sorted(
             [t for t in rule.thresholds if t.min_value is not None],
             key=lambda x: x.min_value, 
@@ -134,22 +267,40 @@ def _evaluate_numeric(rule: RiskRuleDef, context: dict) -> TriggeredRule:
                 logger.debug(f"Rule {rule.rule_id}: THRESHOLD MET! Awarding {weight} pts.")
                 break
 
+    # -- Business Rules Bonuses --
+    if rule.bonus_condition == "primary_ge2" and context.get("primary_in_prior_cases", 0) >= 2:
+        bonus_applied = rule.bonus_pts
+        finding_msg += f" [+ {bonus_applied} pts primary bonus]"
+        logger.debug(f"Rule {rule.rule_id}: Applied 'primary_ge2' bonus of {bonus_applied} pts.")
+        
+    elif rule.bonus_condition == "ordered_gt_2x_calculated":
+        calc = context.get("financial_exposure", 0.0)
+        ordered = context.get("total_ordered", 0.0)
+        if ordered > 0 and calc > 0 and ordered > (2 * calc):
+            bonus_applied = rule.bonus_pts
+            finding_msg += f" [+ {bonus_applied} pts unrealised bonus]"
+            logger.debug(f"Rule {rule.rule_id}: Applied 'ordered_gt_2x_calculated' bonus of {bonus_applied} pts.")
+            
+    elif rule.bonus_condition == "open_allegation" and context.get("has_open_allegation"):
+        bonus_applied = rule.bonus_pts
+        finding_msg += f" [+ {bonus_applied} pts open-allegation bonus]"
+        logger.debug(f"Rule {rule.rule_id}: Applied 'open_allegation' bonus of {bonus_applied} pts.")
+
+    total_weight = weight + bonus_applied
+
     return TriggeredRule(
         rule_id=rule.rule_id,
         description=rule.description, 
-        weight=min(weight, rule.max_pts),
+        weight=min(total_weight, rule.max_pts), # Cap at max
         max_weight=rule.max_pts,
-        display=f"{min(weight, rule.max_pts)}/{rule.max_pts}",
+        display=f"{min(total_weight, rule.max_pts)}/{rule.max_pts}",
         findings=finding_msg,
-        triggered=(weight > 0)
+        triggered=(total_weight > 0)
     )
 
 
 def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
-    """
-    100% Dynamic Additive Evaluator.
-    Evaluates raw AppWorks condition strings against live AppWorks properties.
-    """
+    """100% Dynamic Additive Evaluator."""
     logger.debug(f"Executing [ADDITIVE] strategy for rule '{rule.rule_id}'")
     weight = 0.0
     met_conditions = []
@@ -167,7 +318,7 @@ def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
             bp_pts = bp.points
             logger.debug(f"Rule {rule.rule_id}: Evaluating Additive Condition '{cond_str}' for {bp_pts} pts.")
 
-            # 1. Simple boolean flag lookup (e.g., "WorkfolderFastTrack")
+            # Simple boolean flag lookup
             if cond_str in wf_props:
                 val = wf_props.get(cond_str)
                 logger.debug(f"Rule {rule.rule_id}: Found exact property match '{cond_str}' = {val}")
@@ -177,7 +328,7 @@ def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
                     logger.debug(f"Rule {rule.rule_id}: Condition met. +{bp_pts} pts.")
                 continue
 
-            # 2. Relational Expression Parser (e.g., "WorkfolderDateReceivedAge > 30")
+            # Relational Expression Parser 
             m = re.match(r'^([a-zA-Z0-9_]+)\s*(>=|<=|>|<|==|!=|=)\s*(.+)$', cond_str)
             if m:
                 prop_name, operator, target_val_str = m.groups()
@@ -187,7 +338,6 @@ def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
                 if actual_val is not None:
                     matched = False
                     try:
-                        # Attempt numeric comparison
                         actual_num = float(actual_val)
                         target_num = float(target_val_str)
                         if operator == ">": matched = actual_num > target_num
@@ -197,7 +347,6 @@ def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
                         elif operator in ("==", "="): matched = actual_num == target_num
                         elif operator == "!=": matched = actual_num != target_num
                     except ValueError:
-                        # Fallback to string comparison
                         target_str = target_val_str.strip("'\"").lower()
                         actual_str = str(actual_val).strip().lower()
                         if operator in ("==", "="): matched = (actual_str == target_str)
@@ -298,7 +447,6 @@ def get_risk_rules() -> dict:
             props = item.get("Properties", {})
             identity = item.get("Identity", {})
             
-            # 1. Identifiers
             rule_id = str(identity.get("BusinessId") or props.get("RULE_ID") or "")
             if not rule_id:
                 logger.debug(f"Row {idx} skipped: Missing rule_id")
@@ -311,13 +459,22 @@ def get_risk_rules() -> dict:
 
             dimension_key = str(props.get("DIMENSION_KEY") or props.get("DimensionKey") or "").strip()
             description = str(props.get("DESCRIPTION") or props.get("Description") or rule_id).strip()
-            max_pts = _safe_float(props.get("WEIGHT") or props.get("MaxPoints"), 0.0)
+            
+            # --- RESTORED FALLBACK: Sniffing dimension key from description/rule_id ---
+            if not dimension_key:
+                source_text = f"{description} {rule_id}".lower()
+                for keyword, dk in _DESC_TO_DIM.items():
+                    if keyword in source_text:
+                        dimension_key = dk
+                        logger.debug(f"Rule {rule_id}: Recovered dimension_key '{dk}' via fallback sniffing.")
+                        break
+            # --------------------------------------------------------------------------
 
-            # 2. Native Target Fraud Types Extraction
+            max_pts = _parse_pts_string(props.get("WEIGHT") or props.get("MaxPoints"))
+
             raw_targets = props.get("TARGETD_FRAUD_TYPE") or props.get("TARGET_FRAUD_TYPES") or props.get("TargetFraudTypes") or ""
             target_types = [t.strip().lower() for t in str(raw_targets).split(",") if t.strip()]
 
-            # 3. Strategy Resolution (Prioritize known dimensions over target presence)
             eval_strat = str(props.get("EVALUATION_STRATEGY") or "").lower()
             if not eval_strat:
                 if dimension_key in ["subject_history", "financial_exposure", "similar_case_volume", "allegation_severity"]:
@@ -330,38 +487,40 @@ def get_risk_rules() -> dict:
                     eval_strat = "numeric_threshold"
                 logger.debug(f"Rule {rule_id}: Auto-detected strategy as '{eval_strat}'")
 
-            # 4. Fetch Child Entities (Thresholds)
-            parsed_thresholds = []
-            _links = item.get("_links", {})
-            
-            child_rel_key = next(
-                (k for k in _links.keys() if "relationship" in k.lower() and ("rule" in k.lower() or "threshold" in k.lower() or "condition" in k.lower())), 
-                None
-            )
+            # -- Restored Bonus Extraction --
+            raw_condition = str(props.get("CONDITION") or props.get("Condition") or "").strip()
+            bonus_cond, bonus_pts = _parse_bonus_from_condition(raw_condition)
 
-            if child_rel_key:
-                child_href = _links[child_rel_key].get("href")
-                if child_href:
-                    try:
-                        logger.debug(f"Rule {rule_id}: Fetching child thresholds from {child_href}")
-                        child_res = fetch(child_href)
-                        embedded_children = child_res.get("_embedded", {})
-                        
-                        child_items = next((v for v in embedded_children.values() if isinstance(v, list)), [])
-                        for child in child_items:
-                            c_props = child.get("Properties", {})
-                            c_cond = c_props.get("CONDITION") or c_props.get("Condition")
-                            c_min_str = c_props.get("MIN_VALUE") or c_props.get("MinValue")
-                            c_pts = _safe_float(c_props.get("POINTS") or c_props.get("WEIGHT") or c_props.get("Weight"), 0.0)
-                            
-                            parsed_thresholds.append({
-                                "condition": str(c_cond).strip() if c_cond else None,
-                                "min_value": _safe_float(c_min_str) if c_min_str is not None else None,
-                                "points": c_pts
-                            })
-                        logger.debug(f"Rule {rule_id}: Successfully extracted {len(parsed_thresholds)} child thresholds.")
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch child thresholds for {rule_id}: {e}")
+            # -- Restored Child Rules Breakpoint Fetching --
+            parsed_thresholds = []
+            links = item.get("_links", {})
+            item_self_href = links.get("self", {}).get("href") or ""
+            item_id = None
+            child_href = None
+
+            if item_self_href:
+                try:
+                    item_res = fetch(item_self_href)
+                    item_ident = item_res.get("Identity", {})
+                    item_links = item_res.get("_links", {})
+
+                    item_id = str(item_ident.get("Id") or "").strip() or None
+
+                    for lk, lv in item_links.items():
+                        if "Rules" in lk and isinstance(lv, dict) and lv.get("href"):
+                            child_href = lv["href"]
+                            break
+                except Exception as e:
+                    logger.warning(f"Row {idx} ({rule_id}): item fetch failed: {e}")
+
+            if item_id or child_href:
+                parsed_thresholds = _fetch_child_rules_breakpoints(
+                    str(item_id) if item_id else "",
+                    dimension_key,
+                    child_href=child_href,
+                )
+                if parsed_thresholds:
+                    logger.debug(f"Rule {rule_id}: Successfully extracted {len(parsed_thresholds)} child thresholds.")
             
             if not parsed_thresholds:
                 inline_thresholds = props.get("Thresholds") or props.get("AgentRulesTable_Thresholds")
@@ -369,7 +528,7 @@ def get_risk_rules() -> dict:
                     parsed_thresholds = inline_thresholds
                     logger.debug(f"Rule {rule_id}: Using {len(parsed_thresholds)} inline JSON thresholds.")
 
-            # 5. Build final payload
+            # Build final payload
             rules_out.append({
                 "rule_id": rule_id,
                 "dimension_key": dimension_key,
@@ -377,12 +536,12 @@ def get_risk_rules() -> dict:
                 "description": description,
                 "thresholds": parsed_thresholds,
                 "target_fraud_types": target_types,
-                "bonus_condition": str(props.get("CONDITION") or props.get("Condition") or "").strip(),
+                "bonus_condition": bonus_cond or raw_condition, 
+                "bonus_pts": bonus_pts,
                 "max_pts": max_pts,
                 "weight": max_pts,
                 "active": True
             })
-            logger.debug(f"Successfully packaged rule {rule_id} for LLM delivery.")
 
     except Exception as e:
         logger.error(f"AgentRulesTable fetch failed: {e}")
@@ -411,7 +570,6 @@ def calculate_risk_metrics(
     """
     logger.info(f"TOOL CALL: calculate_risk_metrics — Case: {case_id} Subject: {subject_id}")
 
-    # ENFORCED ARCHITECTURE
     if not active_rules:
         logger.error("calculate_risk_metrics called without active_rules from the LLM.")
         raise ValueError("Missing active_rules. The agent must call get_risk_rules first.")
