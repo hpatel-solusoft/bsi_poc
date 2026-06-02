@@ -15,11 +15,13 @@ class AppWorksPaths:
     class FraudRules:
         @staticmethod
         def risk_rules_all() -> str:
-            return "/entities/AgentRulesTable/lists/AgentRulesTable_AgentRulesTableListInternal"
+            # return "/entities/AgentRulesTable/lists/AgentRulesTable_AgentRulesTableListInternal"
+            return "/OSABSIACM/entities/FraudRiskRules/lists/FraudRiskRules_FraudRiskRulesListInternal"
         
         @staticmethod
         def risk_rules_by_id(id: str) -> str:
-            return f"/entities/AgentRulesTable/items/{id}/childEntities/Rules"
+            # return f"/entities/AgentRulesTable/items/{id}/childEntities/Rules"
+            return f"/entities/FraudRiskRules/items/{id}/childEntities/Rules"
         
     class Workfolder:
         @staticmethod
