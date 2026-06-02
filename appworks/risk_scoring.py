@@ -119,12 +119,18 @@ def _parse_condition_to_threshold(condition_str: str, pts: float, dimension_key:
 
 def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href: str = None) -> list:
     """
-    Fetch /entities/AgentRulesTable/items/{item_id}/childEntities/Rules
-    and convert each child row into a threshold dict.
+    Fetch childEntities/Rules and convert each child row into a threshold dict.
     """
     thresholds = []
     try:
-        endpoint = child_href or AppWorksPaths.FraudRules.risk_rules_by_id(item_id)
+        endpoint = child_href
+        if not endpoint:
+            # Fallback path if AppWorksPaths is outdated for the new table name
+            if hasattr(AppWorksPaths, 'FraudRules') and hasattr(AppWorksPaths.FraudRules, 'risk_rules_by_id'):
+                endpoint = AppWorksPaths.FraudRules.risk_rules_by_id(item_id)
+            else:
+                endpoint = f"/OSABSIACM/entities/FraudRiskRules/items/{item_id}/childEntities/Rules"
+
         res = fetch(endpoint)
         
         # Safely extract the child items from the embedded array
@@ -433,6 +439,7 @@ def get_risk_rules() -> dict:
     """
     TOOL 1: Fetches ALL active BSI fraud detection rules from AppWorks.
     Extracts explicit target fraud types and child threshold entities.
+    Supports the updated FraudRiskRules AppWorks API structure.
     """
     _RULES_LIST_ENDPOINT = AppWorksPaths.FraudRules.risk_rules_all()
     logger.info(f"TOOL CALL: get_risk_rules -> Fetching from {_RULES_LIST_ENDPOINT}")
@@ -440,29 +447,49 @@ def get_risk_rules() -> dict:
     
     try:
         res = fetch(_RULES_LIST_ENDPOINT)
-        items = res.get("_embedded", {}).get("AgentRulesTable_AgentRulesTableListInternal", [])
+        
+        # Accommodate the updated AppWorks REST API Table changes
+        items = res.get("_embedded", {}).get("FraudRiskRules_FraudRiskRulesListInternal", [])
+        if not items:
+            # Fallback for older table structure just in case
+            items = res.get("_embedded", {}).get("AgentRulesTable_AgentRulesTableListInternal", [])
+            
         logger.debug(f"get_risk_rules: AppWorks returned {len(items)} raw rows.")
         
         for idx, item in enumerate(items):
             props = item.get("Properties", {})
             identity = item.get("Identity", {})
+            links = item.get("_links", {})
             
             rule_id = str(identity.get("BusinessId") or props.get("RULE_ID") or "")
             if not rule_id:
                 logger.debug(f"Row {idx} skipped: Missing rule_id")
                 continue
                 
-            is_active = str(props.get("IsActive", "True")).lower() not in ("false", "0", "no")
+            active_raw = props.get("ACTIVE")
+            if active_raw is None:
+                active_raw = props.get("IsActive")
+            
+            is_active = True
+            if active_raw is not None:
+                is_active = str(active_raw).lower() not in ("false", "0", "no")
+                
             if not is_active:
                 logger.debug(f"Rule {rule_id} skipped: Marked inactive in AppWorks")
                 continue
 
             dimension_key = str(props.get("DIMENSION_KEY") or props.get("DimensionKey") or "").strip()
-            description = str(props.get("DESCRIPTION") or props.get("Description") or rule_id).strip()
+            rule_name = str(props.get("RULE_NAME") or props.get("RuleName") or props.get("Name") or "").strip()
+            rule_desc = str(props.get("RULE_DESC") or props.get("DESCRIPTION") or props.get("Description") or "").strip()
             
-            # --- RESTORED FALLBACK: Sniffing dimension key from description/rule_id ---
+            # Use RULE_NAME as the primary description for the Pydantic schema
+            description = rule_name if rule_name else rule_desc
+            if not description:
+                description = rule_id
+            
+            # --- RESTORED FALLBACK: Sniffing dimension key from description/rule_id/rule_name ---
             if not dimension_key:
-                source_text = f"{description} {rule_id}".lower()
+                source_text = f"{rule_name} {rule_desc} {rule_id}".lower()
                 for keyword, dk in _DESC_TO_DIM.items():
                     if keyword in source_text:
                         dimension_key = dk
@@ -476,7 +503,7 @@ def get_risk_rules() -> dict:
             target_types = [t.strip().lower() for t in str(raw_targets).split(",") if t.strip()]
 
             eval_strat = str(props.get("EVALUATION_STRATEGY") or "").lower()
-            if not eval_strat:
+            if not eval_strat or eval_strat == "null" or eval_strat == "none":
                 if dimension_key in ["subject_history", "financial_exposure", "similar_case_volume", "allegation_severity"]:
                     eval_strat = "numeric_threshold"
                 elif dimension_key in ["case_characteristics"]:
@@ -489,12 +516,16 @@ def get_risk_rules() -> dict:
 
             # -- Restored Bonus Extraction --
             raw_condition = str(props.get("CONDITION") or props.get("Condition") or "").strip()
+            if props.get("CONDITION") is None and props.get("Condition") is None:
+                raw_condition = ""
+                
             bonus_cond, bonus_pts = _parse_bonus_from_condition(raw_condition)
 
             # -- Restored Child Rules Breakpoint Fetching --
             parsed_thresholds = []
-            links = item.get("_links", {})
-            item_self_href = links.get("self", {}).get("href") or ""
+            
+            # In the updated AppWorks endpoint, the self url is often nested under "item"
+            item_self_href = links.get("item", {}).get("href") or links.get("self", {}).get("href") or ""
             item_id = None
             child_href = None
 

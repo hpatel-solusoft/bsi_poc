@@ -11,7 +11,9 @@ import config.settings as settings
 from appworks.appworks_auth import fetch
 from appworks.appworks_paths import AppWorksPaths
 
+#logging.basicConfig(level=logging.DEBUG, force=True)
 logger = logging.getLogger(__name__)
+
 
 def _extract_id(href: str) -> str:
     return href.rstrip("/").split("/")[-1] if href else ""
@@ -173,7 +175,7 @@ def search_similar_cases(
     # 1. Baseline context for scoring
     
     allegation_types = _normalise_to_type_dicts(fraud_types)
-    logger.debug(f"Normalized target allegation types: {allegation_types}")
+    logger.info(f"Normalized target allegation types: {allegation_types}")
     
     candidates = []
     sources_hit = []
@@ -193,7 +195,7 @@ def search_similar_cases(
         list_res = _safe_fetch(list_href)
         rows = list_res.get("_embedded", {}).get("Allegations_All", [])
 
-        logger.debug(f"Found {len(rows)} raw allegation rows for type {type_id}")
+        logger.info(f"Found {len(rows)} raw allegation rows for type {type_id}")
 
         type_candidates = []
         
@@ -210,7 +212,7 @@ def search_similar_cases(
         with ThreadPoolExecutor(max_workers=5) as executor:
             results = list(executor.map(_fetch_wf, rows[:fetch_limit]))
             
-        logger.debug(f"Successfully parallel-fetched {len([r for r in results if r])} detailed workfolders.")
+        logger.info(f"Successfully parallel-fetched {len([r for r in results if r])} detailed workfolders.")
             
         # 3. Filter for 'Closed' and map dates
         for res in results:
@@ -230,7 +232,7 @@ def search_similar_cases(
                 "date_received":date_received
             })
 
-        logger.debug(f"Filtered down to {len(type_candidates)} 'Closed' cases for type {type_id}")
+        logger.info(f"Filtered down to {len(type_candidates)} 'Closed' cases for type {type_id}")
 
         # Sort by date received descending (most recent first)
         type_candidates.sort(key=lambda x: _parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
@@ -243,7 +245,7 @@ def search_similar_cases(
 
             candidates.append({
                 "case_id": wid,
-                "complaint_no": wf_props.get("WorkfolderComplaintNumber"),
+                "complaint_no": str(wf_props.get("WorkfolderComplaintNumber")),
                 "allegation_type": type_desc,
                 "summary": _build_case_summary(wf_props),
                 "date_received": cand["date_received"],

@@ -1200,7 +1200,7 @@ def similar_cases(req: SimilarCasesRequest):
         }
         similar_tools = [
             tool
-            for tool in runner.auto_tools
+            for tool in runner.on_demand_tools
             if tool["function"]["name"] in _sc_names
         ]
 
