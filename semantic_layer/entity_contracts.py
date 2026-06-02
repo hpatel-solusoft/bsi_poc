@@ -288,7 +288,7 @@ class TriggeredRule(BaseModel):
     
     # Strictly typed to strings, adhering to Rule 2 (defaults to None)
     flags:      Optional[list[str]] = None 
-    
+    triggered:   bool = False
     model_config = {"populate_by_name": True, "extra": "allow"}
 
 class RiskRuleThreshold(BaseModel):
