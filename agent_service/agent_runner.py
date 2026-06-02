@@ -301,8 +301,8 @@ class BSIAgentRunner:
             response = self.client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
+                tools=tools if tools is not None else None, 
+                tool_choice="auto" if tools is not None else None,
             )
 
             choice = response.choices[0]

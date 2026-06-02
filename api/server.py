@@ -14,7 +14,7 @@ import time
 import yaml
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
-from config import html_converter
+from utils import html_converter
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -1190,6 +1190,9 @@ def similar_cases(req: SimilarCasesRequest):
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
         case_data = _resolve_case_store(req.case_id, req.ai_summary)
         runner = _get_runner()
+        logger.info(f"[DEBUG] on_demand_tools: {[t['function']['name'] for t in runner.on_demand_tools]}")
+        logger.info(f"[DEBUG] all_tools: {[t['function']['name'] for t in runner.all_tools]}") 
+        # logger.info(f"[DEBUG] _sc_names: {_sc_names}")
         _sc_names = {
             name
             for sec in _SIMILAR_CASES_SECTIONS
