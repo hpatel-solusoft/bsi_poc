@@ -162,8 +162,8 @@ class SubjectDetails(BaseModel):
     (fetched via relationship:Subjects_Subject — separate endpoint from SubjectHeader).
     extra='allow' — AppWorks may add subject attributes without breaking the contract.
     """
-    identifier:             str
-    first_name:             str
+    identifier:             Optional[str] = None
+    first_name:             Optional[str] = None
     middle_initial:         Optional[str] = None
     last_name:              Optional[str] = None
     ssn:                    Optional[str] = None
