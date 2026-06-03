@@ -258,7 +258,7 @@ class BSIAgentRunner:
         self.all_tools        — no trigger filter (use for section-based scoping)
     """
 
-    def __init__(self, manifest_path: str, api_key: str = None):
+    def __init__(self, manifest_path: str, api_key: str |None = None):
         from semantic_layer.dispatcher import SemanticDispatcher
         from agent_service.tool_builder import build_openai_tools
 
@@ -305,6 +305,7 @@ class BSIAgentRunner:
         conversation_history: Optional[List[Dict]] = None,
         tools: Optional[List[Dict]] = None,
         trigger: str = "ON-DEMAND",
+        execution_context: Optional[Dict] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
         Run an ON-DEMAND scoped agent loop.
@@ -328,6 +329,7 @@ class BSIAgentRunner:
             messages,
             tools=tools if tools is not None else self.on_demand_tools,
             trigger=trigger,
+            execution_context=execution_context,
         )
 
     # ------------------------------------------------------------------
@@ -338,6 +340,7 @@ class BSIAgentRunner:
         messages: List[Dict],
         tools: Optional[List[Dict]],
         trigger: str,
+        execution_context: Optional[Dict] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
         The core turn-by-turn agentic loop.
@@ -435,10 +438,12 @@ class BSIAgentRunner:
                 #   a) violate manifest-as-single-source-of-truth;
                 #   b) mask LLM errors silently;
                 #   c) break on any tool rename in manifest.yaml.
+
                 envelope = self.dispatcher.dispatch(
                     tool_name,
                     params,
                     expected_trigger=trigger,
+                    execution_context=execution_context
                 )
                 elapsed_ms = round((time.monotonic() - call_start) * 1000)
 

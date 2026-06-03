@@ -1309,6 +1309,11 @@ def risk_assessment(req: PlanRequest):
             if tool["function"]["name"] in {"get_risk_rules", "calculate_risk_metrics"}
         ]
 
+        # --- EXPLICIT DEPENDENCY INJECTION ---
+        # We package the backend state into a generic execution_context
+        execution_context = {"ai_summary": req.ai_summary}
+        # -------------------------------------
+
         messages, new_provenance, tool_call_log = runner.run_scoped(
             system_prompt=build_risk_assessment_prompt(case_data),
             user_message=(
@@ -1318,6 +1323,7 @@ def risk_assessment(req: PlanRequest):
             ),
             tools=risk_tools,
             trigger="ON-DEMAND",
+            execution_context=execution_context
         )
 
         sections = _extract_tool_results(messages)

@@ -7,8 +7,8 @@
 # 2. Strategy Pattern evaluation. Pure logic functions.
 # 3. Dynamic Additive Parser: Safely evaluates AppWorks expressions.
 # 4. Applicability Gate: Rules can be universal or scoped by fraud type.
-# 5. LLM Bypass eliminated. active_rules MUST be provided in Turn 2.
-# 6. Strict Provenance. BSI configured rules evaluation explicitly cited.
+# 5. Stateful Context Passing: Bypasses REST API when ai_summary is provided.
+# 6. Strict Provenance. Output reflects if data came from REST or ai_summary.
 # ----------------------------------------------------------------
 
 import logging
@@ -22,7 +22,6 @@ from semantic_layer.entity_contracts import RiskRuleDef, TriggeredRule
 
 # Ensure logging is configured to handle DEBUG messages when necessary
 logger = logging.getLogger(__name__)
-
 
 # =======================================================================
 # 0. CONSTANTS & FALLBACKS
@@ -114,10 +113,11 @@ def _parse_condition_to_threshold(condition_str: str, pts: float, dimension_key:
     if m:
         return {"min_value": float(m.group(1)), "points": pts}
 
-    logger.warning(f"_parse_condition_to_threshold: could not parse {condition_str!r}")
+    # Suppressed warning as text-based condition failures are expected for fraud match rules
+    logger.debug(f"_parse_condition_to_threshold: could not parse {condition_str!r} as a numeric threshold.")
     return {}
 
-def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href: str = None) -> list:
+def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href: str | None = None) -> list:
     """
     Fetch childEntities/Rules and convert each child row into a threshold dict.
     """
@@ -125,7 +125,6 @@ def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href:
     try:
         endpoint = child_href
         if not endpoint:
-            # Fallback path if AppWorksPaths is outdated for the new table name
             if hasattr(AppWorksPaths, 'FraudRules') and hasattr(AppWorksPaths.FraudRules, 'risk_rules_by_id'):
                 endpoint = AppWorksPaths.FraudRules.risk_rules_by_id(item_id)
             else:
@@ -133,7 +132,6 @@ def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href:
 
         res = fetch(endpoint)
         
-        # Safely extract the child items from the embedded array
         embedded = res.get("_embedded", {})
         child_items = embedded.get("Rules", [])
         if not child_items:
@@ -152,7 +150,6 @@ def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href:
             if threshold:
                 thresholds.append(threshold)
 
-        # Sort numeric descending, then named conditions
         numeric = sorted(
             [t for t in thresholds if "min_value" in t],
             key=lambda t: t["min_value"], reverse=True
@@ -165,14 +162,133 @@ def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, child_href:
 
     return thresholds
 
-def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -> dict:
-    """Fetches all live domain data from AppWorks upfront."""
+
+def _workfolder_id_from_allegation(alleg_item: dict) -> str:
+    """Helper for Similar Case Volume extraction."""
+    props = alleg_item.get("Properties", {})
+    links = alleg_item.get("_links", {})
+    for key in ("Allegations_Workfolder$Identity", "Allegations_Workfolder", "Workfolder$Identity", "Workfolder"):
+        raw = props.get(key)
+        if isinstance(raw, dict):
+            raw_id = raw.get("Id") or raw.get("id")
+            if raw_id:
+                return str(raw_id).strip()
+        elif raw:
+            return str(raw).strip()
+    for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
+        href = links.get(key, {}).get("href", "")
+        if href:
+            return href.rstrip("/").split("/")[-1]
+    return ""
+
+
+def _fetch_similar_case_volume(case_id: str, wf_res: dict) -> int:
+    """Counts distinct workfolders with matching allegation types."""
+    total = 0
+    seen = set()
+    try:
+        wf_links = wf_res.get("_links", {})
+        alleg_href = wf_links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
+        if alleg_href:
+            alleg_items = fetch(alleg_href).get("_embedded", {}).get("Workfolder_AllegationsRelationship", [])
+            for alleg_item in alleg_items:
+                type_href = alleg_item.get("_links", {}).get("relationship:Allegations_AllegationsType", {}).get("href", "")
+                if not type_href:
+                    a_self = alleg_item.get("_links", {}).get("self", {}).get("href", "")
+                    if a_self:
+                        a_links = fetch(a_self).get("_links", {})
+                        type_href = a_links.get("relationship:Allegations_AllegationsType", {}).get("href", "")
+                
+                if not type_href:
+                    continue
+                
+                type_id = type_href.rstrip("/").split("/")[-1]
+                if not type_id:
+                    continue
+                
+                list_res = fetch(AppWorksPaths.Allegations.allegations_by_type(type_id))
+                matched = list_res.get("_embedded", {}).get("Allegations_All", [])
+                
+                for alleg in matched:
+                    wf_id = _workfolder_id_from_allegation(alleg)
+                    if not wf_id or wf_id == str(case_id) or wf_id in seen:
+                        continue
+                    seen.add(wf_id)
+                    total += 1
+    except Exception as e:
+        logger.warning(f"Similar case volume count failed: {e}")
+    return total
+
+
+def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str], ai_summary: dict | None = None) -> dict:
+    """
+    Builds universal case context. 
+    Prefers shared ai_summary state to bypass redundant AppWorks fetches.
+    Falls back to dynamic AppWorks fetching if ai_summary is missing.
+    """
     logger.info(f"Building universal case context for Case {case_id}, Subject {subject_id}")
     context = {
         "case_id": case_id,
         "subject_id": subject_id,
         "fraud_types": [str(ft).lower().strip() for ft in fraud_types]
     }
+
+    # =====================================================================
+    # STATEFUL CONTEXT PASSING (Bypass AppWorks REST API)
+    # =====================================================================
+    
+    if ai_summary:
+        logger.info("ai_summary detected in payload. Bypassing redundant AppWorks fetches.")
+        inv = ai_summary.get("investigation", {})
+        comp_intel = inv.get("complaint_intelligence", {})
+        enrichment = inv.get("context_enrichment", {})
+        
+        # 1. Subject History
+        context["subject_history"] = int(enrichment.get("total_prior_case_count", 0))
+        
+        primary_in_prior = 0
+        for profile in enrichment.get("profiles", []):
+            if str(profile.get("subject_id")) == str(subject_id):
+                for prior in profile.get("prior_cases", []):
+                    if prior.get("is_primary_subject"):
+                        primary_in_prior += 1
+        context["primary_in_prior_cases"] = primary_in_prior
+
+        # 2. Financial Exposure
+        fins = comp_intel.get("financials", {})
+        context["financial_exposure"] = _safe_float(fins.get("total_calculated", 0))
+        context["total_ordered"] = _safe_float(fins.get("total_ordered", 0))
+
+        # 3. Similar Case Volume (Use the true scored total, not the truncated UI list)
+        sim_cases = ai_summary.get("similar_cases", {})
+        context["similar_case_volume"] = int(sim_cases.get("total_candidates_scored", 0))
+
+        # 4. Allegation Severity
+        has_open = False
+        for alg in comp_intel.get("allegations", []):
+            status = str(alg.get("status", "")).lower()
+            if status in ("open", "active") and not alg.get("date_closed"):
+                has_open = True
+        context["has_open_allegation"] = has_open
+
+        # 5. Case Characteristics
+        details = comp_intel.get("details", {})
+        age = _safe_float(details.get("date_received_age", 0))
+        sub_count = len(comp_intel.get("subject_ids", []))
+        
+        context["workfolder_properties"] = {
+            "fast_track": False, 
+            "received_age_gt30": age > 30,
+            "multiple_subjects": sub_count >= 2
+        }
+
+        logger.debug(f"Stateful Context built successfully: {context}")
+        return context
+
+    # =====================================================================
+    # FALLBACK (Only executes if ai_summary is missing)
+    # =====================================================================
+    logger.info("No ai_summary provided. Falling back to dynamic AppWorks fetches...")
 
     # -- Subject History Domain --
     prior_case_count = 0
@@ -194,32 +310,41 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -
     context["subject_history"] = prior_case_count
     context["primary_in_prior_cases"] = primary_in_prior_cases
 
-    # -- Financial Exposure & Case Characteristics Domain --
-    total_calculated = 0.0
-    total_ordered = 0.0
+    # -- Workfolder Root Fetch --
+    wf_res = {}
+    wf_props = {}
+    wf_links = {}
     try:
         logger.debug(f"Fetching Workfolder & Financial properties for case: {case_id}")
         wf_res = fetch(AppWorksPaths.Workfolder.item(case_id))
         wf_props = wf_res.get("Properties", {})
-        context["workfolder_properties"] = wf_props
+        wf_links = wf_res.get("_links", {})
         logger.debug(f"Cached {len(wf_props)} raw properties from Workfolder.")
-        
-        fin_href = wf_res.get("_links", {}).get("relationship:Workfolder_FinancialRelationship", {}).get("href")
+    except Exception as e:
+        logger.warning(f"Failed to fetch root workfolder context for {case_id}: {e}")
+
+    # -- Financial Exposure Domain --
+    total_calculated = 0.0
+    total_ordered = 0.0
+    try:
+        fin_href = wf_links.get("relationship:Workfolder_FinancialRelationship", {}).get("href")
         if fin_href:
             fin_items = fetch(fin_href).get("_embedded", {}).get("Workfolder_FinancialRelationship", [])
             total_calculated = sum(_safe_float(i.get("Properties", {}).get("Financial_Calculated")) for i in fin_items)
             total_ordered = sum(_safe_float(i.get("Properties", {}).get("Financial_Ordered")) for i in fin_items)
             logger.debug(f"Financials found: Calculated=${total_calculated}, Ordered=${total_ordered}")
     except Exception as e:
-        logger.warning(f"Failed to fetch financial/workfolder context for {case_id}: {e}")
+        logger.warning(f"Failed to fetch financial context for {case_id}: {e}")
         
     context["financial_exposure"] = total_calculated
     context["total_ordered"] = total_ordered
 
-    # -- Allegation Severity (Added for open_allegation bonus) --
+    # -- Similar Case Volume Domain --
+    context["similar_case_volume"] = _fetch_similar_case_volume(case_id, wf_res)
+
+    # -- Allegation Severity Domain --
     has_open_allegation = False
     try:
-        wf_links = wf_res.get("_links", {}) if 'wf_res' in locals() else {}
         alleg_href = wf_links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
         if alleg_href:
             alleg_items = fetch(alleg_href).get("_embedded", {}).get("Workfolder_AllegationsRelationship", [])
@@ -237,6 +362,27 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: list[str]) -
         logger.warning(f"Failed to fetch allegation severity: {e}")
         
     context["has_open_allegation"] = has_open_allegation
+
+    # -- Case Characteristics Dynamic Translation --
+    fast_track = bool(wf_props.get("WorkfolderFastTrack") or wf_props.get("FAST_TRACK") or wf_props.get("FastTrack"))
+    wf_props["fast_track"] = fast_track
+
+    age_raw = wf_props.get("WorkfolderDateReceivedAge")
+    try:
+        age = int(float(age_raw)) if age_raw is not None else 0
+    except (ValueError, TypeError):
+        age = 0
+    wf_props["received_age_gt30"] = age > 30
+
+    subj_href = wf_links.get("relationship:Workfolder_SubjectsRelationship", {}).get("href")
+    if subj_href:
+        try:
+            subj_items = fetch(subj_href).get("_embedded", {}).get("Workfolder_SubjectsRelationship", [])
+            wf_props["multiple_subjects"] = len(subj_items) >= 2
+        except Exception:
+            pass
+
+    context["workfolder_properties"] = wf_props
 
     logger.debug(f"Final Case Context built: keys={list(context.keys())}")
     return context
@@ -324,7 +470,6 @@ def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
             bp_pts = bp.points
             logger.debug(f"Rule {rule.rule_id}: Evaluating Additive Condition '{cond_str}' for {bp_pts} pts.")
 
-            # Simple boolean flag lookup
             if cond_str in wf_props:
                 val = wf_props.get(cond_str)
                 logger.debug(f"Rule {rule.rule_id}: Found exact property match '{cond_str}' = {val}")
@@ -334,7 +479,6 @@ def _evaluate_additive(rule: RiskRuleDef, context: dict) -> TriggeredRule:
                     logger.debug(f"Rule {rule.rule_id}: Condition met. +{bp_pts} pts.")
                 continue
 
-            # Relational Expression Parser 
             m = re.match(r'^([a-zA-Z0-9_]+)\s*(>=|<=|>|<|==|!=|=)\s*(.+)$', cond_str)
             if m:
                 prop_name, operator, target_val_str = m.groups()
@@ -435,11 +579,9 @@ def _score_rule(rule: RiskRuleDef, context: dict) -> TriggeredRule:
 # 3. EXPOSED TOOL FUNCTIONS (LLM & Dispatcher Boundary)
 # =======================================================================
 
-def get_risk_rules() -> dict:
+def get_risk_rules(**kwargs) -> dict:
     """
     TOOL 1: Fetches ALL active BSI fraud detection rules from AppWorks.
-    Extracts explicit target fraud types and child threshold entities.
-    Supports the updated FraudRiskRules AppWorks API structure.
     """
     _RULES_LIST_ENDPOINT = AppWorksPaths.FraudRules.risk_rules_all()
     logger.info(f"TOOL CALL: get_risk_rules -> Fetching from {_RULES_LIST_ENDPOINT}")
@@ -448,10 +590,8 @@ def get_risk_rules() -> dict:
     try:
         res = fetch(_RULES_LIST_ENDPOINT)
         
-        # Accommodate the updated AppWorks REST API Table changes
         items = res.get("_embedded", {}).get("FraudRiskRules_FraudRiskRulesListInternal", [])
         if not items:
-            # Fallback for older table structure just in case
             items = res.get("_embedded", {}).get("AgentRulesTable_AgentRulesTableListInternal", [])
             
         logger.debug(f"get_risk_rules: AppWorks returned {len(items)} raw rows.")
@@ -482,12 +622,10 @@ def get_risk_rules() -> dict:
             rule_name = str(props.get("RULE_NAME") or props.get("RuleName") or props.get("Name") or "").strip()
             rule_desc = str(props.get("RULE_DESC") or props.get("DESCRIPTION") or props.get("Description") or "").strip()
             
-            # Use RULE_NAME as the primary description for the Pydantic schema
             description = rule_name if rule_name else rule_desc
             if not description:
                 description = rule_id
             
-            # --- RESTORED FALLBACK: Sniffing dimension key from description/rule_id/rule_name ---
             if not dimension_key:
                 source_text = f"{rule_name} {rule_desc} {rule_id}".lower()
                 for keyword, dk in _DESC_TO_DIM.items():
@@ -495,7 +633,6 @@ def get_risk_rules() -> dict:
                         dimension_key = dk
                         logger.debug(f"Rule {rule_id}: Recovered dimension_key '{dk}' via fallback sniffing.")
                         break
-            # --------------------------------------------------------------------------
 
             max_pts = _parse_pts_string(props.get("WEIGHT") or props.get("MaxPoints"))
 
@@ -514,17 +651,13 @@ def get_risk_rules() -> dict:
                     eval_strat = "numeric_threshold"
                 logger.debug(f"Rule {rule_id}: Auto-detected strategy as '{eval_strat}'")
 
-            # -- Restored Bonus Extraction --
             raw_condition = str(props.get("CONDITION") or props.get("Condition") or "").strip()
             if props.get("CONDITION") is None and props.get("Condition") is None:
                 raw_condition = ""
                 
             bonus_cond, bonus_pts = _parse_bonus_from_condition(raw_condition)
 
-            # -- Restored Child Rules Breakpoint Fetching --
             parsed_thresholds = []
-            
-            # In the updated AppWorks endpoint, the self url is often nested under "item"
             item_self_href = links.get("item", {}).get("href") or links.get("self", {}).get("href") or ""
             item_id = None
             child_href = None
@@ -559,7 +692,6 @@ def get_risk_rules() -> dict:
                     parsed_thresholds = inline_thresholds
                     logger.debug(f"Rule {rule_id}: Using {len(parsed_thresholds)} inline JSON thresholds.")
 
-            # Build final payload
             rules_out.append({
                 "rule_id": rule_id,
                 "dimension_key": dimension_key,
@@ -592,12 +724,13 @@ def calculate_risk_metrics(
     case_id: str,
     subject_id: str,
     fraud_types: list,
-    active_rules: list = None,
+    active_rules: list | None = None,
     **kwargs
 ) -> dict:
     """
     TOOL 2: Deterministic BSI risk scoring.
     active_rules MUST be passed by the LLM from Turn 1 execution.
+    ai_summary is an optional state object passed by the orchestrator.
     """
     logger.info(f"TOOL CALL: calculate_risk_metrics — Case: {case_id} Subject: {subject_id}")
 
@@ -606,7 +739,11 @@ def calculate_risk_metrics(
         raise ValueError("Missing active_rules. The agent must call get_risk_rules first.")
 
     # 1. Build Universal Case State
-    context = _build_case_context(case_id, subject_id, fraud_types)
+    context = _build_case_context(
+        case_id=case_id, 
+        subject_id=subject_id, 
+        fraud_types=fraud_types
+    )
     
     total_earned = 0.0
     total_max = 0.0
@@ -673,8 +810,14 @@ def calculate_risk_metrics(
         tier = "MEDIUM"
 
     logger.info(f"Risk calculation complete: Total Points {total_earned}/{effective_max} = Score {risk_score} (Tier: {tier})")
-
+   
     # 4. Strict Provenance Envelope
+    sources = ["AppWorks BSI fraud detection rules table"]
+    if ai_summary:
+        sources.append("BSI ai_summary (Context Enrichment)")
+    else:
+        sources.extend([f"AppWorks case record {case_id}", f"AppWorks subject record {subject_id}"])
+
     return {
         "result": {
             "case_id": case_id,
@@ -688,11 +831,7 @@ def calculate_risk_metrics(
             "prior_case_count": context.get("subject_history", 0)
         },
         "provenance": {
-            "sources": [
-                f"AppWorks case record {case_id}",
-                f"AppWorks subject record {subject_id}",
-                "AppWorks BSI fraud detection rules table",
-            ],
+            "sources": sources,
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
             "computed_by": "BSI configured rules evaluation",
         }

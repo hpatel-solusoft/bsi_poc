@@ -116,9 +116,9 @@ def search_similar_cases(
     return _validate(contracts.SimilarCasesResult, res, "search_similar_cases")
 
 
-def get_risk_rules() -> dict:
+def get_risk_rules(**kwargs) -> dict:
     """Dispatched from 'get_risk_rules'"""
-    res = risk_scoring.get_risk_rules()
+    res = risk_scoring.get_risk_rules(**kwargs)
     return _validate(contracts.RiskRulesResult, res, "get_risk_rules")
 
 
@@ -137,6 +137,7 @@ def calculate_risk_metrics(
     fast_track: bool = None,
     subject_count: int = None,
     received_age: int = None,
+    **kwargs
 ) -> dict:
     """Dispatched from 'calculate_risk_metrics'"""
     res = risk_scoring.calculate_risk_metrics(
@@ -154,6 +155,7 @@ def calculate_risk_metrics(
         fast_track=fast_track,
         subject_count=subject_count,
         received_age=received_age,
+        **kwargs
     )
     return _validate(contracts.RiskAssessment, res, "calculate_risk_metrics")
 

@@ -31,6 +31,7 @@ class SemanticDispatcher:
         tool_name: str,
         params: Dict[str, Any],
         expected_trigger: Optional[str] = None,
+        execution_context: dict | None = None
     ) -> dict:
         # --- Gate 1: Registry check ---
         if tool_name not in self.tool_registry:
@@ -106,7 +107,12 @@ class SemanticDispatcher:
 
         # --- Execute and pass envelope through unchanged ---
         try:
-            envelope = func(**params)
+            #envelope = func(**params)
+            # 1. Safely handle cases where execution_context is None
+            context_kwargs = execution_context or {}
+            
+            # 2. Unpack BOTH the LLM's params AND the backend context
+            envelope = func(**params, **context_kwargs)
         except Exception as exc:
             return {
                 "status": "error",
