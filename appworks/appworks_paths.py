@@ -65,8 +65,9 @@ class AppWorksPaths:
     class Allegations:
 
         @staticmethod
-        def allegations_by_type(type_id: str) -> str:
-            return f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
+        def allegations_by_type(top: int, status: str) -> str:   # Updated parameters needs to passed to fetch allegations by type with status and top  
+            # return f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
+            return f"http://processsuite-cm.localdomain.com:81/home/BSIDev/app/entityRestService/api/OSABSIACM/entities/Allegations/lists/Allegations_All?$top={top}&Properties.Allegations_AllegationStatus={status}"
 
         @staticmethod
         def allegation_type_all() -> str:
