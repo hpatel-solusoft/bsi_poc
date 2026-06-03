@@ -733,7 +733,7 @@ def calculate_risk_metrics(
     ai_summary is an optional state object passed by the orchestrator.
     """
     logger.info(f"TOOL CALL: calculate_risk_metrics — Case: {case_id} Subject: {subject_id}")
-
+    ai_summary = kwargs.get("ai_summary")
     if not active_rules:
         logger.error("calculate_risk_metrics called without active_rules from the LLM.")
         raise ValueError("Missing active_rules. The agent must call get_risk_rules first.")
@@ -742,7 +742,8 @@ def calculate_risk_metrics(
     context = _build_case_context(
         case_id=case_id, 
         subject_id=subject_id, 
-        fraud_types=fraud_types
+        fraud_types=fraud_types,
+        ai_summary=ai_summary
     )
     
     total_earned = 0.0
