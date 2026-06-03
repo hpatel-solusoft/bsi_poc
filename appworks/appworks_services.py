@@ -164,12 +164,16 @@ def calculate_risk_metrics(
 
 def get_investigation_plan(
     fraud_types: list,
-    risk_tier: str
+    risk_tier: str, 
+    ai_summary=None,
+    **kwargs
 ) -> dict:
     """Dispatched from 'get_investigation_plan'"""
     res = investigation_strategy.get_investigation_plan(
         fraud_types=fraud_types,
-        risk_tier=risk_tier
+        risk_tier=risk_tier,
+        ai_summary=ai_summary,
+        **kwargs
     )
     return _validate(contracts.InvestigationPlan, res, "get_investigation_plan")
 

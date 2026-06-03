@@ -14,13 +14,6 @@ from semantic_layer.entity_contracts import InvestigationPlan
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_case_data(case_data):
-    if isinstance(case_data, dict):
-        return case_data
-    return {}
-
-
 def _normalize_list(values):
     if isinstance(values, str):
         return [values]
@@ -29,13 +22,16 @@ def _normalize_list(values):
     return []
 
 
-def get_investigation_plan(fraud_types: list, risk_tier: str) -> dict:
+def get_investigation_plan(fraud_types: list, risk_tier: str, ai_summary=None, **kwargs) -> dict:
     """Return the plan context skeleton only. The LLM generates the actual analysis."""
     if isinstance(fraud_types, str):
         fraud_types = [fraud_types]
+
     fraud_types = _normalize_list(fraud_types)
+    logger.info("Received request for investigation plan with fraud_types: %s and risk_tier: %s", fraud_types, risk_tier)
     risk_tier = risk_tier or ""
-    
+    ai_summary = kwargs.get("ai_summary")
+    logger.info("AI summary in investigation_strategy context: %s", ai_summary.length() if ai_summary else "None")
     type_slug = "-".join(str(item).replace(" ", "_") for item in fraud_types[:2]) or "UNSPECIFIED"
 
     result_data = {
@@ -52,6 +48,6 @@ def get_investigation_plan(fraud_types: list, risk_tier: str) -> dict:
         "provenance": {
             "sources": ["Verified route1 investigation context"],
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "Agent 5 - plan context passthrough",
+            "computed_by": "Investigation Strategy agent context passthrough",
         },
     }

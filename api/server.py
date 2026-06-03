@@ -409,92 +409,6 @@ def _store_copilot_turn(case_id: str, question: str, answer: str) -> List[Dict[s
     }
     return messages
 
-def _build_investigation_summary(case_id: str, sections: dict, provenance_trail: List[dict]) -> str:
-    """Detailed deterministic summary for /investigate response."""
-    complaint = sections.get("complaint_intelligence", {}) if isinstance(sections, dict) else {}
-    enrichment = sections.get("context_enrichment", {}) if isinstance(sections, dict) else {}
-    similar = sections.get("similar_cases", {}) if isinstance(sections, dict) else {}
-    risk = sections.get("risk_assessment", {}) if isinstance(sections, dict) else {}
-    plan = sections.get("investigation_plan", {}) if isinstance(sections, dict) else {}
-    final_report = sections.get("final_report", {}) if isinstance(sections, dict) else {}
-
-    summary = complaint.get("summary", {}) if isinstance(complaint, dict) else {}
-    details = complaint.get("details", {}) if isinstance(complaint, dict) else {}
-    subjects = complaint.get("subjects", []) if isinstance(complaint, dict) else []
-    primary_subject = next((s for s in subjects if s.get("is_primary_subject")), subjects[0] if subjects else {})
-    primary_name = (
-        primary_subject.get("details", {}).get("identifier")
-        or details.get("identifier_name")
-        or "Not recorded in AppWorks"
-    )
-    fraud_types = complaint.get("fraud_types", [])
-    allegations = complaint.get("allegations", [])
-    similar_matches = similar.get("matches", []) if isinstance(similar, dict) else []
-    triggered = risk.get("risk_indicators", []) if isinstance(risk, dict) else []
-    triggered_names = [
-        (r.get("rule_name") or r.get("rule_id")) if isinstance(r, dict) else str(r)
-        for r in triggered
-    ]
-    prior_count = enrichment.get("prior_case_count", 0)
-    step_count = len(plan.get("investigation_steps", [])) if isinstance(plan, dict) else 0
-    report_status = final_report.get("status", "Not generated")
-
-    subject_lines = []
-    for subject in subjects:
-        label = "PRIMARY SUBJECT" if subject.get("is_primary_subject") else "SECONDARY SUBJECT"
-        subject_details = subject.get("details", {}) if isinstance(subject, dict) else {}
-        subject_name = (
-            " ".join(
-                part for part in [
-                    subject_details.get("first_name"),
-                    subject_details.get("middle_initial"),
-                    subject_details.get("last_name"),
-                ]
-                if part
-            )
-            or subject_details.get("identifier")
-            or "Not recorded in AppWorks"
-        )
-        subject_lines.append(
-            f"{label}: {subject_name} (Role: {subject.get('role', 'Unknown')}, "
-            f"Subject ID: {subject.get('subject_id', 'Unknown')})"
-        )
-
-    allegation_lines = []
-    for idx, item in enumerate(allegations, start=1):
-        allegation_lines.append(
-            f"{idx}) {item.get('allegation_type', {}).get('description', 'Unknown')} "
-            f"(status={item.get('status', 'Unknown')}, received={item.get('date_received', 'Unknown')}, "
-            f"agency={item.get('source_agency', {}).get('name', 'Unknown')}, ref={item.get('agency_referral_no', 'Unknown')})"
-        )
-
-    similar_fraud_types = _safe_join(fraud_types)
-    similar_query = similar.get('query_summary') if isinstance(similar, dict) else ''
-
-    return (
-        f"### Investigation Summary for Case {case_id}\n\n"
-        f"**Case Background:** Complaint #{summary.get('complaint_no', 'Not available')} "
-        f"({summary.get('case_description', 'Not available')}) is currently in "
-        f"'{summary.get('destination', 'Not available')}' under team "
-        f"'{summary.get('team', 'Not available')}'. Intake source is "
-        f"{details.get('source', 'Not available')} with referral "
-        f"{details.get('intake_referral_no', 'Not available')}.\n\n"
-        f"**Subject Profile:**\n"
-        f"{chr(10).join(subject_lines) if subject_lines else 'No subject information recorded.'}\n\n"
-        f"**Allegations:** Fraud types linked to this case are {similar_fraud_types}.\n"
-        f"{chr(10).join(allegation_lines) if allegation_lines else 'No allegations recorded.'}\n\n"
-        f"**Similar Case Analysis:** {similar_query}\n"
-        f"Search used allegation types: {similar_fraud_types or 'Not available'}. "
-        f"Returned {len(similar_matches)} archive match(es).\n\n"
-        f"**Risk Assessment:** Risk score is {risk.get('risk_score', 'Not available')} "
-        f"with tier {risk.get('risk_tier', 'Not available')}. Risk Indicators: "
-        f"{_safe_join(triggered_names)}.\n\n"
-        f"**Downstream Readiness:** Plan step count currently available: {step_count}. "
-        f"Final report status: {report_status}.\n\n"
-        f"**Data Provenance:**\n{_format_provenance_lines(provenance_trail)}"
-    )
-
-
 def _build_similar_cases_summary(
     case_id: str,
     case_data: dict,
@@ -1451,6 +1365,7 @@ def plan(req: PlanRequest):
         _validate_ai_summary_contract(req.ai_summary)
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
         case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        execution_context = {"ai_summary": req.ai_summary}
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
         plan_tools = [
@@ -1466,6 +1381,7 @@ def plan(req: PlanRequest):
             ),
             tools=plan_tools,
             trigger="ON-DEMAND",
+            execution_context=execution_context
         )
 
         sections = _extract_tool_results(messages)
@@ -1494,12 +1410,12 @@ def plan(req: PlanRequest):
 
         investigation_plan = {
             "plan_id":             plan_id,
-            "fraud_types":         ...,
-            "risk_tier":           ...,
+            "fraud_types":         plan_result.get("fraud_types", []),
+            "risk_tier":           plan_result.get("risk_tier", "UNSPECIFIED"),
             "investigation_steps": steps_dicts,
             "evidence_checklist":  checklist_dicts,
             "escalation_criteria": criteria or None,
-            "escalation_required": ...
+            "escalation_required": plan_result.get("escalation_required", False)
         }
 
         try:
@@ -1557,13 +1473,18 @@ def plan(req: PlanRequest):
         )
         summary_text = _swap_case_id_for_complaint(summary_text, req.case_id, ai_summary)
 
+        assistant_text_swapped = _swap_case_id_for_complaint(
+            assistant_text, 
+            req.case_id, 
+            ai_summary
+        )
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to , /copilot
             "details": {
                 "agent_summary": _render_markdown_html_with_sources(
-                    assistant_text,
+                    assistant_text_swapped,
                     merged_provenance,
                 ),
             },
