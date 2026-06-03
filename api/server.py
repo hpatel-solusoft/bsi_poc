@@ -1204,6 +1204,11 @@ def similar_cases(req: SimilarCasesRequest):
             if tool["function"]["name"] in _sc_names
         ]
 
+        # --- EXPLICIT DEPENDENCY INJECTION ---
+        # We package the backend state into a generic execution_context
+        execution_context = {"ai_summary": req.ai_summary}
+        # -----------------------------------
+
         messages, new_provenance, _ = runner.run_scoped(
             system_prompt=build_similar_cases_prompt(case_data),
             user_message=(
@@ -1213,6 +1218,7 @@ def similar_cases(req: SimilarCasesRequest):
             ),
             tools=similar_tools,
             trigger="ON-DEMAND",
+            execution_context=execution_context
         )
 
         sections = _extract_tool_results(messages)

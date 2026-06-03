@@ -106,12 +106,14 @@ def search_similar_cases(
     case_id: str = None,
     fraud_types: list = None,
     max_total_results: int = 3,
+    **kwargs
 ) -> dict:
     """Dispatched from 'search_similar_cases'"""
     res = similar_cases.search_similar_cases(
         fraud_types=fraud_types,
         case_id=case_id,
         max_total_results=max_total_results,
+        **kwargs
     )
     return _validate(contracts.SimilarCasesResult, res, "search_similar_cases")
 
@@ -172,7 +174,7 @@ def get_investigation_plan(
     return _validate(contracts.InvestigationPlan, res, "get_investigation_plan")
 
 
-def get_allegation_types() -> dict:
+def get_allegation_types(**kwargs) -> dict:
     """Dispatched from 'get_allegation_types' — feeds search_similar_cases"""
-    res = similar_cases.get_allegation_types()
+    res = similar_cases.get_allegation_types(**kwargs)
     return _validate(contracts.AllegationTypesResult, res, "get_allegation_types")

@@ -279,7 +279,7 @@ def search_similar_cases(
         }
     }
 
-def get_allegation_types() -> dict:
+def get_allegation_types(**kwargs) -> dict:
     logger.info("Fetching AppWorks Allegation Types catalog.")
     raw = fetch(AppWorksPaths.Allegations.allegation_type_manage())
     items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])

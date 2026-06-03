@@ -69,6 +69,7 @@ tools:
           that are semantically relevant to the current case. Each object
           must include exactly two fields: type_id (the numeric allegation
           type identifier string) and description (the allegation type label).
+          CRITICAL: The 'id' MUST be the numeric 'type_id' (e.g., '131073'), NOT the 'short_code'.
           Include all semantically related types — not only the exact fraud
           type on the current case. Broader coverage surfaces scheme matches
           classified under variant labels in prior cases."
