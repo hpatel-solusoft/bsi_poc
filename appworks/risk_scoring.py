@@ -713,7 +713,7 @@ def get_risk_rules(**kwargs) -> dict:
     return {
         "result": {"active_rules": rules_out},
         "provenance": {
-            "sources": [f"AppWorks {_RULES_LIST_ENDPOINT}", "AppWorks relationship child entities"],
+            "sources": [f"AppWorks Configured Fraud Rules and child entities"],
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
             "computed_by": "AppWorks REST retrieval",
         }
