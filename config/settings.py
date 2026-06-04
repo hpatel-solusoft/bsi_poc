@@ -9,3 +9,14 @@ SIMILAR_CASES_REQUIRED_STATUS = "Closed"
 SIMILAR_CASES_LOOKBACK_YEARS  = 4
 SIMILAR_CASES_BROAD_FETCH     = True
 SIMILAR_CASES_FALLBACK_RAW    = True
+# config/settings.py
+
+# Entities that should be surfaced in the UI Provenance citations.
+# Ignores noisy lookup tables like AddressType, StateCityZip, etc.
+PRIMARY_BUSINESS_ENTITIES = frozenset([
+    "Workfolder",
+    "SubjectDetail",
+    "Allegation",
+    "Financial",
+    "Agency"
+])

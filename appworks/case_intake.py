@@ -1,400 +1,398 @@
-"""
-Intake Services
----------------
-Data functions for the Complaint Intelligence Agent (Agent 1).
-Manifest tool: verify_case_intake
-"""
-
-import json
 import logging
-from appworks.appworks_paths import AppWorksPaths
-from datetime import datetime, timezone
+from typing import Dict, List, Any
 
+# Assuming these are imported from the new foundation files
+from appworks.appworks_utils import safe_fetch, extract_id_from_href, get_relationship_items
+from appworks.provenance import ProvenanceTracker
 from appworks.appworks_auth import fetch
+from appworks.appworks_paths import AppWorksPaths
 
 logger = logging.getLogger(__name__)
 
 
-def build_case_header_data(case_id: str) -> dict:
-    logger.info(f"🚀 [LIVE] Initiating deep fetch for Case ID: {case_id}")
-
-    def fetch_entity(href):
-        try:
-            res = fetch(href)
-            return res.get("Properties", {}), res.get("_links", {})
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch entity [{href}]: {str(e)}")
-            return {}, {}
-
-    def fetch_relationship_items(href, embedded_key):
-        """Returns full embedded item list, preserving per-item _links."""
-        try:
-            res = fetch(href)
-            if not res:
-                return []
-            
-            # If the response itself is an entity item (has Properties and self link)
-            # then it's likely a to-one relationship.
-            props = res.get("Properties")
-            links = res.get("_links", {})
-            if props is not None and "self" in links:
-                logger.info(f"Detected to-one relationship for {href}")
-                return [res]
-
-            embedded = res.get("_embedded", {})
-            items = embedded.get(embedded_key)
-            
-            if isinstance(items, list):
-                return items
-            if isinstance(items, dict):
-                return [items]
-            
-            # Fallback to _links.item (User guide pattern)
-            if isinstance(links, dict):
-                l_items = links.get("item")
-                if isinstance(l_items, list):
-                    return l_items
-                if isinstance(l_items, dict):
-                    return [l_items]
-            
-            # If still nothing, try any key in _embedded that is a list
-            if isinstance(embedded, dict):
-                for val in embedded.values():
-                    if isinstance(val, list):
-                        return val
-                    if isinstance(val, dict):
-                        return [val]
-
-            return []
-        except Exception as e:
-            logger.warning(f"⚠️ fetch_relationship_items failed for {href}: {str(e)}")
-            return []
-# WorkfolderComplaintNumber, WorkfolderStatus, WorkfolderDescription, Workfolder_CaseDescription, WorkfolderDateReceived, WorkfolderDateReported, WorkFolderAllegation, TEAM_DISPLAY_NAME, DESTINATION
-    # 1. Fetch Main Workfolder
-    try:
-        endpoint = AppWorksPaths.Workfolder.item(case_id)
-        logger.info(f"📡 Requesting Workfolder from: {endpoint}")
-        workfolder = fetch(endpoint)
-        props = workfolder.get("Properties", {})
-        links = workfolder.get("_links", {})
-        logger.info(f"✅ Successfully retrieved Workfolder for {case_id}")
-    except Exception as e:
-        logger.error(f"❌ Critical Error fetching Workfolder: {str(e)}")
-        props, links = {}, {}
-
-    # 2. Classification Links
+def _parse_classification(case_links: Dict, tracker: ProvenanceTracker) -> Dict:
+    """
+    Parses Entity, Category, and RequestType metadata linked to the case.
+    """
     logger.info("🔗 Fetching classification metadata...")
+    
+    def fetch_linked_prop(link_key: str, entity_name: str) -> Dict:
+        href = case_links.get(link_key, {}).get("href")
+        if not href:
+            return {}
+        
+        props, _ = safe_fetch(href, entity_name)
+        
+        # Register provenance if fetch was successful
+        if props:
+            entity_id = extract_id_from_href(href)
+            tracker.add_source(entity_name, entity_id)
+            
+        return props
 
-    def fetch_linked_props(link_key):
-        try:
-            href = links.get(link_key, {}).get("href")
-            if href:
-                p, _ = fetch_entity(href)
-                return p
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch linked data [{link_key}]: {str(e)}")
-        return {}
+    entity_props = fetch_linked_prop("SolusoftACMConfig-relationship:EntityType", "EntityType")
+    category_props = fetch_linked_prop("SolusoftACMConfig-relationship:Category", "Category")
+    request_props = fetch_linked_prop("SolusoftACMConfig-relationship:RequestType", "RequestType")
 
-    entity_props   = fetch_linked_props("SolusoftACMConfig-relationship:EntityType")
-    category_props = fetch_linked_props("SolusoftACMConfig-relationship:Category")
-    request_props  = fetch_linked_props("SolusoftACMConfig-relationship:RequestType")
+    return {
+        "entity_text": entity_props.get("ENTITY_TEXT"),
+        "entity_code": entity_props.get("ENTITY_CODE"),
+        "category_text": category_props.get("CATEGORY_TEXT"),
+        "category_code": category_props.get("CATEGORY_CODE"),
+        "request_type": request_props.get("REQUEST_TYPE"),
+    }
 
-    # 3. Fetch Allegations
-    # Each embedded item carries relationship:Allegations_AllegationsType in _links,
-    # so we read the type ID directly from the list without an extra fetch per allegation.
+def _parse_allegations(case_links: Dict, tracker: ProvenanceTracker) -> List[Dict]:
+    """
+    Parses all allegations and their associated types/agencies linked to the case.
+    """
     logger.info("📋 Fetching allegations...")
     allegations_list = []
+    
+    rel_href = case_links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
+    if not rel_href:
+        return allegations_list
 
-    allegations_rel_href = links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
-    if allegations_rel_href:
-        allegation_items = fetch_relationship_items(
-            allegations_rel_href, "Workfolder_AllegationsRelationship"
-        )
-        logger.info(f"🔍 Found {len(allegation_items)} allegation(s)")
+    allegation_items = get_relationship_items(rel_href, "Workfolder_AllegationsRelationship")
+    logger.info(f"🔍 Found {len(allegation_items)} allegation(s)")
 
-        for alleg_item in allegation_items:
-            try:
-                alleg_self_href = alleg_item.get("_links", {}).get("self", {}).get("href", "")
+    for item in allegation_items:
+        try:
+            # 1. Fetch Allegation Base Record
+            self_href = item.get("_links", {}).get("self", {}).get("href", "")
+            alleg_props, alleg_links = safe_fetch(self_href, "Allegation")
+            
+            if alleg_props:
+                alleg_id = extract_id_from_href(self_href)
+                tracker.add_source("Allegation", alleg_id)
 
-                # AllegationType href is on the embedded item _links directly
-                alleg_type_href = alleg_item.get("_links", {}).get(
-                    "relationship:Allegations_AllegationsType", {}
-                ).get("href", "")
+            # 2. Fetch Allegation Type Metadata
+            type_href = item.get("_links", {}).get("relationship:Allegations_AllegationsType", {}).get("href")
+            if not type_href:
+                type_href = alleg_links.get("relationship:Allegations_AllegationsType", {}).get("href", "")
+            
+            type_props, _ = safe_fetch(type_href, "AllegationType")
+            type_id = extract_id_from_href(type_href)
+            
+            if type_props:
+                tracker.add_source("AllegationType", type_id)
 
-                alleg_props, alleg_links = fetch_entity(alleg_self_href) if alleg_self_href else ({}, {})
+            # 3. Fetch Source Agency
+            agency_href = alleg_links.get("relationship:Allegations_Source", {}).get("href", "")
+            agency_props, _ = safe_fetch(agency_href, "Agency")
+            
+            if agency_props:
+                agency_id = extract_id_from_href(agency_href)
+                tracker.add_source("Agency", agency_id)
 
-                # Fall back to fetched entity's _links if not in embedded item
-                if not alleg_type_href:
-                    alleg_type_href = alleg_links.get(
-                        "relationship:Allegations_AllegationsType", {}
-                    ).get("href", "")
+            # 4. Resolve the Best Description (Addressing the dirty-data fallback smell)
+            allegation_description = (
+                type_props.get("AllegationType_AllegationTypeDescription") or 
+                type_props.get("AllegationType_AllegationTypeShortDesc") or 
+                type_props.get("AllegationType_AllegationTypeDefaults") or 
+                alleg_props.get("Allegations_AllegationType") or 
+                alleg_props.get("Allegations_Comment") or 
+                f"Unknown allegation type {type_id or 'unknown'}"
+            )
 
-                allegation_type_id = (
-                    alleg_type_href.rstrip("/").split("/")[-1] if alleg_type_href else None
-                )
-                alleg_type_props, _ = fetch_entity(alleg_type_href) if alleg_type_href else ({}, {})
+            # 5. Build Semantic Dictionary
+            allegations_list.append({
+                "status": alleg_props.get("Allegations_Status"),
+                "allegation_status": alleg_props.get("Allegations_AllegationStatus"),
+                "date_received": alleg_props.get("Allegations_DateReceived"),
+                "date_reported": alleg_props.get("Allegations_DateReported"),
+                "date_closed": alleg_props.get("Allegations_DateClosed"),
+                "closure_date_reported": alleg_props.get("Allegations_ClosureDateReported"),
+                "close_comment": alleg_props.get("Allegations_AllegationCloseComment"),
+                "comment": alleg_props.get("Allegations_Comment"),
+                "agency_referral_no": alleg_props.get("Allegations_AgencyReferralNumber"),
+                "is_intake": alleg_props.get("Allegations_IsIntakeAllegation"),
+                "disposition_norris_code": alleg_props.get("Allegations_DispositionNorrisCode"),
+                "dta_closure_report": alleg_props.get("Allegations_DTAClosureReport"),
+                "allegation_type": {
+                    "id": type_id,
+                    "description": allegation_description,
+                    "short_desc": type_props.get("AllegationType_AllegationTypeShortDesc"),
+                    "defaults": type_props.get("AllegationType_AllegationTypeDefaults"),
+                },
+                "source_agency": {
+                    "name": agency_props.get("Agency_AgencyName"),
+                    "short_description": agency_props.get("Agency_AgencyShortDescription"),
+                },
+            })
+        except Exception as e:
+            # Catch mapping errors per allegation so one failure doesn't drop the whole list
+            logger.error(f"⚠️ Error mapping individual allegation: {str(e)}")
 
-                agency_props, _ = fetch_entity(
-                    alleg_links.get("relationship:Allegations_Source", {}).get("href", "")
-                ) if alleg_links.get("relationship:Allegations_Source") else ({}, {})
+    return allegations_list
 
-                allegation_description = (
-                    alleg_type_props.get("AllegationType_AllegationTypeDescription")
-                    or alleg_type_props.get("AllegationType_AllegationTypeShortDesc")
-                    or alleg_type_props.get("AllegationType_AllegationTypeDefaults")
-                    or alleg_props.get("Allegations_AllegationType")
-                    or alleg_props.get("Allegations_Comment")
-                    or f"Unknown allegation type {allegation_type_id or 'unknown'}"
-                )
-
-                allegations_list.append({
-                    "status":                  alleg_props.get("Allegations_Status"),
-                    "allegation_status":       alleg_props.get("Allegations_AllegationStatus"),
-                    "date_received":           alleg_props.get("Allegations_DateReceived"),
-                    "date_reported":           alleg_props.get("Allegations_DateReported"),
-                    "date_closed":             alleg_props.get("Allegations_DateClosed"),
-                    "closure_date_reported":   alleg_props.get("Allegations_ClosureDateReported"),
-                    "close_comment":           alleg_props.get("Allegations_AllegationCloseComment"),
-                    "comment":                 alleg_props.get("Allegations_Comment"),
-                    "agency_referral_no":      alleg_props.get("Allegations_AgencyReferralNumber"),
-                    "is_intake":               alleg_props.get("Allegations_IsIntakeAllegation"),
-                    "disposition_norris_code": alleg_props.get("Allegations_DispositionNorrisCode"),
-                    "dta_closure_report":      alleg_props.get("Allegations_DTAClosureReport"),
-                    "allegation_type": {
-                        "id":          allegation_type_id,
-                        "description": allegation_description,
-                        "short_desc":  alleg_type_props.get("AllegationType_AllegationTypeShortDesc"),
-                        "defaults":    alleg_type_props.get("AllegationType_AllegationTypeDefaults"),
-                    },
-                    "source_agency": {
-                        "name":              agency_props.get("Agency_AgencyName"),
-                        "short_description": agency_props.get("Agency_AgencyShortDescription"),
-                    },
-                })
-            except Exception as e:
-                logger.warning(f"⚠️ Failed processing allegation: {str(e)}")
-
-    # 4. Fetch Subjects
+def _parse_subjects(case_links: Dict, tracker: ProvenanceTracker) -> List[Dict]:
+    """
+    Parses all subjects, traversing deeply into details, addresses, and aliases.
+    Records every visited entity into the provenance tracker.
+    """
     logger.info("👤 Fetching subjects...")
     subjects_list = []
+    
+    rel_href = case_links.get("relationship:Workfolder_SubjectsRelationship", {}).get("href")
+    if not rel_href:
+        return subjects_list
 
-    subjects_rel_href = links.get("relationship:Workfolder_SubjectsRelationship", {}).get("href")
-    if subjects_rel_href:
-        subject_items = fetch_relationship_items(
-            subjects_rel_href, "Workfolder_SubjectsRelationship"
-        )
-        logger.info(f"🔍 Found {len(subject_items)} subject(s)")
+    subject_items = get_relationship_items(rel_href, "Workfolder_SubjectsRelationship")
+    logger.info(f"🔍 Found {len(subject_items)} subject(s)")
 
-        for subj_item in subject_items:
-            try:
-                subj_self_href = subj_item.get("_links", {}).get("self", {}).get("href", "")
-                subj_props, subj_links = fetch_entity(subj_self_href) if subj_self_href else ({}, {})
+    for subj_item in subject_items:
+        try:
+            # 1. Base Subject Metadata
+            subj_self_href = subj_item.get("_links", {}).get("self", {}).get("href", "")
+            subj_props, subj_links = safe_fetch(subj_self_href, "Subject")
+            tracker.add_source("Subject", extract_id_from_href(subj_self_href))
 
-                subject_detail_href = subj_links.get("relationship:Subjects_Subject", {}).get("href", "")
-                subject_id = subject_detail_href.rstrip("/").split("/")[-1] if subject_detail_href else None
-                subject_detail_props, subject_detail_links = (
-                    fetch_entity(subject_detail_href) if subject_detail_href else ({}, {})
-                )
+            # 2. Subject Details (The canonical identity record)
+            detail_href = subj_links.get("relationship:Subjects_Subject", {}).get("href", "")
+            detail_props, detail_links = safe_fetch(detail_href, "SubjectDetail")
+            subject_detail_id = extract_id_from_href(detail_href)
+            tracker.add_source("SubjectDetail", subject_detail_id)
 
-                role_props, _ = fetch_entity(
-                    subj_links.get("relationship:Subjects_SubjectRoleRelationship", {}).get("href", "")
-                ) if subj_links.get("relationship:Subjects_SubjectRoleRelationship") else ({}, {})
+            # 3. Subject Role
+            role_href = subj_links.get("relationship:Subjects_SubjectRoleRelationship", {}).get("href", "")
+            role_props, _ = safe_fetch(role_href, "SubjectRole")
+            tracker.add_source("SubjectRole", extract_id_from_href(role_href))
 
-                # Addresses
-                addresses_list = []
-                addr_rel_href = subject_detail_links.get("relationship:Subject_Address", {}).get("href")
-                if addr_rel_href:
-                    address_items = fetch_relationship_items(addr_rel_href, "Subject_Address")
-                    logger.info(f"   📍 Found {len(address_items)} address(es) for subject")
-
-                    for addr_item in address_items:
-                        try:
-                            addr_self = addr_item.get("_links", {}).get("self", {}).get("href", "")
-                            addr_props, addr_links = fetch_entity(addr_self) if addr_self else ({}, {})
-
-                            addr_type_props, _ = fetch_entity(
-                                addr_links.get("relationship:Address_AddressType_Relation", {}).get("href", "")
-                            ) if addr_links.get("relationship:Address_AddressType_Relation") else ({}, {})
-
-                            scz_props, _ = fetch_entity(
-                                addr_links.get("relationship:Address_StateCityZip_Relation", {}).get("href", "")
-                            ) if addr_links.get("relationship:Address_StateCityZip_Relation") else ({}, {})
-
-                            addresses_list.append({
-                                "address":      addr_props.get("Address_Address"),
-                                "apt_suite":    addr_props.get("Address_AptSuite"),
-                                "zipcode":      addr_props.get("Address_Zipcode"),
-                                "address_type": addr_type_props.get("AddressType_Type"),
-                                "city":         scz_props.get("StateCityZip_City"),
-                                "state":        scz_props.get("StateCityZip_State"),
-                                "county":       scz_props.get("StateCityZip_County"),
-                            })
-                        except Exception as e:
-                            logger.warning(f"⚠️ Failed processing address: {str(e)}")
-
-                # Aliases
-                aliases_list = []
-                alias_rel_href = subject_detail_links.get("relationship:Subject_Alias", {}).get("href")
-                if alias_rel_href:
+            # 4. Nested Addresses
+            addresses_list = []
+            addr_rel_href = detail_links.get("relationship:Subject_Address", {}).get("href")
+            if addr_rel_href:
+                address_items = get_relationship_items(addr_rel_href, "Subject_Address")
+                for addr_item in address_items:
                     try:
-                        alias_res = fetch(alias_rel_href)
-                        for alias_item in alias_res.get("_embedded", {}).get("Subject_Alias", []):
-                            alias_val = alias_item.get("Properties", {}).get("Alias")
-                            if alias_val:
-                                aliases_list.append(alias_val)
+                        addr_self = addr_item.get("_links", {}).get("self", {}).get("href", "")
+                        addr_props, addr_links = safe_fetch(addr_self, "Address")
+                        tracker.add_source("Address", extract_id_from_href(addr_self))
+
+                        type_href = addr_links.get("relationship:Address_AddressType_Relation", {}).get("href", "")
+                        type_props, _ = safe_fetch(type_href, "AddressType")
+                        tracker.add_source("AddressType", extract_id_from_href(type_href))
+
+                        scz_href = addr_links.get("relationship:Address_StateCityZip_Relation", {}).get("href", "")
+                        scz_props, _ = safe_fetch(scz_href, "StateCityZip")
+                        tracker.add_source("StateCityZip", extract_id_from_href(scz_href))
+
+                        addresses_list.append({
+                            "address": addr_props.get("Address_Address"),
+                            "apt_suite": addr_props.get("Address_AptSuite"),
+                            "zipcode": addr_props.get("Address_Zipcode"),
+                            "address_type": type_props.get("AddressType_Type"),
+                            "city": scz_props.get("StateCityZip_City"),
+                            "state": scz_props.get("StateCityZip_State"),
+                            "county": scz_props.get("StateCityZip_County"),
+                        })
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed fetching aliases: {str(e)}")
+                        logger.error(f"⚠️ Error mapping individual address: {str(e)}")
 
-                subjects_list.append({
-                    "subject_id":         subject_id,
-                    "subject_type":       subj_props.get("Subjects_SubjectType"),
-                    "is_primary_subject": subj_props.get("Subjects_IsPrimarySubject"),
-                    "role":               role_props.get("RoleName"),
-                    "details": {
-                        "identifier":             subject_detail_props.get("Subject_Identifier"),
-                        "first_name":             subject_detail_props.get("Subject_FirstName"),
-                        "middle_initial":         subject_detail_props.get("Subject_MiddleInitial"),
-                        "last_name":              subject_detail_props.get("Subject_LastName"),
-                        "ssn":                    subject_detail_props.get("Subject_SSN"),
-                        "ein":                    subject_detail_props.get("Subject_EIN"),
-                        "gender":                 subject_detail_props.get("Subject_Gender"),
-                        "dob":                    subject_detail_props.get("Subject_DOB"),
-                        "dod":                    subject_detail_props.get("Subject_DOD"),
-                        "phone_number":           subject_detail_props.get("Subject_PhoneNumber"),
-                        "subject_type":           subject_detail_props.get("Subject_SubjectType"),
-                        "company_name":           subject_detail_props.get("Subject_CompanyName"),
-                        "provider_number":        subject_detail_props.get("Subject_ProviderNumber"),
-                        "pob":                    subject_detail_props.get("Subject_POB"),
-                        "driving_license_number": subject_detail_props.get("Subject_DrivingLicenseNumber"),
-                        "comment":                subject_detail_props.get("Subject_Comment"),
-                        "destination":            subject_detail_props.get("Subject_Destination"),
-                        "date_entered":           subject_detail_props.get("Subject_Date_Entered"),
-                        "aliases":                subject_detail_props.get("Subject_Aliases"),
-                    },
-                    "addresses":    addresses_list,
-                    "alias_records": aliases_list,
-                })
-            except Exception as e:
-                logger.warning(f"⚠️ Failed processing subject: {str(e)}")
+            # 5. Nested Aliases
+            aliases_list = []
+            alias_rel_href = detail_links.get("relationship:Subject_Alias", {}).get("href")
+            if alias_rel_href:
+                alias_items = get_relationship_items(alias_rel_href, "Subject_Alias")
+                for alias_item in alias_items:
+                    val = alias_item.get("Properties", {}).get("Alias")
+                    if val:
+                        aliases_list.append(val)
 
-    # 5. Fetch Financials
+            # Assemble Subject Map
+            subjects_list.append({
+                "subject_id": subject_detail_id,
+                "subject_type": subj_props.get("Subjects_SubjectType"),
+                "is_primary_subject": subj_props.get("Subjects_IsPrimarySubject"),
+                "role": role_props.get("RoleName"),
+                "details": {
+                    "identifier": detail_props.get("Subject_Identifier"),
+                    "first_name": detail_props.get("Subject_FirstName"),
+                    "middle_initial": detail_props.get("Subject_MiddleInitial"),
+                    "last_name": detail_props.get("Subject_LastName"),
+                    "ssn": detail_props.get("Subject_SSN"),
+                    "ein": detail_props.get("Subject_EIN"),
+                    "gender": detail_props.get("Subject_Gender"),
+                    "dob": detail_props.get("Subject_DOB"),
+                    "dod": detail_props.get("Subject_DOD"),
+                    "phone_number": detail_props.get("Subject_PhoneNumber"),
+                    "subject_type": detail_props.get("Subject_SubjectType"),
+                    "company_name": detail_props.get("Subject_CompanyName"),
+                    "provider_number": detail_props.get("Subject_ProviderNumber"),
+                    "pob": detail_props.get("Subject_POB"),
+                    "driving_license_number": detail_props.get("Subject_DrivingLicenseNumber"),
+                    "comment": detail_props.get("Subject_Comment"),
+                    "destination": detail_props.get("Subject_Destination"),
+                    "date_entered": detail_props.get("Subject_Date_Entered"),
+                    "aliases": detail_props.get("Subject_Aliases"), 
+                },
+                "addresses": addresses_list,
+                "alias_records": aliases_list,
+            })
+        except Exception as e:
+            logger.error(f"⚠️ Error mapping individual subject: {str(e)}")
+
+    return subjects_list
+
+
+def _parse_financials(case_links: Dict, tracker: ProvenanceTracker) -> Dict:
+    """
+    Parses linked financial records and aggregates totals.
+    """
     logger.info("💰 Fetching financials...")
     financials_list = []
     total_calculated = 0.0
-    total_ordered    = 0.0
+    total_ordered = 0.0
 
-    financials_rel_href = links.get("relationship:Workfolder_FinancialRelationship", {}).get("href")
-    if financials_rel_href:
-        financial_items = fetch_relationship_items(
-            financials_rel_href, "Workfolder_FinancialRelationship"
+    rel_href = case_links.get("relationship:Workfolder_FinancialRelationship", {}).get("href")
+    if not rel_href:
+        return {"records": [], "total_calculated": 0.0, "total_ordered": 0.0}
+
+    fin_items = get_relationship_items(rel_href, "Workfolder_FinancialRelationship")
+    logger.info(f"🔍 Found {len(fin_items)} financial record(s)")
+
+    for item in fin_items:
+        try:
+            self_href = item.get("_links", {}).get("self", {}).get("href", "")
+            fin_props, fin_links = safe_fetch(self_href, "Financial")
+            tracker.add_source("Financial", extract_id_from_href(self_href))
+
+            type_href = fin_links.get("relationship:Financial_PrimaryFraudTypeRelationShip", {}).get("href", "")
+            type_props, _ = safe_fetch(type_href, "FraudTypeClassification")
+            tracker.add_source("FraudTypeClassification", extract_id_from_href(type_href))
+
+            calc = float(fin_props.get("Financial_Calculated") or 0.0)
+            ordr = float(fin_props.get("Financial_Ordered") or 0.0)
+            total_calculated += calc
+            total_ordered += ordr
+
+            financials_list.append({
+                "calculated": calc,
+                "ordered": ordr,
+                "comment": fin_props.get("Financial_Comment"),
+                "start_date": fin_props.get("Financial_RequestedStartDate"),
+                "end_date": fin_props.get("Financial_RequestedEndDate"),
+                "date": fin_props.get("Financial_Date"),
+                "fraud_type": type_props.get("Classification_Name"),
+            })
+        except Exception as e:
+            logger.error(f"⚠️ Error mapping individual financial record: {str(e)}")
+
+    return {
+        "records": financials_list,
+        "total_calculated": total_calculated,
+        "total_ordered": total_ordered,
+    }
+
+
+def _derive_fraud_types(allegations_list: List[Dict], case_props: Dict) -> List[str]:
+    """
+    Extracts a deduplicated list of fraud types from allegations, 
+    falling back to legacy case properties if no allegations exist.
+    """
+    types = []
+    for alleg in allegations_list:
+        desc = (
+            alleg.get("allegation_type", {}).get("description") or 
+            alleg.get("allegation_type", {}).get("short_desc")
         )
-        logger.info(f"🔍 Found {len(financial_items)} financial record(s)")
+        if desc and desc not in types:
+            types.append(desc)
+            
+    if not types:
+        # Fallback for dirty data / legacy schema
+        fallback = (
+            case_props.get("WorkfolderAllegation") or 
+            case_props.get("WorkFolderAllegation") or 
+            case_props.get("Workfolder_Allegation") or 
+            case_props.get("WorkFolder_Allegation")
+        )
+        if isinstance(fallback, str) and fallback.strip():
+            types.append(fallback.strip())
+            
+    return types
 
-        for fin_item in financial_items:
-            try:
-                fin_self_href = fin_item.get("_links", {}).get("self", {}).get("href", "")
-                fin_props, fin_links = fetch_entity(fin_self_href) if fin_self_href else ({}, {})
 
-                # Fraud type link from financial
-                type_href = fin_links.get("relationship:Financial_PrimaryFraudTypeRelationShip", {}).get("href", "")
-                type_props, _ = fetch_entity(type_href) if type_href else ({}, {})
-                fraud_type = type_props.get("Classification_Name")
+def build_case_header_data(case_id: str) -> Dict[str, Any]:
+    """
+    Main orchestrator for the verify_case_intake tool.
+    Fetches the root Workfolder and delegates deep relationship traversal to parsers.
+    Returns the strict architecture-compliant {result, provenance} envelope.
+    """
+    logger.info(f"🚀 [LIVE] Initiating deep fetch for Case ID: {case_id}")
 
-                calc = float(fin_props.get("Financial_Calculated") or 0.0)
-                ordr = float(fin_props.get("Financial_Ordered") or 0.0)
-                total_calculated += calc
-                total_ordered    += ordr
+    # 1. Initialize System-Wide Provenance Tracker (Principle 8)
+    tracker = ProvenanceTracker("Workfolder", case_id)
 
-                financials_list.append({
-                    "calculated":  calc,
-                    "ordered":     ordr,
-                    "comment":     fin_props.get("Financial_Comment"),
-                    "start_date":  fin_props.get("Financial_RequestedStartDate"),
-                    "end_date":    fin_props.get("Financial_RequestedEndDate"),
-                    "date":        fin_props.get("Financial_Date"),
-                    "fraud_type":  fraud_type,
-                })
-            except Exception as e:
-                logger.warning(f"⚠️ Failed processing financial: {str(e)}")
+    # 2. Fetch Root Workfolder
+    endpoint = AppWorksPaths.Workfolder.item(case_id)
+    logger.info(f"📡 Requesting Workfolder from: {endpoint}")
+    props, links = safe_fetch(endpoint, "Workfolder")
 
-    def _build_fraud_types(allegations_list, case_props):
-        types = []
-        for alleg in allegations_list:
-            desc = (
-                alleg.get("allegation_type", {}).get("description")
-                or alleg.get("allegation_type", {}).get("short_desc")
-            )
-            if desc and desc not in types:
-                types.append(desc)
-        if not types:
-            fallback = (
-                case_props.get("WorkfolderAllegation")
-                or case_props.get("WorkFolderAllegation")
-                or case_props.get("Workfolder_Allegation")
-                or case_props.get("WorkFolder_Allegation")
-            )
-            if isinstance(fallback, str) and fallback.strip():
-                types.append(fallback.strip())
-        return types
+    # Guard clause: If the core case doesn't exist or API is down, fail safely
+    if not props:
+        logger.error(f"❌ Critical Error: Could not fetch root Workfolder for {case_id}")
+        return {
+            "result": {"case_id": case_id, "error": "Case record not found or API unavailable"},
+            "provenance": tracker.get_provenance_block(computed_by="Failed REST retrieval")
+        }
 
-    # 6. Build Clean Result
+    logger.info(f"✅ Successfully retrieved Workfolder for {case_id}")
+
+    # 3. Delegate to Domain Parsers
+    classification = _parse_classification(links, tracker)
+    allegations_list = _parse_allegations(links, tracker)
+    subjects_list = _parse_subjects(links, tracker)
+    financials = _parse_financials(links, tracker)
+
+    # 4. Synthesize Derived Fields
+    fraud_types = _derive_fraud_types(allegations_list, props)
+    subject_ids = [s["subject_id"] for s in subjects_list if s.get("subject_id")]
+    primary_subject_id = next((s["subject_id"] for s in subjects_list if s.get("is_primary_subject")), None)
+
+    # 5. Build Final Semantic Payload
     clean_result = {
         "case_id": props.get("CASEID", case_id),
         "summary": {
-            "complaint_no":     props.get("WorkfolderComplaintNumber"),
-            "description":      props.get("WorkfolderDescription"),
+            "complaint_no": props.get("WorkfolderComplaintNumber"),
+            "description": props.get("WorkfolderDescription"),
             "case_description": props.get("Workfolder_CaseDescription"),
-            "status":           props.get("WorkfolderStatus"),
-            "destination":      props.get("DESTINATION"),
-            "team":             props.get("TEAM_DISPLAY_NAME"),
-            "created":          props.get("CREATION_DATE"),
+            "status": props.get("WorkfolderStatus"),
+            "destination": props.get("DESTINATION"),
+            "team": props.get("TEAM_DISPLAY_NAME"),
+            "created": props.get("CREATION_DATE"),
         },
-        "classification": {
-            "entity_text":   entity_props.get("ENTITY_TEXT"),
-            "entity_code":   entity_props.get("ENTITY_CODE"),
-            "category_text": category_props.get("CATEGORY_TEXT"),
-            "category_code": category_props.get("CATEGORY_CODE"),
-            "request_type":  request_props.get("REQUEST_TYPE"),
-        },
+        "classification": classification,
         "details": {
-            "intake_referral_no":    props.get("WorkfolderIntakeReferralNumber"),
-            "source":                props.get("WorkfolderSource"),
-            "identifier_name":       props.get("IDENTIFIER_NAME"),
+            "intake_referral_no": props.get("WorkfolderIntakeReferralNumber"),
+            "source": props.get("WorkfolderSource"),
+            "identifier_name": props.get("IDENTIFIER_NAME"),
             "identifier_ssn_or_ein": props.get("IDENTIFIER_SSNorEIN"),
-            "date_reported":         props.get("WorkfolderDateReported"),
-            "date_reported_age":     props.get("WorkfolderDateReportedAge"),
-            "date_received":         props.get("WorkfolderDateReceived"),
-            "date_received_age":     props.get("WorkfolderDateReceivedAge"),
-            "date_entered_age":      props.get("WorkfolderDateEnteredAge"),
+            "date_reported": props.get("WorkfolderDateReported"),
+            "date_reported_age": props.get("WorkfolderDateReportedAge"),
+            "date_received": props.get("WorkfolderDateReceived"),
+            "date_received_age": props.get("WorkfolderDateReceivedAge"),
+            "date_entered_age": props.get("WorkfolderDateEnteredAge"),
             "workfolder_allegation": props.get("WorkFolderAllegation"),
-            "co_subject_name":       props.get("WorkfolderCoSubjectName"),
-            "subject_city":          props.get("WorkfolderSubjectCity"),
+            "co_subject_name": props.get("WorkfolderCoSubjectName"),
+            "subject_city": props.get("WorkfolderSubjectCity"),
         },
         "allegations": allegations_list,
-        "subjects":    subjects_list,
-        "subject_ids": [s["subject_id"] for s in subjects_list if s.get("subject_id")],
-        "financials": {
-            "records":          financials_list,
-            "total_calculated": total_calculated,
-            "total_ordered":    total_ordered,
-        },
-        "subject_primary_id": next((s["subject_id"] for s in subjects_list if s.get("is_primary_subject")), None),
-        "fraud_types": _build_fraud_types(allegations_list, props),
+        "subjects": subjects_list,
+        "subject_ids": subject_ids,
+        "subject_primary_id": primary_subject_id,
+        "financials": financials,
+        "fraud_types": fraud_types,
     }
 
     logger.info(
         f"✅ clean_result built — {len(allegations_list)} allegation(s), "
         f"{len(subjects_list)} subject(s)"
     )
-    logger.info(
-        f"📦 Payload size: {len(json.dumps(clean_result))} bytes"
-    )
 
+    # 6. Return Architecture Envelope
     return {
         "result": clean_result,
-        "provenance": {
-            "sources":      [f"AppWorks case record {case_id}"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by":  "AppWorks REST retrieval",
-        },
+        "provenance": tracker.get_provenance_block()
     }

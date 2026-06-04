@@ -282,22 +282,34 @@ def _extract_json_object_from_text(text: str) -> Optional[dict]:
         break
     return None
 
-
 def _format_provenance_lines(provenance_trail: List[dict]) -> str:
-    """Render provenance trail as readable markdown lines."""
+    """Render provenance trail as a clean, readable markdown list."""
     if not provenance_trail:
         return "- No provenance entries available."
+    
     lines = []
     for p in provenance_trail:
-        # tool = p.get("tool", "unknown_tool")
         computed_by = p.get("computed_by", "Not available")
         retrieved_at = p.get("retrieved_at", "Not available")
-        sources = _safe_join(p.get("sources", []), "; ")
-        lines.append(
-            f"- **{computed_by}** on `{retrieved_at}` from source(s): {sources}."
-        )
+        sources = p.get("sources", [])
+        
+        # Clean up the timestamp for display
+        display_time = str(retrieved_at).replace("T", " ")[:19] + " UTC" if "T" in str(retrieved_at) else retrieved_at
+        
+        lines.append(f"**Sources Retrieved ({display_time}):**")
+        lines.append("") # ⬅️ CRITICAL: Blank line required before Markdown lists
+        
+        if not sources:
+            lines.append("- *No specific records cited.*")
+        else:
+            for source in sources:
+                lines.append(f"- {source}")
+        
+        lines.append("") # ⬅️ CRITICAL: Blank line required after Markdown lists
+        lines.append(f"*(Method: {computed_by})*")
+        lines.append("") # Blank line to separate multiple tool calls cleanly
+        
     return "\n".join(lines)
-
 
 def _merge_provenance(existing: List[dict], new_entries: List[dict]) -> List[dict]:
     """Merge provenance lists while preserving order and removing duplicates."""
