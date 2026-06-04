@@ -23,8 +23,6 @@ def map_workfolder_core(wf_props: Dict[str, Any]) -> Dict[str, Any]:
         "date_received":                     wf_props.get("WorkfolderDateReceived"),
         "date_reported":                     wf_props.get("WorkfolderDateReported"),
         "allegation":                        wf_props.get("WorkFolderAllegation"),
-        "team":                              wf_props.get("TEAM_DISPLAY_NAME"),
-        "destination":                       wf_props.get("DESTINATION"),
         "workfolder_allegations_description": wf_props.get("WorkfolderAllegationsDescription"),
         "workfolder_reviewer_comments":       wf_props.get("WorkfolderReviewerComments"),
         "workfolder_analyst_comments":        wf_props.get("WorkfolderAnalystComments"),
@@ -114,20 +112,12 @@ def map_allegations(rel_href: str, tracker: ProvenanceTracker) -> List[Dict]:
                 "closure_date_reported":   alleg_props.get("Allegations_ClosureDateReported"),
                 "close_comment":           alleg_props.get("Allegations_AllegationCloseComment"),
                 "comment":                 alleg_props.get("Allegations_Comment"),
-                "agency_referral_no":      alleg_props.get("Allegations_AgencyReferralNumber"),
-                "is_intake":               alleg_props.get("Allegations_IsIntakeAllegation"),
-                "disposition_norris_code": alleg_props.get("Allegations_DispositionNorrisCode"),
-                "dta_closure_report":      alleg_props.get("Allegations_DTAClosureReport"),
                 "allegation_type": {
-                    "id":          extract_id_from_href(alleg_type_href),
                     "description": allegation_description,
                     "short_desc":  type_props.get("AllegationType_AllegationTypeShortDesc"),
                     "defaults":    type_props.get("AllegationType_AllegationTypeDefaults"),
                 },
-                "source_agency": {
-                    "name":              agency_props.get("Agency_AgencyName"),
-                    "short_description": agency_props.get("Agency_AgencyShortDescription"),
-                },
+                
             })
         except Exception as exc:
             logger.error(f"⚠️ Error mapping individual allegation: {exc}")

@@ -102,10 +102,8 @@ class CaseClassification(BaseModel):
 
 
 class CaseDetails(BaseModel):
-    intake_referral_no:     Optional[str] = None
     source:                 Optional[str] = None
     identifier_name:        Optional[str] = None
-    identifier_ssn_or_ein:  Optional[str] = None
     date_reported:          Optional[str] = None
     date_reported_age:      Optional[int] = None
     date_received:          Optional[str] = None
@@ -148,12 +146,7 @@ class AllegationHeader(BaseModel):
     closure_date_reported:   Optional[str] = None
     close_comment:           Optional[str] = None
     comment:                 Optional[str] = None
-    agency_referral_no:      Optional[str] = None
-    is_intake:               Optional[bool] = None
-    disposition_norris_code: Optional[str] = None
-    dta_closure_report:      Optional[bool] = None
     allegation_type:         AllegationType
-    source_agency:           SourceAgency
     model_config = {"extra": "allow"}
 
 class SubjectDetails(BaseModel):
@@ -201,7 +194,7 @@ class FinancialsBlock(BaseModel):
     rather than silently passed through as untyped extras (Issue #11).
     extra='allow' preserved so future AppWorks financial fields are not stripped.
     """
-    records:         Optional[list] = None
+    #records:         Optional[list] = None
     total_calculated: Optional[float] = None
     total_ordered:    Optional[float] = None
     model_config = {"extra": "allow"}
@@ -211,7 +204,6 @@ class CaseHeader(BaseModel):
     """Matches nested output of f1_intake_services.py"""
     case_id:            str
     summary:            CaseSummary
-    classification:     CaseClassification
     details:            CaseDetails
     allegations:        list[AllegationHeader]
     subjects:           list[SubjectHeader]

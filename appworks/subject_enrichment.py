@@ -72,8 +72,8 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
                 "is_primary_subject": is_primary,
                 "mapping_title":      title_text,
                 **core_props,
-                "commentary":         commentary,
-                "allegations":        allegations,
+                #"commentary":         commentary, ## [HP] Depending on needs, we can include the full commentary or just the count in the final payload, No need to feed this to LLM except the amount and type of commentary
+                #"allegations":        allegations,## [HP] Depending on needs, we can include the full commentary or just the count in the final payload, No need to feed this to LLM except the amount and type of commentary
             })
         except Exception as exc:
             logger.warning(f"⚠️ Failed processing mapping item: {exc}")

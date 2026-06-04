@@ -9,40 +9,6 @@ from appworks.appworks_paths import AppWorksPaths
 
 logger = logging.getLogger(__name__)
 
-
-def _parse_classification(case_links: Dict, tracker: ProvenanceTracker) -> Dict:
-    """
-    Parses Entity, Category, and RequestType metadata linked to the case.
-    """
-    logger.info("🔗 Fetching classification metadata...")
-    
-    def fetch_linked_prop(link_key: str, entity_name: str) -> Dict:
-        href = case_links.get(link_key, {}).get("href")
-        if not href:
-            return {}
-        
-        props, _ = safe_fetch(href, entity_name)
-        
-        # Register provenance if fetch was successful
-        if props:
-            entity_id = extract_id_from_href(href)
-            tracker.add_source(entity_name, entity_id)
-            
-        return props
-
-    entity_props = fetch_linked_prop("SolusoftACMConfig-relationship:EntityType", "EntityType")
-    category_props = fetch_linked_prop("SolusoftACMConfig-relationship:Category", "Category")
-    request_props = fetch_linked_prop("SolusoftACMConfig-relationship:RequestType", "RequestType")
-
-    return {
-        "entity_text": entity_props.get("ENTITY_TEXT"),
-        "entity_code": entity_props.get("ENTITY_CODE"),
-        "category_text": category_props.get("CATEGORY_TEXT"),
-        "category_code": category_props.get("CATEGORY_CODE"),
-        "request_type": request_props.get("REQUEST_TYPE"),
-    }
-
-
 def _parse_subjects(case_links: Dict, tracker: ProvenanceTracker) -> List[Dict]:
     """
     Parses all subjects, traversing deeply into details, addresses, and aliases.
@@ -128,17 +94,13 @@ def _parse_subjects(case_links: Dict, tracker: ProvenanceTracker) -> List[Dict]:
                     "first_name": detail_props.get("Subject_FirstName"),
                     "middle_initial": detail_props.get("Subject_MiddleInitial"),
                     "last_name": detail_props.get("Subject_LastName"),
-                    "ssn": detail_props.get("Subject_SSN"),
-                    "ein": detail_props.get("Subject_EIN"),
                     "gender": detail_props.get("Subject_Gender"),
                     "dob": detail_props.get("Subject_DOB"),
                     "dod": detail_props.get("Subject_DOD"),
-                    "phone_number": detail_props.get("Subject_PhoneNumber"),
                     "subject_type": detail_props.get("Subject_SubjectType"),
                     "company_name": detail_props.get("Subject_CompanyName"),
                     "provider_number": detail_props.get("Subject_ProviderNumber"),
                     "pob": detail_props.get("Subject_POB"),
-                    "driving_license_number": detail_props.get("Subject_DrivingLicenseNumber"),
                     "comment": detail_props.get("Subject_Comment"),
                     "destination": detail_props.get("Subject_Destination"),
                     "date_entered": detail_props.get("Subject_Date_Entered"),
@@ -197,7 +159,7 @@ def _parse_financials(case_links: Dict, tracker: ProvenanceTracker) -> Dict:
             logger.error(f"⚠️ Error mapping individual financial record: {str(e)}")
 
     return {
-        "records": financials_list,
+        #"records": financials_list, ## [HP]Depending on needs, we can include the full list or just the totals in the final payload, No need to feed this to LLM except the amoun
         "total_calculated": total_calculated,
         "total_ordered": total_ordered,
     }
@@ -257,8 +219,7 @@ def build_case_header_data(case_id: str) -> Dict[str, Any]:
 
     logger.info(f"✅ Successfully retrieved Workfolder for {case_id}")
 
-    # 3. Delegate to Domain Parsers
-    classification = _parse_classification(links, tracker)
+    
     # Safely drill down to the actual string URL
     allegations_href = links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
 
@@ -279,16 +240,11 @@ def build_case_header_data(case_id: str) -> Dict[str, Any]:
             "description": props.get("WorkfolderDescription"),
             "case_description": props.get("Workfolder_CaseDescription"),
             "status": props.get("WorkfolderStatus"),
-            "destination": props.get("DESTINATION"),
-            "team": props.get("TEAM_DISPLAY_NAME"),
             "created": props.get("CREATION_DATE"),
         },
-        "classification": classification,
         "details": {
-            "intake_referral_no": props.get("WorkfolderIntakeReferralNumber"),
             "source": props.get("WorkfolderSource"),
             "identifier_name": props.get("IDENTIFIER_NAME"),
-            "identifier_ssn_or_ein": props.get("IDENTIFIER_SSNorEIN"),
             "date_reported": props.get("WorkfolderDateReported"),
             "date_reported_age": props.get("WorkfolderDateReportedAge"),
             "date_received": props.get("WorkfolderDateReceived"),

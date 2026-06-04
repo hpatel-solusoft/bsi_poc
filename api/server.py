@@ -265,22 +265,6 @@ def _safe_join(items: List[str], sep: str = ", ") -> str:
     return sep.join(clean) if clean else "Not available"
 
 
-def _extract_json_object_from_text(text: str) -> Optional[dict]:
-    """Extract the first valid JSON object from an assistant text response."""
-    if not isinstance(text, str) or "{" not in text:
-        return None
-    decoder = json.JSONDecoder()
-    start = text.find("{")
-    while start != -1:
-        try:
-            obj, _ = decoder.raw_decode(text[start:])
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            start = text.find("{", start + 1)
-            continue
-        break
-    return None
 
 def _format_provenance_lines(provenance_trail: List[dict]) -> str:
     """Render provenance trail as a clean markdown list, silently skipping empty blocks."""
@@ -836,74 +820,10 @@ def _format_recommended_actions(case_data: dict, plan_data: dict) -> str:
         action_bits.append("Next plan actions: " + "; ".join(step.get("action", "") for step in steps[:3] if step.get("action")))
     return " ".join(action_bits) or "No recommended actions recorded in the verified investigation context."
 
-
-def _enrich_final_report_from_context(
-    sections: dict,
-    case_data: dict,
-    plan_data: dict,
-    analyst_decision: Optional[dict],
-) -> dict:
-    final_report = sections.get("final_report")
-    if not isinstance(final_report, dict):
-        return sections
-
-    report_sections = final_report.setdefault("sections", {})
-    subject_text = _format_subjects_from_context(case_data)
-    if subject_text:
-        report_sections["subject_history"] = subject_text
-    if case_data.get("risk_assessment"):
-        report_sections["risk_assessment"] = _format_risk_from_context(case_data)
-    report_sections["investigation_plan_summary"] = {
-        "plan_id": plan_data.get("plan_id"),
-        "risk_tier": plan_data.get("risk_tier"),
-        "step_count": len(plan_data.get("investigation_steps", [])),
-        "escalation_required": plan_data.get("escalation_required", False),
-        "mandatory_evidence_count": len([
-            item for item in plan_data.get("evidence_checklist", [])
-            if item.get("mandatory")
-        ]),
-    }
-    report_sections["analyst_decision"] = analyst_decision or {}
-    report_sections["recommended_actions"] = _format_recommended_actions(case_data, plan_data)
-    return {"final_report": final_report}
-
-
 def _get_runner():
     from agent_service.agent_runner import BSIAgentRunner
     return BSIAgentRunner(MANIFEST_PATH)
 
-
-# -----------------------------------------------------------------------
-# CS-4 RE-HYDRATION CONTRACT (v6)
-# ai_summary is REQUIRED on every /copilot, /plan,  request.
-# Server uses CS-4 if warm. Falls back to this field if CS-4 is cold
-# (restart / TTL expiry). Frontend NEVER omits ai_summary to optimise
-# payload size — the server decides which source to use, not the client.
-#
-# ai_summary MUST include both "investigation" AND "provenance_trail"
-# from the original /investigate response. Omitting provenance_trail
-# silently breaks Copilot source citations on session recovery.
-# -----------------------------------------------------------------------
-
-
-def _rehydrate_case_store(case_id: str, ai_summary: dict) -> None:
-    """Re-populate CS-4 from request body on session recovery (v6)."""
-    sections = {**ai_summary.get("investigation", {})}
-    
-    # Also pull top-level on-demand sections (persistence rule)
-    for key in ["similar_cases", "risk_rules", "risk_assessment", "investigation_plan"]:
-        if key in ai_summary:
-            sections[key] = ai_summary[key]
-
-    CASE_STORE[case_id] = {
-        **sections,
-        "provenance_trail": ai_summary.get("provenance_trail", []),
-    }
-    if not ai_summary.get("provenance_trail"):
-        logger.warning(
-            f"CS-4 re-hydrated for {case_id} but provenance_trail is missing "
-            f"— Copilot source citations will be unavailable for this session."
-        )
 
 def _validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
     """Validate required v6 ai_summary payload shape for ON-DEMAND requests."""
@@ -924,23 +844,6 @@ def _validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
             status_code=400,
             detail="ai_summary.provenance_trail must be an array when provided.",
         )
-
-
-def _normalize_plan_payload(raw_plan: Optional[Dict[str, Any]], case_data: dict) -> Optional[Dict[str, Any]]:
-    """Accept multiple plan payload shapes and normalize to investigation_plan dict."""
-    plan_data = raw_plan or case_data.get("investigation_plan")
-    if not isinstance(plan_data, dict):
-        return None
-    if "investigation_plan" in plan_data and isinstance(plan_data["investigation_plan"], dict):
-        return plan_data["investigation_plan"]
-    if "investigation" in plan_data and isinstance(plan_data["investigation"], dict):
-        nested = plan_data["investigation"].get("investigation_plan")
-        return nested if isinstance(nested, dict) else None
-    # already a plain plan shape
-    if "plan_id" in plan_data or "investigation_steps" in plan_data:
-        return plan_data
-    return None
-
 
 def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> dict:
     """
@@ -1183,7 +1086,6 @@ def similar_cases(req: SimilarCasesRequest):
         
         # Carry over other sections from store
         investigation_plan = investigation_data.pop("investigation_plan", None)
-        risk_rules = investigation_data.pop("risk_rules", None)
         risk_assessment = investigation_data.pop("risk_assessment", None)
 
         ai_summary = {
@@ -1191,8 +1093,6 @@ def similar_cases(req: SimilarCasesRequest):
         }
         if similar_cases_data is not None: ai_summary["similar_cases"] = similar_cases_data
         
-        if risk_rules is not None:
-            ai_summary["risk_rules"] = risk_rules
         if risk_assessment is not None:
             ai_summary["risk_assessment"] = risk_assessment
         ai_summary["provenance_trail"] = merged_provenance
@@ -1209,7 +1109,7 @@ def similar_cases(req: SimilarCasesRequest):
             merged_provenance,
         )
         logger.info(f"SIMILAR CASES NARRATIVE LENGTH: {len(summary_text)}") 
-        logger.info(f"SIMILAR CASES NARRATIVE TAIL: {summary_text[-500:]}")
+        #logger.info(f"SIMILAR CASES NARRATIVE TAIL: {summary_text[-500:]}")
         return {
             "case_id":    req.case_id,
             "status":     "completed",
@@ -1268,7 +1168,7 @@ def risk_assessment(req: PlanRequest):
         )
 
         sections = _extract_tool_results(messages)
-        risk_rules = sections.get("risk_rules", {})
+        
         risk_assessment = sections.get("risk_assessment", {})
         if not isinstance(risk_assessment, dict) or "risk_score" not in risk_assessment:
             called_tools = [
@@ -1311,7 +1211,6 @@ def risk_assessment(req: PlanRequest):
         else:
             risk_assessment = {"recommendations": ""}
         risk_section = {
-            "risk_rules":      risk_rules,
             "risk_assessment": risk_assessment
         }
 
@@ -1331,8 +1230,7 @@ def risk_assessment(req: PlanRequest):
         investigation_data = {**case_data}
         investigation_data.pop("provenance_trail", None)
         investigation_data.pop("risk_assessment", None) # Dedup
-        investigation_data.pop("risk_rules", None)      # Dedup
-        
+               
         # Carry over other sections from store
         similar_cases = investigation_data.pop("similar_cases", None)
         investigation_plan = investigation_data.pop("investigation_plan", None)
@@ -1343,7 +1241,6 @@ def risk_assessment(req: PlanRequest):
         if similar_cases is not None: ai_summary["similar_cases"] = similar_cases
         
         ai_summary.update({
-            "risk_rules":      risk_rules,
             "risk_assessment": risk_assessment,
             "provenance_trail": merged_provenance,
         })
