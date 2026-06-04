@@ -15,7 +15,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple, Dict, List
-
+from appworks.appworks_utils import extract_workfolder_id_from_allegation
 from appworks.appworks_paths import AppWorksPaths
 from semantic_layer.entity_contracts import RiskRuleDef, TriggeredRule
 
@@ -140,22 +140,6 @@ def _fetch_child_rules_breakpoints(item_id: str, dimension_key: str, tracker: Pr
 
     return thresholds
 
-def _workfolder_id_from_allegation(alleg_item: Dict) -> str:
-    """Helper for Similar Case Volume extraction."""
-    props = alleg_item.get("Properties", {})
-    links = alleg_item.get("_links", {})
-    for key in ("Allegations_Workfolder$Identity", "Allegations_Workfolder", "Workfolder$Identity", "Workfolder"):
-        raw = props.get(key)
-        if isinstance(raw, dict):
-            raw_id = raw.get("Id") or raw.get("id")
-            if raw_id: return str(raw_id).strip()
-        elif raw: return str(raw).strip()
-        
-    for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
-        href = links.get(key, {}).get("href", "")
-        if href: return extract_id_from_href(href)
-    return ""
-
 def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTracker) -> int:
     """Counts distinct workfolders with matching allegation types."""
     total = 0
@@ -184,7 +168,7 @@ def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTr
                 matched = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
                 
                 for alleg in matched:
-                    wf_id = _workfolder_id_from_allegation(alleg)
+                    wf_id = extract_workfolder_id_from_allegation(alleg)
                     if not wf_id or wf_id == str(case_id) or wf_id in seen: continue
                     seen.add(wf_id)
                     tracker.add_source("Workfolder", wf_id) # Track the discovered historical case

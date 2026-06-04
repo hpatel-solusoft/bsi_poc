@@ -4,7 +4,7 @@ from typing import Dict, List, Any
 # Assuming these are imported from the new foundation files
 from appworks.appworks_utils import safe_fetch, extract_id_from_href, get_relationship_items
 from appworks.provenance import ProvenanceTracker
-from appworks.appworks_auth import fetch
+from appworks.entity_mappers import map_allegations
 from appworks.appworks_paths import AppWorksPaths
 
 logger = logging.getLogger(__name__)
@@ -42,89 +42,6 @@ def _parse_classification(case_links: Dict, tracker: ProvenanceTracker) -> Dict:
         "request_type": request_props.get("REQUEST_TYPE"),
     }
 
-def _parse_allegations(case_links: Dict, tracker: ProvenanceTracker) -> List[Dict]:
-    """
-    Parses all allegations and their associated types/agencies linked to the case.
-    """
-    logger.info("📋 Fetching allegations...")
-    allegations_list = []
-    
-    rel_href = case_links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
-    if not rel_href:
-        return allegations_list
-
-    allegation_items = get_relationship_items(rel_href, "Workfolder_AllegationsRelationship")
-    logger.info(f"🔍 Found {len(allegation_items)} allegation(s)")
-
-    for item in allegation_items:
-        try:
-            # 1. Fetch Allegation Base Record
-            self_href = item.get("_links", {}).get("self", {}).get("href", "")
-            alleg_props, alleg_links = safe_fetch(self_href, "Allegation")
-            
-            if alleg_props:
-                alleg_id = extract_id_from_href(self_href)
-                tracker.add_source("Allegation", alleg_id)
-
-            # 2. Fetch Allegation Type Metadata
-            type_href = item.get("_links", {}).get("relationship:Allegations_AllegationsType", {}).get("href")
-            if not type_href:
-                type_href = alleg_links.get("relationship:Allegations_AllegationsType", {}).get("href", "")
-            
-            type_props, _ = safe_fetch(type_href, "AllegationType")
-            type_id = extract_id_from_href(type_href)
-            
-            if type_props:
-                tracker.add_source("AllegationType", type_id)
-
-            # 3. Fetch Source Agency
-            agency_href = alleg_links.get("relationship:Allegations_Source", {}).get("href", "")
-            agency_props, _ = safe_fetch(agency_href, "Agency")
-            
-            if agency_props:
-                agency_id = extract_id_from_href(agency_href)
-                tracker.add_source("Agency", agency_id)
-
-            # 4. Resolve the Best Description (Addressing the dirty-data fallback smell)
-            allegation_description = (
-                type_props.get("AllegationType_AllegationTypeDescription") or 
-                type_props.get("AllegationType_AllegationTypeShortDesc") or 
-                type_props.get("AllegationType_AllegationTypeDefaults") or 
-                alleg_props.get("Allegations_AllegationType") or 
-                alleg_props.get("Allegations_Comment") or 
-                f"Unknown allegation type {type_id or 'unknown'}"
-            )
-
-            # 5. Build Semantic Dictionary
-            allegations_list.append({
-                "status": alleg_props.get("Allegations_Status"),
-                "allegation_status": alleg_props.get("Allegations_AllegationStatus"),
-                "date_received": alleg_props.get("Allegations_DateReceived"),
-                "date_reported": alleg_props.get("Allegations_DateReported"),
-                "date_closed": alleg_props.get("Allegations_DateClosed"),
-                "closure_date_reported": alleg_props.get("Allegations_ClosureDateReported"),
-                "close_comment": alleg_props.get("Allegations_AllegationCloseComment"),
-                "comment": alleg_props.get("Allegations_Comment"),
-                "agency_referral_no": alleg_props.get("Allegations_AgencyReferralNumber"),
-                "is_intake": alleg_props.get("Allegations_IsIntakeAllegation"),
-                "disposition_norris_code": alleg_props.get("Allegations_DispositionNorrisCode"),
-                "dta_closure_report": alleg_props.get("Allegations_DTAClosureReport"),
-                "allegation_type": {
-                    "id": type_id,
-                    "description": allegation_description,
-                    "short_desc": type_props.get("AllegationType_AllegationTypeShortDesc"),
-                    "defaults": type_props.get("AllegationType_AllegationTypeDefaults"),
-                },
-                "source_agency": {
-                    "name": agency_props.get("Agency_AgencyName"),
-                    "short_description": agency_props.get("Agency_AgencyShortDescription"),
-                },
-            })
-        except Exception as e:
-            # Catch mapping errors per allegation so one failure doesn't drop the whole list
-            logger.error(f"⚠️ Error mapping individual allegation: {str(e)}")
-
-    return allegations_list
 
 def _parse_subjects(case_links: Dict, tracker: ProvenanceTracker) -> List[Dict]:
     """
@@ -342,7 +259,10 @@ def build_case_header_data(case_id: str) -> Dict[str, Any]:
 
     # 3. Delegate to Domain Parsers
     classification = _parse_classification(links, tracker)
-    allegations_list = _parse_allegations(links, tracker)
+    # Safely drill down to the actual string URL
+    allegations_href = links.get("relationship:Workfolder_AllegationsRelationship", {}).get("href")
+
+    allegations_list = map_allegations(allegations_href, tracker)
     subjects_list = _parse_subjects(links, tracker)
     financials = _parse_financials(links, tracker)
 

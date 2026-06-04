@@ -13,10 +13,15 @@ SIMILAR_CASES_FALLBACK_RAW    = True
 
 # Entities that should be surfaced in the UI Provenance citations.
 # Ignores noisy lookup tables like AddressType, StateCityZip, etc.
-PRIMARY_BUSINESS_ENTITIES = frozenset([
+ALLOWED_ENTITIES = frozenset([
     "Workfolder",
+    "Subject",
     "SubjectDetail",
     "Allegation",
     "Financial",
-    "Agency"
+    "Agency",
+    "FraudRiskRule",
+    "Subject_SubjectWorkfolderMapping",
+    "AllegationType_ManageAllegationType",
+    "SystemMemory"
 ])

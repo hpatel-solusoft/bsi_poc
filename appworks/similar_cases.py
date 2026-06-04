@@ -6,7 +6,7 @@
 import logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-
+from appworks.appworks_utils import parse_aw_date, extract_workfolder_id_from_allegation
 import config.settings as settings
 from appworks.appworks_paths import AppWorksPaths
 
@@ -48,61 +48,6 @@ def _normalise_to_type_dicts(fraud_types: list) -> list:
                 result.append((type_id, desc))
     return result
 
-
-def _workfolder_id_from_allegation_item(alleg_item: dict) -> str:
-    """Extract parent workfolder ID from Allegations list row."""
-    props = alleg_item.get("Properties", {})
-    links = alleg_item.get("_links", {})
-    for key in (
-        "Allegations_Workfolder$Identity",
-        "Allegations_Workfolder",
-        "Workfolder$Identity",
-        "Workfolder",
-    ):
-        raw = props.get(key)
-        if isinstance(raw, dict):
-            raw_id = raw.get("Id") or raw.get("id")
-            if raw_id:
-                return str(raw_id).strip()
-        elif raw:
-            return str(raw).strip()
-            
-    for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
-        href = links.get(key, {}).get("href", "")
-        if href:
-            return extract_id_from_href(href)
-
-    item_href = links.get("item", {}).get("href", "") or links.get("self", {}).get("href", "")
-    if item_href:
-        props_full, links_full = safe_fetch(item_href, "Allegation")
-        for key in ("Allegations_Workfolder$Identity", "Workfolder$Identity", "Allegations_Workfolder", "Workfolder"):
-            raw = props_full.get(key)
-            if isinstance(raw, dict):
-                raw_id = raw.get("Id") or raw.get("id")
-                if raw_id: return str(raw_id).strip()
-            elif raw:
-                return str(raw).strip()
-        for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
-            h = links_full.get(key, {}).get("href", "")
-            if h: return extract_id_from_href(h)
-            
-    return ""
-
-
-def _parse_aw_date(raw: str):
-    """Parse AppWorks date safely and ALWAYS return timezone-aware UTC datetime."""
-    if not raw: return None
-    s = str(raw).strip()
-    if s.endswith("Z"): s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
 def search_similar_cases(
     case_id: str,
     fraud_types: list,
@@ -122,7 +67,7 @@ def search_similar_cases(
     candidates = []
 
     def _fetch_wf(row):
-        wid = _workfolder_id_from_allegation_item(row)
+        wid = extract_workfolder_id_from_allegation(row)
         if not wid or str(wid) == str(case_id): 
             return None
             
@@ -171,7 +116,7 @@ def search_similar_cases(
                 "date_received": date_received
             })
 
-        type_candidates.sort(key=lambda x: _parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        type_candidates.sort(key=lambda x: parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
         for cand in type_candidates[:max_per_type]:
             wf_props = cand["wf_props"]
@@ -190,7 +135,7 @@ def search_similar_cases(
             })
 
     candidates.sort(
-        key=lambda x: _parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
+        key=lambda x: parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
         reverse=True
     )
     

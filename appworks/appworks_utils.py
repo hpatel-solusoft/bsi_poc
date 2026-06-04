@@ -8,6 +8,7 @@ Handles strict error boundaries to prevent silent failures and LLM hallucination
 import logging
 from typing import Dict, List, Tuple, Optional
 from appworks.appworks_auth import fetch
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +90,6 @@ def get_relationship_items(rel_href: str, embedded_key: str) -> List[Dict]:
         return []
     
 
-from datetime import datetime, timezone
-
 def parse_aw_date(raw: str):
     """Parse AppWorks date safely and ALWAYS return timezone-aware UTC datetime."""
     if not raw: return None
@@ -121,7 +120,7 @@ def extract_workfolder_id_from_allegation(alleg_item: dict) -> str:
     # 2. Try relationship links
     for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
         href = links.get(key, {}).get("href", "")
-        if href: return extract_id_from_href(href)
+        if href: return extract_id_from_href(href) or ""
 
     # 3. Fallback: Fetch the actual item if properties were missing from list view
     item_href = links.get("item", {}).get("href", "") or links.get("self", {}).get("href", "")
@@ -135,6 +134,6 @@ def extract_workfolder_id_from_allegation(alleg_item: dict) -> str:
             elif raw: return str(raw).strip()
         for key in ("relationship:Allegations_Workfolder", "relationship:Workfolder"):
             h = links_full.get(key, {}).get("href", "")
-            if h: return extract_id_from_href(h)
+            if h: return extract_id_from_href(h) or ""
             
     return ""
