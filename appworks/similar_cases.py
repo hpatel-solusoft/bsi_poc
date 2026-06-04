@@ -308,9 +308,9 @@ def get_allegation_types(**kwargs) -> dict:
         },
 
         "provenance": {
-            "sources":      [AppWorksPaths.Allegations.allegation_type_manage()],
+            "sources":      ["AppWorks Allegation Type metadata"],
             "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by":  "get_allegation_types",
+            "computed_by":  "AppWorks REST API",
         }
     }
     logger.info("Allegation types fetch complete.")

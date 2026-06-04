@@ -1194,7 +1194,7 @@ def similar_cases(req: SimilarCasesRequest):
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /risk_assessment
             "details": {
-                "agent_summary": _render_markdown_html(agent_summary),
+                "agent_summary": _render_markdown_html_with_sources(agent_summary,merged_provenance),
             },
         }
     except HTTPException:
