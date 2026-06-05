@@ -53,7 +53,7 @@ def get_investigation_plan(fraud_types: List[str], risk_tier: str,  **kwargs) ->
     tracker = ProvenanceTracker("SystemMemory", "ai_summary")
     
     if ai_summary:
-        tracker.add_source("SystemMemory", "Verified Investigation Context (CS-4)")
+        tracker.add_source("SystemMemory", "Verified Case Context")
     else:
         tracker.add_source("SystemMemory", "Base Context Payload")
 
