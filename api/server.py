@@ -1147,7 +1147,7 @@ def risk_assessment(req: PlanRequest):
         risk_tools = [
             tool
             for tool in runner.on_demand_tools
-            if tool["function"]["name"] in {"get_risk_rules", "calculate_risk_metrics"}
+            if tool["function"]["name"] in {"calculate_risk_metrics"}
         ]
 
         # --- EXPLICIT DEPENDENCY INJECTION ---

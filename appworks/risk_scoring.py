@@ -414,10 +414,33 @@ def _score_rule(rule: RiskRuleDef, context: Dict) -> TriggeredRule:
 
 def get_risk_rules(**kwargs) -> Dict:
     """TOOL 1: Fetches ALL active BSI fraud detection rules from AppWorks."""
-    _RULES_LIST_ENDPOINT = AppWorksPaths.FraudRules.risk_rules_all()
-    logger.info(f"TOOL CALL: get_risk_rules -> Fetching from {_RULES_LIST_ENDPOINT}")
     
+    logger.info(f"TOOL CALL: get_risk_rules -> Fetching from AppWorks...")
+    
+
     tracker = ProvenanceTracker("Catalog", "FraudRiskRules")
+    rules_out = []
+    
+    try:
+        rules_out = _fetch_risk_rules(tracker=tracker)
+
+    except Exception as e:
+        logger.error(f"fetch_risk_rules failed: {e}")
+
+    logger.info(f"TOOL CALL: get_risk_rules -> Returning {len(rules_out)} active rules to LLM.")
+    return {
+        "result": {"active_rules": rules_out},
+        "provenance": tracker.get_provenance_block()
+    }
+
+def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]:
+    """TOOL 1: Fetches ALL active BSI fraud detection rules from AppWorks."""
+    _RULES_LIST_ENDPOINT = AppWorksPaths.FraudRules.risk_rules_all()
+    logger.info(f"_fetch_risk_rules -> Fetching from {_RULES_LIST_ENDPOINT}")
+    
+    if tracker is None:
+        tracker = ProvenanceTracker("Catalog", "FraudRiskRules")
+
     rules_out = []
     
     try:
@@ -518,22 +541,27 @@ def get_risk_rules(**kwargs) -> Dict:
     except Exception as e:
         logger.error(f"AgentRulesTable fetch failed: {e}")
 
-    logger.info(f"get_risk_rules: Returning {len(rules_out)} active rules to LLM.")
-    return {
-        "result": {"active_rules": rules_out},
-        "provenance": tracker.get_provenance_block()
-    }
+    logger.info(f"_fetch_risk_rules: Returning {len(rules_out)} active rules to LLM.")
+    return rules_out
 
-
-def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: List, active_rules: Optional[List] = None, **kwargs) -> Dict:
-    """TOOL 2: Deterministic BSI risk scoring."""
+def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: List,  **kwargs) -> Dict:
+    """TOOL 1: Deterministic BSI risk scoring."""
     logger.info(f"TOOL CALL: calculate_risk_metrics — Case: {case_id} Subject: {subject_id}")
     ai_summary = kwargs.get("ai_summary")
-    if not active_rules:
-        logger.error("calculate_risk_metrics called without active_rules from the LLM.")
-        raise ValueError("Missing active_rules. The agent must call get_risk_rules first.")
-
+    
     tracker = ProvenanceTracker("RiskCalculation", case_id)
+    logger.info("Fetching ground-truth active rules directly from AppWorks/Cache...")
+    rule_payload = _fetch_risk_rules(tracker = tracker)
+
+    logger.info(f"Loaded {len(rule_payload)} active rules. Starting risk calculation...")
+    
+    # Extract the full list of rules from the payload
+    active_rules =rule_payload
+
+    if not active_rules:
+        logger.error("No active rules found. Risk calculation cannot proceed.")
+
+    
 
     # 1. Build Universal Case State
     context = _build_case_context(case_id, subject_id, fraud_types, tracker, ai_summary=ai_summary)

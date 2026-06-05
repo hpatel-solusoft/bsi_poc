@@ -99,17 +99,9 @@ tools:
     description: >
       Evaluates active BSI fraud detection rules against the case and subject data.
       Returns risk_score (0-1), risk_tier, risk_indicators with point breakdowns, and recommendation.
-      Requires: case_id, subject_id, fraud_types and active_rules.
-      active_rules is the rules list returned by get_risk_rules.
-      ALWAYS call get_risk_rules first, then pass its result.rules here as active_rules.
+      Requires: case_id, subject_id, fraud_types.
       MANDATORY: You MUST pass subject_id from 'subject_primary_id' in verify_case_intake results.
       DO NOT use placeholders like 'primary_subject_id'.
-      ALWAYS pass all optional context params from prior tool results — the scoring engine
-      uses ONLY what you pass; it cannot make its own AppWorks calls at scoring time.
-      Pass: prior_case_count (from context_enrichment.prior_case_count), similar_case_volume (top_n_returned
-      from search_similar_cases), distinct_types (count of fraud_types in verify_case_intake),
-      has_open_allegation (true if any allegation has no date_closed), subject_count (count of
-      subjects from verify_case_intake), received_age (date_received_age from verify_case_intake details).
     trigger: ON-DEMAND
     python_function: "appworks.appworks_services.calculate_risk_metrics"
 
@@ -123,43 +115,8 @@ tools:
       - name: "fraud_types"
         type: "list[string]"
         description: "Full list of fraud types from verify_case_intake 'fraud_types' field"
-      - name: "active_rules"
-        type: "list[dict]"
-        description: "Active BSI detection rules returned by get_risk_rules"
-    optional_params:
-      - name: "prior_case_count"
-        type: "integer"
-        description: "prior_case_count integer from get_enriched_subject_profile result (context_enrichment.prior_case_count)"
-      - name: "primary_in_prior_cases"
-        type: "integer"
-        description: "Count of prior cases where is_primary_subject=true in get_enriched_subject_profile result"
-      - name: "similar_case_volume"
-        type: "integer"
-        description: "top_n_returned integer from search_similar_cases result (similar_cases.top_n_returned)"
-      - name: "distinct_types"
-        type: "integer"
-        description: "Count of fraud types in the current case"
-      - name: "has_open_allegation"
-        type: "boolean"
-        description: "True if any current allegation has date_closed null or missing"
-      - name: "subject_count"
-        type: "integer"
-        description: "Count of subjects in the current investigation"
-      - name: "received_age"
-        type: "integer"
-        description: "date_received_age from verify_case_intake details (days since case received)"
-      - name: "fast_track"
-        type: "boolean"
-        description: "True if case is flagged Fast Track — default false if not known"
-      - name: "total_calculated"
-        type: "number"
-        description: "Total Financial_Calculated — pass 0.0 if no financial data available"
-      - name: "total_ordered"
-        type: "number"
-        description: "Total Financial_Ordered — pass 0.0 if no financial data available"
-      - name: "modified_recommendation"
-        type: "string"
-        description: "Modified recommendation override passed in from the context. If present, MUST be passed to the tool call."
+      
+    
 
   - name: "get_investigation_plan"
     section: "investigation_plan"
