@@ -25,14 +25,14 @@ def _normalize_list(values: Any) -> List[str]:
     return []
 
 
-def get_investigation_plan(fraud_types: List[str], risk_tier: str, ai_summary: Optional[Dict] = None, **kwargs) -> Dict:
+def get_investigation_plan(fraud_types: List[str], risk_tier: str,  **kwargs) -> Dict:
     """Return the plan context skeleton only. The LLM generates the actual analysis."""
     
     fraud_types = _normalize_list(fraud_types)
     risk_tier = risk_tier or "UNSPECIFIED"
     
     logger.info(f"Received request for investigation plan with fraud_types: {fraud_types} and risk_tier: {risk_tier}")
-    
+    ai_summary = kwargs.get("ai_summary")
     # 🐛 BUG FIX: Python dicts use len(), not .length()
     ai_summary_len = len(ai_summary) if ai_summary else "None"
     logger.info(f"AI summary in investigation_strategy context length: {ai_summary_len}")
