@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-from agent_service.agent_runner import build_similar_cases_prompt
+from agent_service.prompt_builders import build_investigate_system_prompt, build_similar_cases_prompt
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -964,9 +964,13 @@ def investigate(req: InvestigateRequest):
             for tool in runner.auto_tools
             if tool["function"]["name"] in {"verify_case_intake", "fetch_subject_history"}
         ]
-        messages, provenance_trail, _ = runner.investigate(
-            case_id=req.case_id,
+        messages, provenance_trail, _ = runner.run_scoped(
+            system_prompt=build_investigate_system_prompt(),
+            user_message=(
+                f"Investigate case {req.case_id}."
+            ),
             tools=investigate_tools,
+            trigger="AUTO",
         )
         sections = _extract_tool_results(messages)
 
