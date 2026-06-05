@@ -164,7 +164,7 @@ def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTr
                 
                 # We need to manually fetch the list endpoint since it differs from item payloads
                 from appworks.appworks_auth import fetch
-                list_res = fetch(AppWorksPaths.Allegations.allegations_by_type(type_id))
+                list_res = fetch(AppWorksPaths.Allegations.case_allegations_by_type_id(type_id))
                 matched = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
                 
                 for alleg in matched:
@@ -467,7 +467,7 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
             if not is_active: continue
 
             # Track successfully active rule
-            tracker.add_source("FraudRiskRule", rule_id)
+            #tracker.add_source("FraudRiskRule", rule_id)
 
             dimension_key = str(props.get("DIMENSION_KEY") or props.get("DimensionKey") or "").strip()
             rule_name = str(props.get("RULE_NAME") or props.get("RuleName") or props.get("Name") or "").strip()
@@ -542,6 +542,7 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
         logger.error(f"AgentRulesTable fetch failed: {e}")
 
     logger.info(f"_fetch_risk_rules: Returning {len(rules_out)} active rules to LLM.")
+    tracker.add_source("FraudRiskRulesCatalog", f"{len(rules_out)} active rules loaded")
     return rules_out
 
 def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: List,  **kwargs) -> Dict:
@@ -590,6 +591,7 @@ def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: List,  **
         
         if outcome.weight > 0:
             triggered_indicators.append(outcome.model_dump(by_alias=True))
+            tracker.add_source("FraudRiskRule", rule.rule_id)  
 
     # 3. Normalization & Tiering
     effective_max = total_max if total_max > 0 else 100.0
@@ -616,7 +618,6 @@ def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: List,  **
             "risk_indicators": triggered_indicators,
             "total_points": round(total_earned, 1),
             "max_points": round(effective_max, 1),
-            "prior_case_count": context.get("subject_history", 0)
         },
         "provenance": tracker.get_provenance_block(computed_by="BSI deterministic rules engine")
     }

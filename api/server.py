@@ -19,7 +19,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-from agent_service.prompt_builders import build_investigate_system_prompt, build_similar_cases_prompt
+from agent_service.prompt_builders import (
+    build_investigate_system_prompt,
+    build_risk_assessment_prompt,
+    build_plan_prompt,
+    build_similar_cases_prompt,
+    build_copilot_prompt,
+)
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -1042,7 +1048,7 @@ def similar_cases(req: SimilarCasesRequest):
         }
         similar_tools = [
             tool
-            for tool in runner.on_demand_tools
+            for tool in runner.all_tools
             if tool["function"]["name"] in _sc_names
         ]
 
@@ -1141,8 +1147,7 @@ def risk_assessment(req: PlanRequest):
     Explains case seriousness, triggered rules, and escalation thresholds.
     Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
-    from agent_service.agent_runner import build_risk_assessment_prompt
-
+    
     try:
         _validate_ai_summary_contract(req.ai_summary)
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
@@ -1281,8 +1286,6 @@ def plan(req: PlanRequest):
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
-    from agent_service.agent_runner import build_plan_prompt
-
     try:
         _validate_ai_summary_contract(req.ai_summary)
         # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
@@ -1431,7 +1434,7 @@ def copilot(req: CopilotRequest):
     Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | /report
     """
     try:
-        from agent_service.agent_runner import build_copilot_prompt
+        
         print(req)
         print(req.ai_summary)
         print(req.modified_ai_investigation_plan)

@@ -78,8 +78,8 @@ def search_similar_cases(
         return None
     
     for type_id, type_desc in allegation_types:
-        list_href = AppWorksPaths.Allegations.allegations_by_type(type_id)
-        
+        #list_href = AppWorksPaths.Allegations.case_allegations_with_fileter(type_id, max_per_type, required_status)
+        list_href = AppWorksPaths.Allegations.case_allegations_by_type_id(type_id)    
         # Track that we hit this specific allegation type list
         tracker.add_source("AllegationType", type_id)
         
