@@ -1,0 +1,275 @@
+from utils import html_converter
+from typing import Dict, Any, Optional, List
+from fastapi import HTTPException
+import re
+
+_SECTION_COMPLAINT_INTEL = "complaint_intelligence"
+_SECTION_CONTEXT_ENRICH  = "context_enrichment"
+
+def render_markdown_html(markdown_text: str) -> str:
+    """Consolidated markdown-to-BSI-HTML renderer."""
+    return html_converter.render_agent_summary(markdown_text)
+
+
+def render_markdown_html_with_sources(markdown_text: str, provenance_trail: List[dict]) -> str:
+    """Render markdown and append data sources when the agent omitted them."""
+    text = markdown_text or ""
+    if not re.search(r"(?:^|\n)\s*(?:#{1,6}\s*|\*\*\s*)(?:Data\s+Sources|Data\s+Provenance|Provenance)(?:\s*\*\*)?\s*(?:\n|$)", text, re.IGNORECASE):
+        text = (
+            f"{text.rstrip()}\n\n"
+            f"### Data Sources\n{format_provenance_lines(provenance_trail)}"
+        )
+    return render_markdown_html(text)
+
+
+def format_provenance_lines(provenance_trail: List[dict]) -> str:
+    """Render provenance trail as a clean markdown list, silently skipping empty blocks."""
+    if not provenance_trail:
+        return "- No external records cited."
+    
+    lines = []
+    valid_blocks_found = False
+
+    for p in provenance_trail:
+        sources = p.get("sources", [])
+        
+        # 1. THE FIX: Silently skip this entire tool block if it has no sources
+        if not sources:
+            continue
+            
+        valid_blocks_found = True
+        computed_by = p.get("computed_by", "Not available")
+        retrieved_at = p.get("retrieved_at", "Not available")
+        
+        # Clean up the timestamp for display
+        display_time = str(retrieved_at).replace("T", " ")[:19] + " UTC" if "T" in str(retrieved_at) else retrieved_at
+        
+        lines.append(f"**Sources Retrieved ({display_time}):**")
+        lines.append("") # Blank line required before Markdown lists
+        
+        for source in sources:
+            lines.append(f"- {source}")
+        
+        lines.append("") # Blank line required after Markdown lists
+        lines.append(f"*(Method: {computed_by})*")
+        lines.append("") # Blank line to separate multiple tool calls cleanly
+        
+    # 2. If the AI ran tools, but ALL of them yielded 0 valid sources:
+    if not valid_blocks_found:
+        return "- No external records cited."
+        
+    return "\n".join(lines)
+
+
+def safe_join(items: List[str], sep: str = ", ") -> str:
+    """Join non-empty strings safely; return 'Not available' when empty."""
+    clean = [str(i).strip() for i in (items or []) if str(i).strip()]
+    return sep.join(clean) if clean else "Not available"
+
+def parse_bsi_section(text: str, header_name: str) -> List[str]:
+    """Extract bullet/numbered list items under a markdown section header."""
+    if not text:
+        return []
+    pattern = rf"(?:^|\n)(?:#+\s*)?{header_name}.*?\n(.*?)(?=\n(?:#+\s*)|$)"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    if not match:
+        return []
+    items = re.findall(r"(?:^|\n)\s*[-*•\d+.]\s*(.*)", match.group(1))
+    return [item.strip() for item in items if item.strip()]
+
+
+def get_complaint_no(case_data: dict) -> Optional[str]:
+    """Extract complaint_no from investigation section (CS-4 or ai_summary)."""
+    # case_data usually has 'investigation' at top level from /investigate.
+    return (
+        case_data.get("investigation", {})
+        .get(_SECTION_COMPLAINT_INTEL, {})
+        .get("summary", {})
+        .get("complaint_no")
+    )
+
+
+def swap_case_id_for_complaint(text: str, case_id: str, case_data: dict) -> str:
+    """Replaces occurrences of internal case_id with business complaint_no."""
+    c_no = get_complaint_no(case_data)
+    if c_no and text:
+        return text.replace(str(case_id), str(c_no))
+    return text or ""
+
+
+def _plan_list_field(plan: dict, key: str) -> List:
+    """Return a normalized non-empty list from a plan section field."""
+    if not isinstance(plan, dict):
+        return []
+    raw = plan.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if item is not None and str(item).strip()]
+
+
+def plan_has_substance(plan: dict) -> bool:
+    """True when parsed plan includes at least one actionable section."""
+    return any(
+        _plan_list_field(plan, key)
+        for key in ("investigation_steps", "evidence_checklist", "escalation_criteria")
+    )
+
+def format_plan_markdown_item(item, index: int = 1) -> str:
+    """Render one investigation step, checklist item, or escalation line."""
+    if isinstance(item, dict):
+        label = (
+            item.get("action")
+            or item.get("item")
+            or item.get("description")
+            or item.get("text")
+            or ""
+        ).strip()
+        if not label:
+            return ""
+
+        if "action" in item:
+            # Investigation step — always show step number.
+            # Owner and deadline are Optional; shown only when present
+            # (populated during human analyst review).
+            step_no = item.get("step", index)
+            meta = []
+            if item.get("owner"):
+                meta.append(f"Owner: {item['owner']}")
+            if item.get("deadline_days") is not None:
+                meta.append(f"Deadline: {item['deadline_days']} day(s)")
+            if meta:
+                return f"- **Step {step_no}:** {label} ({', '.join(meta)})"
+            return f"- **Step {step_no}:** {label}"
+        else:
+            # Evidence checklist item or other dict — no step number.
+            mandatory = item.get("mandatory")
+            if mandatory is not None:
+                flag = "required" if mandatory else "optional"
+                return f"- {label} ({flag})"
+            return f"- {label}"
+
+    text = str(item).strip()
+    if not text:
+        return ""
+    return f"- {text}" if not text.startswith("-") else text
+
+def complaint_label(case_id: str, context: dict) -> str:
+    """Prefer business complaint number over internal workfolder id for display."""
+    intel = context.get("complaint_intelligence") if isinstance(context, dict) else None
+    if isinstance(intel, dict):
+        summary = intel.get("summary", {})
+        if isinstance(summary, dict) and summary.get("complaint_no") is not None:
+            return str(summary["complaint_no"])
+    c_no = get_complaint_no(context) if isinstance(context, dict) else None
+    return str(c_no) if c_no is not None else str(case_id)
+
+
+def build_plan_summary(
+    case_id: str,
+    plan: dict,
+    case_data: dict,
+    provenance_trail: List[dict],
+) -> str:
+    """Build agent_summary markdown from the same structured plan returned in ai_summary."""
+    if not isinstance(plan, dict):
+        return f"Plan generation for case {case_id} completed, but no plan payload was returned."
+
+    label = complaint_label(case_id, case_data)
+    steps = _plan_list_field(plan, "investigation_steps")
+    checklist = _plan_list_field(plan, "evidence_checklist")
+    criteria = _plan_list_field(plan, "escalation_criteria")
+    risk_tier = plan.get("risk_tier") or "Not available"
+    fraud_types = safe_join(plan.get("fraud_types", []))
+    plan_id = plan.get("plan_id", "Not available")
+
+    lines = [
+        f"### Preliminary Investigation Strategy for Case {label}",
+        "",
+        (
+            f"Investigation plan **{plan_id}** for Complaint #{label} "
+            f"({risk_tier} risk; fraud types: {fraud_types}). "
+            f"This strategy includes {len(steps)} investigation step(s), "
+            f"{len(checklist)} evidence checklist item(s), and "
+            f"{len(criteria)} escalation criterion/criteria."
+        ),
+    ]
+    if plan.get("escalation_required"):
+        lines.append(
+            "Management escalation is flagged for this case based on risk tier and escalation criteria."
+        )
+    lines.append("")
+
+    lines.extend(["#### Investigation Steps", ""])
+    if steps:
+        for idx, step in enumerate(steps, start=1):
+            formatted = format_plan_markdown_item(step, idx)
+            if formatted:
+                lines.append(formatted)
+    else:
+        lines.append("- No investigation steps were returned.")
+    lines.append("")
+
+    lines.extend(["#### Evidence Checklist", ""])
+    if checklist:
+        for idx, item in enumerate(checklist, start=1):
+            formatted = format_plan_markdown_item(item, idx)
+            if formatted:
+                lines.append(formatted)
+    else:
+        lines.append("- No evidence checklist items were returned.")
+    lines.append("")
+
+    lines.extend(["#### Escalation Criteria", ""])
+    if criteria:
+        for idx, item in enumerate(criteria, start=1):
+            formatted = format_plan_markdown_item(item, idx)
+            if formatted:
+                lines.append(formatted)
+    else:
+        lines.append("- No escalation criteria were returned.")
+    lines.append("")
+
+    lines.extend([
+        "### Data Sources",
+        format_provenance_lines(provenance_trail),
+    ])
+    return "\n".join(lines)
+
+
+def resolve_plan_agent_summary(
+    assistant_text: str,
+    plan: dict,
+    case_id: str,
+    case_data: dict,
+    provenance_trail: List[dict],
+) -> str:
+    """
+    Prefer markdown synthesized from parsed investigation_plan so agent_summary
+    cannot contradict ai_summary.investigation_plan. Fall back to LLM prose only
+    when no plan sections were parsed.
+    """
+    if plan_has_substance(plan):
+        return build_plan_summary(case_id, plan, case_data, provenance_trail)
+    return assistant_text or build_plan_summary(case_id, plan, case_data, provenance_trail)
+
+
+
+def validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
+    """Validate required v6 ai_summary payload shape for ON-DEMAND requests."""
+    if not isinstance(ai_summary, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="ai_summary is required and must be an object.",
+        )
+    if "investigation" not in ai_summary or not isinstance(ai_summary.get("investigation"), dict):
+        raise HTTPException(
+            status_code=400,
+            detail="ai_summary.investigation is required and must be an object.",
+        )
+    # v6 session-recovery rule: if provenance_trail is absent, continue with warning
+    # and degrade source citations gracefully (no crash).
+    if "provenance_trail" in ai_summary and not isinstance(ai_summary.get("provenance_trail"), list):
+        raise HTTPException(
+            status_code=400,
+            detail="ai_summary.provenance_trail must be an array when provided.",
+        )

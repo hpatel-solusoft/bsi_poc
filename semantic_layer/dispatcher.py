@@ -1,36 +1,57 @@
 import importlib
+import os
 import yaml
 from typing import Any, Dict, List, Optional
 
 
+
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../config/manifest.yaml")
+
 class SemanticDispatcher:
 
-    def __init__(self, manifest_path: str):
-        with open(manifest_path, "r") as f:
+    def __init__(self):
+        with open(MANIFEST_PATH, "r") as f:
             self.manifest = yaml.safe_load(f)
+
+        self.tools = self.manifest.get("tools", [])
         # Build tool registry keyed by name
         self.tool_registry: Dict[str, dict] = {
             tool["name"]: tool
-            for tool in self.manifest.get("tools", [])
+            for tool in self.tools
         }
+
+        self.tool_to_section: Dict[str, str] = {
+            tool["name"]: tool["section"]
+            for tool in self.tools
+            if "section" in tool
+        }
+
+        # Build scope index: scope → [tool_names]
+        self.scope_index: Dict[str, List[str]] = {}
+        for tool in self.tools:
+            scopes = tool.get("scope", [])
+            if isinstance(scopes, str):
+                scopes = [scopes]   # defensive: handle legacy single string
+            for s in scopes:
+                self.scope_index.setdefault(s, []).append(tool["name"])
 
         # Build section index: section → [tool_names]
         # Enables endpoints to scope tool catalogues by section
         # without hardcoded tool names anywhere in application code.
         self.section_index: Dict[str, List[str]] = {}
-        for tool in self.manifest.get("tools", []):
+        for tool in self.tools:
             section = tool.get("section", "")
             if section:
                 self.section_index.setdefault(section, []).append(tool["name"])
 
     def get_tool_catalogue(self) -> list:
-        return self.manifest.get("tools", [])
+        return self.tools
 
     def dispatch(
         self,
         tool_name: str,
         params: Dict[str, Any],
-        expected_trigger: Optional[str] = None,
+        requested_scope: Optional[str] = None,
         execution_context: dict | None = None
     ) -> dict:
         # --- Gate 1: Registry check ---
@@ -45,15 +66,18 @@ class SemanticDispatcher:
             }
 
         tool_config = self.tool_registry[tool_name]
-        tool_mode = tool_config.get("trigger")
+        tool_scope = tool_config.get("scope")
 
         # Defense-in-depth: enforce execution mode at dispatcher level too.
-        if expected_trigger and tool_mode != expected_trigger:
+        if requested_scope == "ALL":
+            # Allow all tools in the "ALL" scope
+            pass
+        elif tool_scope and requested_scope not in tool_scope:
             return {
                 "status": "error",
                 "message": (
                     f"Tool '{tool_name}' is not allowed in this flow. "
-                    f"Expected trigger '{expected_trigger}', tool mode is '{tool_mode}'."
+                    f"Expected scope '{requested_scope}', tool scope is '{tool_scope}'."
                 ),
             }
 

@@ -13,9 +13,10 @@ from typing import List, Dict, Tuple, Optional
 from openai import OpenAI
 from semantic_layer.dispatcher import SemanticDispatcher
 from agent_service.tool_builder import build_openai_tools
-from agent_service.prompt_builders import build_investigate_system_prompt
 
 logger = logging.getLogger(__name__)
+
+
 
 
 
@@ -31,17 +32,14 @@ class BSIAgentRunner:
         run_scoped(prompt, message)  — all routes
 
     Tool catalogue pools are pre-built at construction time:
-        self.auto_tools       — trigger=AUTO only
-        self.on_demand_tools  — trigger=ON-DEMAND only (run_scoped default)
-        self.all_tools        — no trigger filter (use for section-based scoping)
+        
+        self.all_tools        — no filter (use for section-based scoping)
     """
 
-    def __init__(self, manifest_path: str, api_key: str |None = None):
+    def __init__(self,  api_key: str |None = None):
         
 
-        self.dispatcher      = SemanticDispatcher(manifest_path)
-        self.auto_tools      = build_openai_tools(self.dispatcher, trigger="AUTO")
-        self.on_demand_tools = build_openai_tools(self.dispatcher, trigger="ON-DEMAND")
+        self.dispatcher      = SemanticDispatcher()
         self.all_tools       = build_openai_tools(self.dispatcher)  # no filter — for section scoping
         self.client          = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
         self.model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -52,21 +50,12 @@ class BSIAgentRunner:
         system_prompt: str,
         user_message: str,
         conversation_history: Optional[List[Dict]] = None,
-        tools: Optional[List[Dict]] = None,
-        trigger: str = "ON-DEMAND",
+        scope: str = "ALL",
         execution_context: Optional[Dict] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
         Run an ON-DEMAND scoped agent loop.
-
-        `tools` contract:
-          - None  → fall back to full on_demand_tools catalogue (copilot default)
-          - []    → empty list passes through unchanged; _run_loop converts it to
-                    None for the API call, so the LLM gets no tools. An empty list
-                    here is a server.py scoping error — it surfaces honestly as a
-                    no-tool response rather than silently using the full catalogue.
-          - [...]  → the scoped subset the route computed (normal path)
-
+        Tools available to the LLM are determined by the 'scope' parameter, which is checked against each tool's declared scope in the manifest.
         Returns (messages, provenance_trail, tool_call_log).
         """
         messages: List[Dict] = [{"role": "system", "content": system_prompt}]
@@ -76,11 +65,26 @@ class BSIAgentRunner:
 
         return self._run_loop(
             messages,
-            tools=tools if tools is not None else self.on_demand_tools,
-            trigger=trigger,
+            tools=self.scoped_tools(scope),
+            scope=scope,
             execution_context=execution_context,
         )
 
+    def scoped_tools(self, scope: str) -> List[Dict]:
+        """
+        Return OpenAI tool dicts declared for this scope in manifest.yaml.
+        Copilot passes scope='ALL' to receive the full all pool —
+        an intentional design decision: copilot is the open conversational
+        interface and needs access to the full on_demand catalogue.
+        Manifest is the single source of truth for all other scopes.
+        """
+        logger.info(f"Scoping tools for scope={scope!r}")
+        logger.debug(f"scope_index: {self.dispatcher.scope_index}")
+        if scope == "ALL":
+            return self.all_tools
+        names = set(self.dispatcher.scope_index.get(scope, []))
+        return [t for t in self.all_tools if t["function"]["name"] in names]
+        
     # ------------------------------------------------------------------
     # Core agentic loop
     # ------------------------------------------------------------------
@@ -88,7 +92,7 @@ class BSIAgentRunner:
         self,
         messages: List[Dict],
         tools: Optional[List[Dict]],
-        trigger: str,
+        scope: str,
         execution_context: Optional[Dict] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
         """
@@ -120,7 +124,7 @@ class BSIAgentRunner:
             f"[AGENT] Starting loop | model={self.model!r} "
             f"tools_scoped={len(tools) if tools else 0} "
             f"tools_to_api={len(tools_for_api) if tools_for_api else 0} "
-            f"trigger={trigger!r}"
+            
         )
 
         turn = 0
@@ -185,7 +189,7 @@ class BSIAgentRunner:
                 envelope = self.dispatcher.dispatch(
                     tool_name,
                     params,
-                    expected_trigger=trigger,
+                    requested_scope=scope,
                     execution_context=execution_context
                 )
                 elapsed_ms = round((time.monotonic() - call_start) * 1000)
@@ -203,14 +207,12 @@ class BSIAgentRunner:
                         "computed_by":  prov.get("computed_by", ""),
                     })
 
-                    summary   = _summarise_result(result_data)
                     log_entry = {
                         "turn":           turn,
                         "tool":           tool_name,
                         "input":          params,
                         "status":         "ok",
-                        "output_summary": summary,
-                        "output":         result_data,
+                        "output":         result_data.lstrip() if isinstance(result_data, str) else "non-str",
                         "elapsed_ms":     elapsed_ms,
                         "retrieved_at":   prov.get("retrieved_at", ""),
                         "sources":        prov.get("sources", []),
@@ -218,8 +220,7 @@ class BSIAgentRunner:
                     }
                     tool_call_log.append(log_entry)
                     logger.info(
-                        f"[TOOL OK]  tool={tool_name!r} elapsed={elapsed_ms}ms "
-                        f"summary={summary!r}"
+                        f"[TOOL OK]  tool={tool_name!r} elapsed={elapsed_ms}ms"
                     )
 
                 else:
@@ -253,79 +254,3 @@ class BSIAgentRunner:
                 break
 
         return messages, provenance_trail, tool_call_log
-
-# -----------------------------------------------------------------------
-# RESULT SUMMARISER — concise one-liner per tool for tool_call_log
-# -----------------------------------------------------------------------
-
-def _summarise_result(result: dict) -> str:
-    """
-    Returns a short human-readable summary of a tool result for logging.
-    Uses only generic field names from the semantic model contract —
-    no hardcoded tool name checks. Renaming a tool in manifest.yaml
-    requires no change here.
-    """
-    try:
-        parts = []
-
-        # Case / complaint identifier
-        summary_block = result.get("summary")
-        for key in ("complaint_no", "case_id", "workfolder_id"):
-            val = (
-                summary_block.get(key)
-                if isinstance(summary_block, dict)
-                else result.get(key)
-            )
-            if val:
-                parts.append(f"case={val}")
-                break
-
-        # Subject name (enrichment tools)
-        fn = result.get("first_name", "")
-        ln = result.get("last_name", "")
-        if fn or ln:
-            parts.append(f"subject={fn} {ln}".strip())
-
-        # Prior case count
-        prior = result.get("prior_case_count")
-        if prior is not None:
-            parts.append(f"prior_cases={prior}")
-
-        # Similar cases
-        top_n = result.get("top_n_returned")
-        if top_n is not None:
-            q = result.get("query_summary", "")
-            parts.append(f"matches={top_n}")
-            if q:
-                parts.append(q)
-
-        # Rules list
-        rules = result.get("active_rules")
-        if isinstance(rules, list):
-            parts.append(f"{len(rules)} active rule(s) loaded")
-
-        # Risk score / tier
-        score = result.get("risk_score")
-        tier  = result.get("risk_tier")
-        if score is not None and tier is not None:
-            pts = result.get("total_points", "?")
-            mx  = result.get("max_points", "?")
-            parts.append(f"score={score} tier={tier} pts={pts}/{mx}")
-
-        # Investigation plan
-        pid = result.get("plan_id")
-        if pid is not None:
-            steps = result.get("investigation_steps", [])
-            parts.append(f"plan={pid} steps={len(steps) if isinstance(steps, list) else '?'}")
-
-        # Final report
-        secs = result.get("sections")
-       
-        if parts:
-            return " | ".join(parts)
-
-    except Exception:
-        pass
-
-    return json.dumps(result, default=str)[:120]
-

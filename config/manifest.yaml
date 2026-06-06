@@ -15,7 +15,7 @@ tools:
       Reads and validates the submitted complaint form. Extracts key entities from the
       complaint narrative. Returns structured case data including fraud_types (list),
       subject_ids (list[string]), allegations, subjects, and case metadata. Requires: case_id.
-    trigger: AUTO
+    scope: [CASE_SUMMARY]
     python_function: "appworks.appworks_services.get_case_header"
 
     required_params:
@@ -28,7 +28,7 @@ tools:
     description: >
       Fetches the full history of the subject under investigation. Returns all prior cases,
       prior_case_count, and subject profile. Requires: subject_ids identifiers from verify_case_intake subjects list.
-    trigger: AUTO
+    scope: [CASE_SUMMARY]
     python_function: "appworks.appworks_services.get_enriched_subject_profile"
 
     required_params:
@@ -44,7 +44,7 @@ tools:
     section: "allegation_types"
     description: >   
       Fetches all active allegation type definitions from AppWorks. Returns each type with its description and default conduct text. Use the returned    list and the current case allegations to identify all types whose conduct    description is semantically related to the current case — including types    that describe the same scheme under a different label or variant name.    Pass all related type descriptions to the archive search.
-    trigger: ON-DEMAND
+    scope: [SIMILAR_CASES]
     python_function: "appworks.appworks_services.get_allegation_types"
     required_params: []
     optional_params: []
@@ -60,7 +60,7 @@ tools:
       case fraud type label. Multiple fraud types produce a broader
       cross-label candidate pool that surfaces scheme matches regardless
       of how prior cases were classified.
-    trigger: ON-DEMAND
+    scope: SIMILAR_CASES
     python_function: "appworks.appworks_services.search_similar_cases"
     required_params:
       - name: "fraud_types"
@@ -79,7 +79,7 @@ tools:
         description: "Current case identifier — excludes this case from results"
       - name: "max_total_results"
         type: "integer"
-        description: "The maximum number of closest matching cases to return. Defaults to 5 if not specified."
+        description: "The maximum number of closest matching cases to return. Defaults to 3 if not specified."
  
   - name: "get_risk_rules"
     section: "risk_rules"
@@ -89,7 +89,7 @@ tools:
       and active flag. No parameters required.
       This demonstrates that rules are fetched from AppWorks at runtime — BSI can modify
       rules without a code change.
-    trigger: ON-DEMAND
+    scope: []
     python_function: "appworks.appworks_services.get_risk_rules"
 
     required_params: []
@@ -102,7 +102,7 @@ tools:
       Requires: case_id, subject_id, fraud_types.
       MANDATORY: You MUST pass subject_id from 'subject_primary_id' in verify_case_intake results.
       DO NOT use placeholders like 'primary_subject_id'.
-    trigger: ON-DEMAND
+    scope: [RISK_ASSESSMENT]
     python_function: "appworks.appworks_services.calculate_risk_metrics"
 
     required_params:
@@ -126,7 +126,7 @@ tools:
       the LLM is responsible for generating the detailed investigation steps,
       evidence checklist items, and escalation guidance from the route1 case
       context. Requires: fraud_types and risk_tier from prior investigation results.
-    trigger: ON-DEMAND
+    scope:  [INVESTIGATION_PLAN]
     python_function: "appworks.appworks_services.get_investigation_plan"
 
     required_params:

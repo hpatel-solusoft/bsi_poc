@@ -25,3 +25,10 @@ ALLOWED_ENTITIES = frozenset([
     "AllegationType_ManageAllegationType",
     "SystemMemory"
 ])
+
+TOP_LEVEL_SECTIONS = frozenset({
+    "similar_cases",
+    "risk_assessment",
+    "investigation_plan",
+    "provenance_trail",
+})
