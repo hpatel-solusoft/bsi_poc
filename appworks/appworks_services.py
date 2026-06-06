@@ -76,7 +76,7 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
             "subject_id": sid,
             "first_name": result.get("first_name"),
             "last_name": result.get("last_name"),
-            "dob": result.get("dob"),
+            "dob": result.get("dob",None),
             "prior_cases": result.get("prior_cases", []),
             "prior_case_count": result.get("prior_case_count", 0),
         }

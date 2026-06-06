@@ -88,16 +88,7 @@ def get_complaint_no(case_data: dict) -> Optional[str]:
         .get("complaint_no")
     )
 
-
-def swap_case_id_for_complaint(text: str, case_id: str, case_data: dict) -> str:
-    """Replaces occurrences of internal case_id with business complaint_no."""
-    c_no = get_complaint_no(case_data)
-    if c_no and text:
-        return text.replace(str(case_id), str(c_no))
-    return text or ""
-
-
-def _plan_list_field(plan: dict, key: str) -> List:
+def plan_list_field(plan: dict, key: str) -> List:
     """Return a normalized non-empty list from a plan section field."""
     if not isinstance(plan, dict):
         return []
@@ -110,7 +101,7 @@ def _plan_list_field(plan: dict, key: str) -> List:
 def plan_has_substance(plan: dict) -> bool:
     """True when parsed plan includes at least one actionable section."""
     return any(
-        _plan_list_field(plan, key)
+        plan_list_field(plan, key)
         for key in ("investigation_steps", "evidence_checklist", "escalation_criteria")
     )
 
@@ -153,17 +144,6 @@ def format_plan_markdown_item(item, index: int = 1) -> str:
         return ""
     return f"- {text}" if not text.startswith("-") else text
 
-def complaint_label(case_id: str, context: dict) -> str:
-    """Prefer business complaint number over internal workfolder id for display."""
-    intel = context.get("complaint_intelligence") if isinstance(context, dict) else None
-    if isinstance(intel, dict):
-        summary = intel.get("summary", {})
-        if isinstance(summary, dict) and summary.get("complaint_no") is not None:
-            return str(summary["complaint_no"])
-    c_no = get_complaint_no(context) if isinstance(context, dict) else None
-    return str(c_no) if c_no is not None else str(case_id)
-
-
 def build_plan_summary(
     case_id: str,
     plan: dict,
@@ -174,10 +154,18 @@ def build_plan_summary(
     if not isinstance(plan, dict):
         return f"Plan generation for case {case_id} completed, but no plan payload was returned."
 
-    label = complaint_label(case_id, case_data)
-    steps = _plan_list_field(plan, "investigation_steps")
-    checklist = _plan_list_field(plan, "evidence_checklist")
-    criteria = _plan_list_field(plan, "escalation_criteria")
+    complaint_intelligence = case_data.get("complaint_intelligence")
+    if not isinstance(complaint_intelligence, dict):
+        complaint_intelligence = {}
+
+    complaint_summary = complaint_intelligence.get("summary")
+    if not isinstance(complaint_summary, dict):
+        complaint_summary = {}
+
+    label = complaint_summary.get("complaint_no") or case_id 
+    steps = plan_list_field(plan, "investigation_steps")
+    checklist = plan_list_field(plan, "evidence_checklist")
+    criteria = plan_list_field(plan, "escalation_criteria")
     risk_tier = plan.get("risk_tier") or "Not available"
     fraud_types = safe_join(plan.get("fraud_types", []))
     plan_id = plan.get("plan_id", "Not available")

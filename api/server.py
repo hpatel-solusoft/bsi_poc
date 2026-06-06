@@ -26,11 +26,9 @@ from agent_service.prompt_builders import (
     build_copilot_prompt,
 )
 from api.response_builders import (
-    resolve_plan_agent_summary,
     validate_ai_summary_contract,
     render_markdown_html,
     render_markdown_html_with_sources,
-    swap_case_id_for_complaint,
     parse_bsi_section, 
 )
 from api.message_utils import (
@@ -153,18 +151,13 @@ def investigate(req: InvestigateRequest):
         }
 
         # BSI requirement: swap internal case_id for business complaint_no in narrative
-        summary_text = swap_case_id_for_complaint(
-            extract_agent_summary(messages),
-            req.case_id,
-            ai_summary,
-        )
-
+    
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /similar_cases
             "details": {
-                "agent_summary": render_markdown_html_with_sources(summary_text, provenance_trail),
+                "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), provenance_trail),
                 "meta": {
                     "tool_calls_made":  len(provenance_trail),
                     "duration_seconds": round(time.time() - start, 1),
@@ -360,16 +353,12 @@ def risk_assessment(req: PlanRequest):
             merged_provenance,
         )
 
-        summary_text = swap_case_id_for_complaint(
-            extract_agent_summary(messages), req.case_id, ai_summary
-        )
-
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to /plan
             "details": {
-                "agent_summary": render_markdown_html_with_sources(summary_text, merged_provenance),
+                "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), merged_provenance),
             },
         }
     except HTTPException:
@@ -473,27 +462,13 @@ def plan(req: PlanRequest):
             merged_provenance,
         )
 
-        summary_text = resolve_plan_agent_summary(
-            assistant_text,
-            investigation_plan,
-            req.case_id,
-            case_data,
-            merged_provenance,
-        )
-        summary_text = swap_case_id_for_complaint(summary_text, req.case_id, ai_summary)
-
-        assistant_text_swapped = swap_case_id_for_complaint(
-            assistant_text, 
-            req.case_id, 
-            ai_summary
-        )
         return {
             "case_id":    req.case_id,
             "status":     "completed",
             "ai_summary": ai_summary,          # ← pass this object to , /copilot
             "details": {
                 "agent_summary": render_markdown_html_with_sources(
-                    assistant_text_swapped,
+                    assistant_text,
                     merged_provenance,
                 ),
             },
@@ -580,9 +555,7 @@ def copilot(req: CopilotRequest):
             CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
 
         return {
-            "answer":               render_markdown_html(
-                swap_case_id_for_complaint(answer, req.case_id, case_data)
-            ),
+            "answer":               render_markdown_html(answer),
             "sources_cited":        sources_cited,
             "sources_cited_details": sources_cited_details,
             "provenance_trail":     combined_provenance,

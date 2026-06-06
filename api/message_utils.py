@@ -38,11 +38,7 @@ def extract_tool_results(messages: list,  tool_section_map: Dict[str, str]) -> d
             try:
                 data = json.loads(msg["content"])
 
-                # Normalise empty DOB strings from AppWorks
-                if section == _SECTION_CONTEXT_ENRICH and isinstance(data, dict):
-                    if data.get("dob") == "":
-                        data["dob"] = None
-
+             
                 # Inject convenience top-level fields for downstream prompts.
                 # subject_primary_id  — used by /plan, , /copilot prompts.
                 # fraud_types         — flattened list for the same consumers.

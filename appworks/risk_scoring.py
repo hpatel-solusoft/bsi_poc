@@ -539,7 +539,7 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
             })
 
     except Exception as e:
-        logger.error(f"AgentRulesTable fetch failed: {e}")
+        logger.error(f"FraudRiskRules fetch failed: {e}")
 
     logger.info(f"_fetch_risk_rules: Returning {len(rules_out)} active rules to LLM.")
     tracker.add_source("FraudRiskRulesCatalog", f"{len(rules_out)} active rules loaded")
