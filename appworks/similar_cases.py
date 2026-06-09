@@ -64,6 +64,8 @@ def search_similar_cases(
     tracker = ProvenanceTracker("Workfolder", case_id)
     
     allegation_types = _normalise_to_type_dicts(fraud_types)
+    strFraudTypes: list[str] = []
+
     candidates = []
 
     def _fetch_wf(row):
@@ -78,6 +80,7 @@ def search_similar_cases(
         return None
     
     for type_id, type_desc in allegation_types:
+        strFraudTypes.append(type_desc)
         #list_href = AppWorksPaths.Allegations.case_allegations_with_fileter(type_id, max_per_type, required_status)
         list_href = AppWorksPaths.Allegations.case_allegations_by_type_id(type_id)    
         # Track that we hit this specific allegation type list
@@ -117,7 +120,8 @@ def search_similar_cases(
             })
 
         type_candidates.sort(key=lambda x: parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-
+        logger.info(f"Candidates fetched and sorted for type '{type_desc}' | active_case: {case_id} | candidates_found: {len(type_candidates)}")
+        
         for cand in type_candidates[:max_per_type]:
             wf_props = cand["wf_props"]
             wid = cand["wf_id"]
@@ -138,11 +142,12 @@ def search_similar_cases(
         key=lambda x: parse_aw_date(x["date_received"]) or datetime.min.replace(tzinfo=timezone.utc), 
         reverse=True
     )
-    
+    logger.info(f"Similar case search completed | active_case: {case_id} | total_candidates_scored: {len(candidates)}")
     final_matches = candidates[:max_total_results]
-
+    logger.info(f"Final similar cases selected | active_case: {case_id} | matches_returned: {len(final_matches)}")
     return {
         "result": {
+            "relevant_fraud_types": strFraudTypes,
             "matches": final_matches,
             "top_n_returned": len(final_matches),
             "total_candidates_scored": len(candidates)

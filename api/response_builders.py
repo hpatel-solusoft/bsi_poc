@@ -3,8 +3,6 @@ from typing import Dict, Any, Optional, List
 from fastapi import HTTPException
 import re
 
-_SECTION_COMPLAINT_INTEL = "complaint_intelligence"
-_SECTION_CONTEXT_ENRICH  = "context_enrichment"
 
 def render_markdown_html(markdown_text: str) -> str:
     """Consolidated markdown-to-BSI-HTML renderer."""
@@ -77,16 +75,6 @@ def parse_bsi_section(text: str, header_name: str) -> List[str]:
     items = re.findall(r"(?:^|\n)\s*[-*•\d+.]\s*(.*)", match.group(1))
     return [item.strip() for item in items if item.strip()]
 
-
-def get_complaint_no(case_data: dict) -> Optional[str]:
-    """Extract complaint_no from investigation section (CS-4 or ai_summary)."""
-    # case_data usually has 'investigation' at top level from /investigate.
-    return (
-        case_data.get("investigation", {})
-        .get(_SECTION_COMPLAINT_INTEL, {})
-        .get("summary", {})
-        .get("complaint_no")
-    )
 
 def plan_list_field(plan: dict, key: str) -> List:
     """Return a normalized non-empty list from a plan section field."""

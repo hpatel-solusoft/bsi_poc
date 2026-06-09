@@ -27,6 +27,7 @@ ALLOWED_ENTITIES = frozenset([
 ])
 
 TOP_LEVEL_SECTIONS = frozenset({
+    "investigation",
     "similar_cases",
     "risk_assessment",
     "investigation_plan",

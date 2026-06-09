@@ -100,10 +100,6 @@ class BSIAgentRunner:
 
         Returns (messages, provenance_trail, tool_call_log).
 
-        tool_call_log entries contain:
-            turn, tool, input, status, output_summary, output,
-            elapsed_ms, retrieved_at, sources, computed_by
-
         Empty-list handling:
           tools=[] and tools=None both result in the OpenAI API call
           receiving tools=None / tool_choice=None, so the LLM produces

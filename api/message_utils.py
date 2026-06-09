@@ -3,7 +3,7 @@ import json
 from typing import List, Dict, Optional
 
 _SECTION_COMPLAINT_INTEL = "complaint_intelligence"
-_SECTION_CONTEXT_ENRICH  = "context_enrichment"
+
 
 
 def find_tool_name_by_call_id(messages: list, call_id: str) -> Optional[str]:
@@ -124,7 +124,7 @@ def build_ai_summary(
     ai_summary: dict = {"investigation": investigation_data}
 
     # Carry over existing top-level sections from prior routes
-    for key in ("similar_cases", "risk_rules", "risk_assessment", "investigation_plan"):
+    for key in ("similar_cases", "risk_assessment", "investigation_plan"):
         existing = case_data.get(key)
         if existing is not None:
             ai_summary[key] = existing

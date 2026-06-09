@@ -14,10 +14,10 @@ from agent_service.agent_runner import BSIAgentRunner
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException
-from core.case_store import TTLStore , CASE_STORE, store_copilot_turn, resolve_copilot_history
+from core.case_store import CASE_STORE, store_copilot_turn, resolve_copilot_history
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-from api.models import InvestigateRequest, SimilarCasesRequest, PlanRequest, CopilotRequest
+from api.models import InvestigateRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest, CopilotRequest
 from agent_service.prompt_builders import (
     build_investigate_system_prompt,
     build_risk_assessment_prompt,
@@ -27,7 +27,6 @@ from agent_service.prompt_builders import (
 )
 from api.response_builders import (
     validate_ai_summary_contract,
-    render_markdown_html,
     render_markdown_html_with_sources,
     parse_bsi_section, 
 )
@@ -35,10 +34,7 @@ from api.message_utils import (
     build_ai_summary,
     extract_agent_summary,
     extract_tool_results,
-    merge_provenance,
-
-    
-    )        
+    merge_provenance, )        
 
 _runner: Optional[BSIAgentRunner] = None
 
@@ -133,7 +129,7 @@ def investigate(req: InvestigateRequest):
             user_message=(
                 f"Investigate case {req.case_id}."
             ),
-            scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only
+            scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only; 
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
@@ -238,8 +234,7 @@ def similar_cases(req: SimilarCasesRequest):
         )
         
         
-        logger.info(f"SIMILAR CASES NARRATIVE LENGTH: {len(similar_cases_data)}") 
-        #logger.info(f"SIMILAR CASES NARRATIVE TAIL: {summary_text[-500:]}")
+        logger.info(f"SIMILAR CASES NARRATIVE TOTAL KEYs: {len(similar_cases_data)}") 
         return {
             "case_id":    req.case_id,
             "status":     "completed",
@@ -258,7 +253,7 @@ def similar_cases(req: SimilarCasesRequest):
 
 
 @app.post("/risk_assessment")
-def risk_assessment(req: PlanRequest):
+def risk_assessment(req: RiskAssessmentRequest):
     """
     ON-DEMAND — Risk Assessment Route (Step 3 in flow).
     Calls get_risk_rules and calculate_risk_metrics.

@@ -159,8 +159,6 @@ class SubjectDetails(BaseModel):
     first_name:             Optional[str] = None
     middle_initial:         Optional[str] = None
     last_name:              Optional[str] = None
-    ssn:                    Optional[str] = None
-    ein:                    Optional[str] = None
     gender:                 Optional[str] = None
     dob:                    Optional[str] = None
     dod:                    Optional[str] = None
@@ -169,7 +167,6 @@ class SubjectDetails(BaseModel):
     company_name:           Optional[str] = None
     provider_number:        Optional[str] = None
     pob:                    Optional[str] = None
-    driving_license_number: Optional[str] = None
     comment:                Optional[str] = None
     destination:            Optional[str] = None
     date_entered:           Optional[str] = None
@@ -258,8 +255,10 @@ class SubjectHistory(BaseModel):
 # TOOL 3 — search_similar_cases
 # ================================================================
 
+
 class SimilarCasesResult(BaseModel):
     matches:                   list[SimilarCaseMatch]
+    relevant_fraud_types:      list[str] # Renamed from allegation_types
     top_n_returned:            int
     total_candidates_scored:   Optional[int] = None # Replaces raw_matches_found
     model_config = {"extra": "forbid"}

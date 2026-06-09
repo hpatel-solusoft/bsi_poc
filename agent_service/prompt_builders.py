@@ -53,7 +53,7 @@ def build_similar_cases_prompt(case_data: dict) -> str:
     return _render_prompt(
         SIMILAR_CASES_PROMPT,
         {
-            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+            "case_context": json.dumps(case_data, indent=2),
         },
     )
 
@@ -67,7 +67,7 @@ def build_risk_assessment_prompt(case_data: dict) -> str:
     return _render_prompt(
         RISK_ASSESSMENT_PROMPT,
         {
-            "json.dumps(case_data, indent=2)": json.dumps(case_data, indent=2),
+            "case_context": json.dumps(case_data, indent=2),
         },
     )
 
@@ -75,22 +75,14 @@ def build_risk_assessment_prompt(case_data: dict) -> str:
 def build_plan_prompt(case_data: dict) -> str:
     """
     ON-DEMAND /plan prompt.
-    Extracts fraud_types and risk_tier from case_data for template
-    substitution; full context is also injected for strategy generation.
+    full context is injected for strategy generation.
     """
-    risk      = case_data.get("risk_assessment") or {}
-    complaint = case_data.get("complaint_intelligence") or {}
-
-    fraud_types = complaint.get("fraud_types") or []
-    risk_tier   = risk.get("risk_tier") or ""
+    
 
     return _render_prompt(
         PLAN_PROMPT,
         {
-            "json.dumps(case_data, indent=2)":  json.dumps(case_data, indent=2),
-            "json.dumps(fraud_types)":           json.dumps(fraud_types),
-            "risk_tier":                         risk_tier,
-            'case_data.get("case_id")':          str(case_data.get("case_id")),
+            "case_context":  json.dumps(case_data, indent=2),
         },
     )
 
@@ -126,6 +118,6 @@ def build_copilot_prompt(case_id: str, case_data: dict) -> str:
         COPILOT_TOOL_PROMPT,
         {
             "case_id":                           case_id,
-            "json.dumps(case_data, indent=2)":   json.dumps(context, indent=2),
+            "case_context":   json.dumps(context, indent=2),
         },
     )

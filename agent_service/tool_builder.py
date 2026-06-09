@@ -49,17 +49,16 @@ def _param_schema(param: dict) -> dict:
     return {**base, "description": desc}
 
 
-def build_openai_tools(dispatcher, trigger: Optional[str] = None) -> List[dict]:
+def build_openai_tools(dispatcher, scope: Optional[str] = None) -> List[dict]:
     """
     Build OpenAI tool schemas from manifest entries.
 
-    If trigger is provided, only tools with matching trigger value
-    are included (for example: "AUTO" or "ON-DEMAND").
+
     """
     tools = []
     for tool in dispatcher.get_tool_catalogue():
-        if trigger and tool.get("trigger") != trigger:
-            continue
+        #if scope and tool.get("scope") != scope :
+        #    continue
         properties = {}
         required_names = []
 
@@ -77,9 +76,9 @@ def build_openai_tools(dispatcher, trigger: Optional[str] = None) -> List[dict]:
 
         # Prepend trigger to description so the LLM can filter by flow.
         desc = tool["description"].strip()
-        mode = tool.get("trigger")
-        if mode:
-            desc = f"[Trigger: {mode}] {desc}"
+        scope = tool.get("scope")
+        if scope:
+            desc = f"[Scope: {scope}] {desc}"
 
         tools.append({
             "type": "function",

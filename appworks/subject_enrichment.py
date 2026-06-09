@@ -85,7 +85,7 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
             "subject_id": subject_id,
             "first_name": first_name,
             "last_name": last_name,
-            "dob": dob,
+            "dob": dob or None,
             "prior_cases": prior_cases,
             "prior_case_count": len(prior_cases),
         },

@@ -23,6 +23,13 @@ class PlanRequest(BaseModel):
     # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
     ai_summary: Dict[str, Any]
 
+class RiskAssessmentRequest(BaseModel):
+    case_id: str
+    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
+    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
+    ai_summary: Dict[str, Any]
+
+
 class CopilotRequest(BaseModel):
     case_id: str
     question: str
