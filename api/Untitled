@@ -1,2 +1,0 @@
-similar_tools = [     tool    for tool in runner.auto_tools    if tool["function"]["name"] in {"search_similar_cases"} ]
- 

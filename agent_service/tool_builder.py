@@ -49,7 +49,7 @@ def _param_schema(param: dict) -> dict:
     return {**base, "description": desc}
 
 
-def build_openai_tools(dispatcher, scope: Optional[str] = None) -> List[dict]:
+def build_openai_tools(dispatcher) -> List[dict]:
     """
     Build OpenAI tool schemas from manifest entries.
 
@@ -76,10 +76,6 @@ def build_openai_tools(dispatcher, scope: Optional[str] = None) -> List[dict]:
 
         # Prepend trigger to description so the LLM can filter by flow.
         desc = tool["description"].strip()
-        scope = tool.get("scope")
-        if scope:
-            desc = f"[Scope: {scope}] {desc}"
-
         tools.append({
             "type": "function",
             "function": {

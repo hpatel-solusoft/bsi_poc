@@ -28,7 +28,7 @@ from agent_service.prompt_builders import (
 from api.response_builders import (
     validate_ai_summary_contract,
     render_markdown_html_with_sources,
-    parse_bsi_section, 
+    parse_bsi_section, render_markdown_html
 )
 from api.message_utils import (
     build_ai_summary,

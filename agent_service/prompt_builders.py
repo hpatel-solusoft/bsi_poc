@@ -92,7 +92,7 @@ def build_copilot_prompt(case_id: str, case_data: dict) -> str:
     ON-DEMAND /copilot prompt.
 
     If a human-approved investigation plan is present in case_data, the
-    AI-generated steps are replaced with the human-approved steps BEFORE
+    AI-generated steps are replaced with the modified investigation steps BEFORE
     the context is serialised into the prompt. The LLM sees exactly one
     set of steps — no ambiguity, no instruction-following required to
     choose between two competing lists.

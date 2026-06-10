@@ -60,7 +60,7 @@ tools:
       case fraud type label. Multiple fraud types produce a broader
       cross-label candidate pool that surfaces scheme matches regardless
       of how prior cases were classified.
-    scope: SIMILAR_CASES
+    scope: [SIMILAR_CASES]
     python_function: "appworks.appworks_services.search_similar_cases"
     required_params:
       - name: "fraud_types"
