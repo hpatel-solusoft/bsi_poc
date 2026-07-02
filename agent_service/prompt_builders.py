@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 from config.prompts import (
     COPILOT_TOOL_PROMPT,
-    INVESTIGATE_SYSTEM_PROMPT,
+    intake_SYSTEM_PROMPT,
     PLAN_PROMPT,
     RISK_ASSESSMENT_PROMPT,
     SIMILAR_CASES_PROMPT,
@@ -35,13 +35,13 @@ def _render_prompt(template: str, values: dict) -> str:
 # runtime values. No prompt text lives here.
 # -----------------------------------------------------------------------
 
-def build_investigate_system_prompt() -> str:
+def build_intake_system_prompt() -> str:
     """
     SYSTEM prompt for the main investigation agent. 
     This is the only prompt that does not require runtime values, as it contains only static instructions and guidelines for the agent's overall behavior and reasoning style. 
     All tool-specific prompts are ON-DEMAND and receive case data for context injection
     """
-    return INVESTIGATE_SYSTEM_PROMPT
+    return intake_SYSTEM_PROMPT
     
 
 def build_similar_cases_prompt(case_data: dict) -> str:

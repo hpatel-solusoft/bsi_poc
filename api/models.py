@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Any
 # Request / response models
 # -----------------------------------------------------------------------
 
-class InvestigateRequest(BaseModel):
+class intakeRequest(BaseModel):
     case_id: str
 
 

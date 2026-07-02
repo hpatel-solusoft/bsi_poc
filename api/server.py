@@ -17,9 +17,9 @@ from fastapi import FastAPI, HTTPException
 from core.case_store import CASE_STORE, store_copilot_turn, resolve_copilot_history
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-from api.models import InvestigateRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest, CopilotRequest
+from api.models import intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest, CopilotRequest
 from agent_service.prompt_builders import (
-    build_investigate_system_prompt,
+    build_intake_system_prompt,
     build_risk_assessment_prompt,
     build_plan_prompt,
     build_similar_cases_prompt,
@@ -106,14 +106,14 @@ def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
-@app.post("/investigate")
-def investigate(req: InvestigateRequest):
+@app.post("/intake")
+def intake(req: intakeRequest):
     """
     AUTO flow — Section 3.1.
     Runs AUTO tools 1-2 (intake, enrichment) in dependency order
     (LLM decides sequence). Similar cases runs via /similar_cases.
     Populates CS-4 CASE_STORE for all subsequent on-demand calls.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     start = time.time()
     try:
@@ -125,9 +125,9 @@ def investigate(req: InvestigateRequest):
         # Scope to intake + enrichment only; similar cases is a separate route.
         
         messages, provenance_trail, _ = runner.run_scoped(
-            system_prompt=build_investigate_system_prompt(),
+            system_prompt=build_intake_system_prompt(),
             user_message=(
-                f"Investigate case {req.case_id}."
+                f"intake case {req.case_id}."
             ),
             scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only; 
         )
@@ -138,7 +138,7 @@ def investigate(req: InvestigateRequest):
 
         # ── Response split (v6 spec) ────────────────────────────────────────
         # ai_summary: the contract object passed to the next route in the flow.
-        # Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
+        # Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
         # details: human-readable narrative + meta — NOT required by downstream.
         # ──────────────────────────────────────────────────────────────────────
         ai_summary = {
@@ -163,10 +163,10 @@ def investigate(req: InvestigateRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Investigate route failed for case_id=%s", req.case_id)
+        logger.exception("intake route failed for case_id=%s", req.case_id)
         raise HTTPException(status_code=500, detail=f"Investigation failed: {exc}") from exc
     finally:
-        logger.info("POST /investigate completed for case_id=%s", req.case_id)
+        logger.info("POST /intake completed for case_id=%s", req.case_id)
 
 
 
@@ -175,9 +175,9 @@ def similar_cases(req: SimilarCasesRequest):
     """
     ON-DEMAND — Similar Cases Route (Step 2 in flow).
     Calls search_similar_cases to find historical cases with matching fraud patterns.
-    Requires case_data from a prior /investigate run (via CS-4 or ai_summary body).
+    Requires case_data from a prior /intake run (via CS-4 or ai_summary body).
     Explains historical case matches, pattern relevance, and archive findings.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     
 
@@ -257,10 +257,10 @@ def risk_assessment(req: RiskAssessmentRequest):
     """
     ON-DEMAND — Risk Assessment Route (Step 3 in flow).
     Calls get_risk_rules and calculate_risk_metrics.
-    Requires case_data from a prior /investigate + /similar_cases run
+    Requires case_data from a prior /intake + /similar_cases run
     (via CS-4 or ai_summary body).
     Explains case seriousness, triggered rules, and escalation thresholds.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     
     try:
@@ -372,7 +372,7 @@ def plan(req: PlanRequest):
     Calls get_investigation_plan only.
     Requires risk_tier from prior /risk_assessment run (via CS-4 or ai_summary body).
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
     try:
         
@@ -485,7 +485,7 @@ def copilot(req: CopilotRequest):
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     If provenance_trail is absent from ai_summary, source citations degrade
     gracefully — no crash.
-    Flow: /investigate → /similar_cases → /risk_assessment → /plan → /copilot 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot 
     """
     try:
         
