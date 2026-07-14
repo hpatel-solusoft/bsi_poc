@@ -3,7 +3,8 @@ HTTP endpoints for the BSI Fraud Investigation Platform.
 Responsibilities: endpoints, CASE_STORE (CS-4), response shaping,
 provenance trail extraction and persistence.
 Outside its scope: calling appworks_services directly, knowing tool names
-or manifest structure directly.
+or manifest structure directly, or knowing SQL/table schemas for the
+PostgreSQL fallback (that lives in core/case_store.py and its repositories).
 """
 
 import logging
@@ -14,7 +15,16 @@ from agent_service.agent_runner import BSIAgentRunner
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException
-from core.case_store import CASE_STORE, store_copilot_turn, resolve_copilot_history
+from fastapi.middleware.cors import CORSMiddleware
+from core.case_store import (
+    CASE_STORE,
+    store_copilot_turn,
+    resolve_copilot_history,
+    resolve_case_data,
+    persist_case_session,
+)
+from core.agent_audit_repository import log_agent_call
+from core.db import init_pool as init_db_pool, close_pool as close_db_pool, DatabaseUnavailableError
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
 from api.models import intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest, CopilotRequest
@@ -44,14 +54,90 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BSI Fraud Investigation Platform")
 
-# -----------------------------------------------------------------------
-# CS-4: Case session context — in-memory for POC with no TTL.
-# Entries live for the lifetime of the server process.
-# Falls back to ai_summary sent in the request body only if the server has restarted.
-# ai_summary is a REQUIRED field on all ON-DEMAND requests (v6 spec).
-# -----------------------------------------------------------------------
+# CORS: AppWorks (and any other browser-side caller) hits this API
+# cross-origin — different host/port than wherever this API is deployed —
+# so the browser sends a preflight OPTIONS request first. With no CORS
+# middleware, that preflight has no Access-Control-Allow-Origin header to
+# check against and the browser blocks the real request before it ever
+# reaches a route handler (visible client-side as HTTP status 0 /
+# net::ERR_FAILED, not as a 4xx/5xx from this app).
+#
+# Defaults to allowing all origins ("*"), since the set of AppWorks
+# hosts calling this API varies by environment and isn't known in
+# advance. To lock this down later, set CORS_ALLOWED_ORIGINS to a
+# comma-separated list of explicit origins, e.g.
+# "http://processsuite-cm.localdomain.com:81,https://bsi.example.com" —
+# no code change needed, just the env var.
+_cors_allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*").strip()
+if _cors_allowed_origins_raw == "*":
+    _cors_allowed_origins = ["*"]
+    # allow_credentials must be False with a wildcard origin — the CORS
+    # spec forbids "Access-Control-Allow-Origin: *" together with
+    # "Access-Control-Allow-Credentials: true", and browsers reject the
+    # response if a server sends both. This app doesn't rely on
+    # cookie/session-based auth for these routes, so this is safe.
+    _cors_allow_credentials = False
+else:
+    _cors_allowed_origins = [o.strip() for o in _cors_allowed_origins_raw.split(",") if o.strip()]
+    _cors_allow_credentials = True
 
-# POC requirement (MD v6): in-memory CS-4 has no TTL.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allowed_origins,
+    allow_credentials=_cors_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+logger.info(
+    "CORS enabled — allow_origins=%s allow_credentials=%s",
+    _cors_allowed_origins, _cors_allow_credentials,
+)
+
+
+@app.on_event("startup")
+def _init_agent_operational_store() -> None:
+    """
+    Warm the PostgreSQL connection pool on startup so the first request
+    doesn't pay connection-setup latency, and print a clear, unmissable
+    terminal banner reporting whether it succeeded. This is printed
+    directly (not just logged) so it's visible on `uvicorn` startup
+    regardless of log level or handler configuration elsewhere in the app.
+
+    A failure here is not fatal — the app still serves in-memory CS-4
+    traffic; only the Postgres fallback (case_ai_summary_store,
+    conversation_history, agent_audit_log) is unavailable until
+    connectivity is restored.
+    """
+    banner = "=" * 72
+    try:
+        init_db_pool()
+        print(banner)
+        print("[BSI] PostgreSQL: CONNECTED — agent_operational_store fallback is live")
+        print(banner)
+    except DatabaseUnavailableError as exc:
+        print(banner)
+        print(f"[BSI] WARNING: PostgreSQL: NOT CONNECTED — {exc}")
+        print("[BSI] Starting anyway. In-memory CS-4 will serve requests, but the ")
+        print("[BSI] case_ai_summary_store / conversation_history / agent_audit_log ")
+        print("[BSI] fallback is UNAVAILABLE until PostgreSQL is reachable.")
+        print(banner)
+        logger.error("PostgreSQL pool unavailable at startup — fallback reads will miss: %s", exc)
+
+
+@app.on_event("shutdown")
+def _close_agent_operational_store() -> None:
+    """Release pooled PostgreSQL connections on shutdown."""
+    close_db_pool()
+
+# -----------------------------------------------------------------------
+# CS-4: Case session context — in-memory for warm, same-process lookups.
+# On a miss (server restart, or a request landing on a different worker),
+# falls back to the PostgreSQL case_ai_summary_store table (Data Persistence
+# and Synchronisation Specification v1.0, Section D.1) before finally
+# accepting ai_summary in the request body as a legacy/explicit-override
+# path. AppWorks now sends case_id only by default — see
+# core.case_store.resolve_case_data for the full resolution order.
+# -----------------------------------------------------------------------
 
 
 def _get_runner() -> BSIAgentRunner:
@@ -65,37 +151,23 @@ def _get_runner() -> BSIAgentRunner:
         _runner = BSIAgentRunner()
     return _runner
 
-def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> dict:
+def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> tuple:
     """
     CS-4 lookup pattern used by all ON-DEMAND handlers.
-    Prioritizes ai_summary from request body as the absolute source of truth (v6).
-    Updates CASE_STORE for persistence but always returns the fresh data from the request.
+
+    Resolution order (Data Persistence Spec v1.0, Section D.1):
+      1. In-memory CASE_STORE (CS-4) — warm, same-process.
+      2. PostgreSQL case_ai_summary_store — fallback used whenever AppWorks
+         sends case_id only, which is now the default request shape.
+      3. ai_summary in the request body — explicit-override / legacy path.
+    Delegates to core.case_store.resolve_case_data so the fallback logic
+    lives in one place (core/) rather than duplicated per endpoint.
+
+    Returns (case_data, source) — source is one of
+    core.case_store.SOURCE_CS_MEMORY / SOURCE_POSTGRES_FALLBACK /
+    SOURCE_CLIENT_SUPPLIED, logged by the caller and useful for testing.
     """
-    if ai_summary:
-        validate_ai_summary_contract(ai_summary)
-        
-        # Build fresh case_data from input
-        case_data = {**ai_summary.get("investigation", {})}
-        
-        # Pull top-level on-demand sections
-        for key in ["similar_cases", "risk_assessment", "investigation_plan"]:
-            if key in ai_summary:
-                case_data[key] = ai_summary[key]
-        
-        case_data["provenance_trail"] = ai_summary.get("provenance_trail", [])
-        
-        # Update persistence store
-        CASE_STORE[case_id] = case_data
-        return case_data
-
-    # Fallback to store only if request body is empty
-    if case_id in CASE_STORE and CASE_STORE[case_id]:
-        return CASE_STORE[case_id]
-
-    raise HTTPException(
-        status_code=400,
-        detail=f"Case {case_id} session data not found. Provide ai_summary in request body."
-    )
+    return resolve_case_data(case_id, ai_summary, validate_ai_summary_contract)
 
 # -----------------------------------------------------------------------
 # Endpoints
@@ -133,30 +205,38 @@ def intake(req: intakeRequest):
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
-        # CS-4: populate store with all sections + provenance.
+        # CS-4: populate warm in-memory store with all sections + provenance.
         CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
 
-        # ── Response split (v6 spec) ────────────────────────────────────────
-        # ai_summary: the contract object passed to the next route in the flow.
-        # Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
-        # details: human-readable narrative + meta — NOT required by downstream.
-        # ──────────────────────────────────────────────────────────────────────
+        # ai_summary is the internal contract object handed between routes.
+        # It is no longer returned to the caller (Data Persistence Spec v1.0,
+        # Section B.2/D.1): AppWorks now sends case_id only on every
+        # subsequent call, so the full JSON is persisted server-side in
+        # PostgreSQL case_ai_summary_store and rehydrated there on the next
+        # request instead of round-tripping through the client.
         ai_summary = {
             "investigation":    sections,
             "provenance_trail": provenance_trail,
         }
+        persist_case_session(req.case_id, ai_summary)
 
-        # BSI requirement: swap internal case_id for business complaint_no in narrative
-    
+        duration_seconds = round(time.time() - start, 1)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="intake",
+            endpoint="/intake",
+            latency_ms=int(duration_seconds * 1000),
+            status="success",
+        )
+
         return {
-            "case_id":    req.case_id,
-            "status":     "completed",
-            "ai_summary": ai_summary,          # ← pass this object to /similar_cases
+            "case_id": req.case_id,
+            "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), provenance_trail),
                 "meta": {
                     "tool_calls_made":  len(provenance_trail),
-                    "duration_seconds": round(time.time() - start, 1),
+                    "duration_seconds": duration_seconds,
                 },
             },
         }
@@ -164,6 +244,13 @@ def intake(req: intakeRequest):
         raise
     except Exception as exc:
         logger.exception("intake route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="intake",
+            endpoint="/intake",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
         raise HTTPException(status_code=500, detail=f"Investigation failed: {exc}") from exc
     finally:
         logger.info("POST /intake completed for case_id=%s", req.case_id)
@@ -179,14 +266,16 @@ def similar_cases(req: SimilarCasesRequest):
     Explains historical case matches, pattern relevance, and archive findings.
     Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
-    
+    start = time.time()
 
     try:
         
-        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
-        
-        case_data = _resolve_case_store(req.case_id, req.ai_summary)
-        logger.info(f"Case data resolved for case_id={req.case_id}: Key length: {len(list(case_data.keys()))}")
+        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
+        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        logger.info(
+            "case_id=%s data_source=%s key_count=%d",
+            req.case_id, data_source, len(list(case_data.keys())),
+        )
         runner = _get_runner()
         
         
@@ -221,32 +310,49 @@ def similar_cases(req: SimilarCasesRequest):
             new_provenance,
         )
 
-        # Update CS-4 but return only the route-specific section.
+        # Update CS-4 warm store but return only the route-specific section.
         CASE_STORE[req.case_id].update(similar_section)
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
 
         # ai_summary: updated contract — investigation sections with similar cases.
-        # Pass this object to /risk_assessment.
+        # Persisted server-side (Postgres case_ai_summary_store) for the next
+        # route to fall back on; no longer returned to the caller.
         ai_summary = build_ai_summary(
             case_data,
             {"similar_cases": similar_cases_data},
             merged_provenance,
         )
-        
-        
-        logger.info(f"SIMILAR CASES NARRATIVE TOTAL KEYs: {len(similar_cases_data)}") 
+        persist_case_session(req.case_id, ai_summary)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="similar_cases",
+            endpoint="/similar_cases",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+
+        logger.info(f"SIMILAR CASES NARRATIVE TOTAL KEYs: {len(similar_cases_data)}")
         return {
-            "case_id":    req.case_id,
-            "status":     "completed",
-            "ai_summary": ai_summary,          # ← pass this object to /risk_assessment
+            "case_id": req.case_id,
+            "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(agent_summary,merged_provenance),
+                "agent_summary": render_markdown_html_with_sources(agent_summary, merged_provenance),
+                "meta": {
+                    "data_source": data_source,
+                },
             },
         }
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Similar cases route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="similar_cases",
+            endpoint="/similar_cases",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
         raise HTTPException(status_code=500, detail=f"Similar cases analysis failed: {exc}") from exc
     finally:
         logger.info("POST /similar_cases completed for case_id=%s", req.case_id)
@@ -262,11 +368,12 @@ def risk_assessment(req: RiskAssessmentRequest):
     Explains case seriousness, triggered rules, and escalation thresholds.
     Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
-    
+    start = time.time()
     try:
         
-        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
-        case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
+        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        logger.info("case_id=%s data_source=%s", req.case_id, data_source)
         runner = _get_runner()
         
 
@@ -338,7 +445,7 @@ def risk_assessment(req: RiskAssessmentRequest):
             new_provenance,
         )
 
-        # Update CS-4 but return only the route-specific section.
+        # Update CS-4 warm store but return only the route-specific section.
         CASE_STORE[req.case_id].update(risk_section)
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
 
@@ -347,19 +454,36 @@ def risk_assessment(req: RiskAssessmentRequest):
             {"risk_assessment": risk_assessment},
             merged_provenance,
         )
+        persist_case_session(req.case_id, ai_summary)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="risk_assessment",
+            endpoint="/risk_assessment",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
 
         return {
-            "case_id":    req.case_id,
-            "status":     "completed",
-            "ai_summary": ai_summary,          # ← pass this object to /plan
+            "case_id": req.case_id,
+            "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), merged_provenance),
+                "meta": {
+                    "data_source": data_source,
+                },
             },
         }
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Risk assessment route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="risk_assessment",
+            endpoint="/risk_assessment",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
         raise HTTPException(status_code=500, detail=f"Risk assessment failed: {exc}") from exc
     finally:
         logger.info("POST /risk_assessment completed for case_id=%s", req.case_id)
@@ -374,10 +498,12 @@ def plan(req: PlanRequest):
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
     Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
+    start = time.time()
     try:
         
-        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary.
-        case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
+        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        logger.info("case_id=%s data_source=%s", req.case_id, data_source)
         execution_context = {"ai_summary": req.ai_summary}
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
@@ -445,33 +571,51 @@ def plan(req: PlanRequest):
             new_provenance,
         )
 
-        # Update CS-4 but return only the route-specific section.
+        # Update CS-4 warm store but return only the route-specific section.
         CASE_STORE[req.case_id].update(plan_section)
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
 
         # ai_summary: updated contract — investigation sections separate from plan.
-        # Pass this object to  and /copilot.
+        # Persisted server-side (Postgres case_ai_summary_store); /copilot falls
+        # back to it via CS-4 resolution rather than receiving it directly.
         ai_summary = build_ai_summary(
             case_data,
             {"investigation_plan": investigation_plan},
             merged_provenance,
         )
+        persist_case_session(req.case_id, ai_summary)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan",
+            endpoint="/plan",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
 
         return {
-            "case_id":    req.case_id,
-            "status":     "completed",
-            "ai_summary": ai_summary,          # ← pass this object to , /copilot
+            "case_id": req.case_id,
+            "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(
                     assistant_text,
                     merged_provenance,
                 ),
+                "meta": {
+                    "data_source": data_source,
+                },
             },
         }
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Plan route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan",
+            endpoint="/plan",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
         raise HTTPException(status_code=500, detail=f"Plan generation failed: {exc}") from exc
     finally:
         logger.info("POST /plan completed for case_id=%s", req.case_id)
@@ -481,27 +625,31 @@ def copilot(req: CopilotRequest):
     """
     ON-DEMAND — Copilot Route (Step 5 in flow).
     Answers investigator questions grounded in case context (CS-5).
-    Answers from CS-4 context first; falls back to tools only if needed.
-    ai_summary is REQUIRED per v6 spec — server decides which source to use.
-    If provenance_trail is absent from ai_summary, source citations degrade
-    gracefully — no crash.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot 
+    Answers from CS-4 context first; falls back to PostgreSQL
+    case_ai_summary_store, then to ai_summary in the body if supplied.
+    conversation_history is server-owned in PostgreSQL (D.2, rolling
+    20-turn window) — the response returns only the new answer, never
+    the full transcript, since AppWorks/the client no longer needs to
+    round-trip it.
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot
     """
+    start = time.time()
     try:
-        
-     
-        # CS-4 pattern (v6): warm lookup or re-hydrate from ai_summary
-        cs4_warm = req.case_id in CASE_STORE
-        case_data = _resolve_case_store(req.case_id, req.ai_summary)
+        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
+        case_data, case_data_source = _resolve_case_store(req.case_id, req.ai_summary)
 
         # If the frontend has supplied a human-approved investigation plan, merge it
         # into case_data so the copilot prompt's precedence rule can act on it.
         if req.modified_ai_investigation_plan:
             case_data["modified_ai_investigation_plan"] = req.modified_ai_investigation_plan
 
-        conversation_history = resolve_copilot_history(
+        conversation_history, history_source = resolve_copilot_history(
             req.case_id,
             req.conversation_history,
+        )
+        logger.info(
+            "case_id=%s case_data_source=%s conversation_history_source=%s",
+            req.case_id, case_data_source, history_source,
         )
 
         runner = _get_runner()
@@ -511,13 +659,8 @@ def copilot(req: CopilotRequest):
             user_message=req.question,
             conversation_history=conversation_history,
         )
-        
+
         answer = extract_agent_summary(messages)
-        updated_conversation_history = store_copilot_turn(
-            req.case_id,
-            req.question,
-            answer,
-        )
 
         # sources_cited: include the stored provenance trail from CS-4 (so context-
         # grounded answers cite the original AppWorks sources) plus any new tool
@@ -528,13 +671,11 @@ def copilot(req: CopilotRequest):
         combined_provenance = merge_provenance(stored_provenance, new_provenance_trail)
 
         sources_cited = [
-            # f"{p['tool']} — {p.get('computed_by', '')} — "
             f"retrieved {p.get('retrieved_at', '')}"
             for p in combined_provenance
         ]
         sources_cited_details = [
             {
-                # "tool": p.get("tool", ""),
                 "computed_by": p.get("computed_by", ""),
                 "retrieved_at": p.get("retrieved_at", ""),
                 "sources": p.get("sources", []),
@@ -542,26 +683,59 @@ def copilot(req: CopilotRequest):
             for p in combined_provenance
         ]
 
-        # CS-4: Update store only if the case entry still exists (it may have
-        # been evicted if TTL expires between _resolve_case_store and here).
+        # Durable transcript write: PostgreSQL conversation_history (D.2) is
+        # authoritative; the in-memory store is updated for this process's
+        # fast path. The full transcript is not returned to the caller.
+        # sources_cited_details is persisted alongside the assistant's turn
+        # so a later /copilot call resolving history from Postgres (or
+        # anyone reading conversation_history directly) still has the
+        # citations this answer was grounded in — previously this argument
+        # was never passed, so every row's sources_cited column was "[]".
+        store_copilot_turn(
+            req.case_id,
+            req.question,
+            answer,
+            sources_cited=sources_cited_details,
+        )
+
+        # CS-4: Update the warm store only if the case entry still exists (it may
+        # have been evicted if TTL expires between _resolve_case_store and here),
+        # and write through to Postgres case_ai_summary_store so the next fallback
+        # read for this case sees whatever new tool output Copilot produced.
         if new_provenance_trail and req.case_id in CASE_STORE:
-            new_sections = extract_tool_results(messages,runner.dispatcher.tool_to_section)
+            new_sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
             CASE_STORE[req.case_id].update(new_sections)
             CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
 
+            ai_summary = build_ai_summary(case_data, new_sections, combined_provenance)
+            persist_case_session(req.case_id, ai_summary)
+
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="copilot",
+            endpoint="/copilot",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+
         return {
-            "answer":               render_markdown_html(answer),
-            "sources_cited":        sources_cited,
+            "answer": render_markdown_html(answer),
+            "sources_cited": sources_cited,
             "sources_cited_details": sources_cited_details,
-            "provenance_trail":     combined_provenance,
-            "conversation_history":  updated_conversation_history,
-            # "tool_calls_made":      len(new_provenance_trail),
-            "cs4_source":           "warm" if cs4_warm else "rehydrated",
+            "case_data_source": case_data_source,
+            "conversation_history_source": history_source,
         }
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Copilot route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="copilot",
+            endpoint="/copilot",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
         raise HTTPException(status_code=500, detail=f"Copilot failed: {exc}") from exc
     finally:
         logger.info("POST /copilot completed for case_id=%s", req.case_id)

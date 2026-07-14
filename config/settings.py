@@ -33,3 +33,19 @@ TOP_LEVEL_SECTIONS = frozenset({
     "investigation_plan",
     "provenance_trail",
 })
+
+# ----------------------------------------------------------------
+# Agent Operational Store (PostgreSQL) — Data Persistence and
+# Synchronisation Specification v1.0, Section D.
+# Connection details (POSTGRES_HOST/PORT/DB/USER/PASSWORD or
+# DATABASE_URL) are read from the environment in core/db.py, not here —
+# this file holds pure constants, not secrets.
+# ----------------------------------------------------------------
+
+DB_POOL_MIN_CONN = 1
+DB_POOL_MAX_CONN = 10
+
+# D.2: conversation_history retains a rolling window of the most recent
+# turns per case. A "turn" is one message (user or assistant), so 20
+# turns is 10 question/answer exchanges.
+CONVERSATION_HISTORY_MAX_TURNS = 20

@@ -12,30 +12,34 @@ class intakeRequest(BaseModel):
 
 class SimilarCasesRequest(BaseModel):
     case_id: str
-    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
-    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
-    ai_summary: Dict[str, Any]
+    # ai_summary is now OPTIONAL (Data Persistence Spec v1.0, Section D.1).
+    # AppWorks sends case_id only; the server resolves case_data from
+    # CASE_STORE (CS-4) and, on a miss, from the PostgreSQL
+    # case_ai_summary_store fallback. ai_summary remains accepted for
+    # explicit-override / legacy callers only.
+    ai_summary: Optional[Dict[str, Any]] = None
 
 
 class PlanRequest(BaseModel):
     case_id: str
-    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
-    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
-    ai_summary: Dict[str, Any]
+    # ai_summary is optional — see SimilarCasesRequest for the resolution order.
+    ai_summary: Optional[Dict[str, Any]] = None
 
 class RiskAssessmentRequest(BaseModel):
     case_id: str
-    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
-    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
-    ai_summary: Dict[str, Any]
+    # ai_summary is optional — see SimilarCasesRequest for the resolution order.
+    ai_summary: Optional[Dict[str, Any]] = None
 
 
 class CopilotRequest(BaseModel):
     case_id: str
     question: str
-    # ai_summary is REQUIRED per v6 spec — frontend always sends it.
-    # Contains: { "investigation": { ...sections... }, "provenance_trail": [...] }
-    ai_summary: Dict[str, Any]
+    # ai_summary is optional — see SimilarCasesRequest for the resolution order.
+    ai_summary: Optional[Dict[str, Any]] = None
+    # conversation_history is now server-owned in PostgreSQL (D.2). This
+    # field is only used to seed history for a brand-new case_id that has
+    # no persisted turns yet; it is otherwise ignored in favor of the
+    # server-side transcript.
     conversation_history: Optional[List[Dict[str, Any]]] = None
     # Human-approved investigation plan, written by an analyst via the Modify Strategy flow.
     # When present, the copilot prompt treats these steps as authoritative over the AI-generated ones.

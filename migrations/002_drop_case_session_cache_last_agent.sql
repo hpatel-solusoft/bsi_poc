@@ -1,0 +1,11 @@
+-- Drops case_session_cache.last_agent, added in 001 as an extension
+-- beyond Data Persistence Spec v1.0 Section D.1, then reverted:
+-- confirmed unnecessary and coupled case_session_cache to agent naming
+-- that agent_audit_log already owns.
+--
+-- IF EXISTS at both the table and column level: a fresh install's 001
+-- never creates case_session_cache at all (it creates
+-- case_ai_summary_store directly, see 003), so this is a pure no-op
+-- there. It only does something for a database that ran an older
+-- version of 001 that still had last_agent.
+ALTER TABLE IF EXISTS case_session_cache DROP COLUMN IF EXISTS last_agent;
