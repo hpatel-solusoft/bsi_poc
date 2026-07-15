@@ -1,0 +1,209 @@
+# =============================================================================
+# BSI Phase 2 — Rule Registry (configuration)
+# =============================================================================
+#
+# This file is the single source of truth for:
+#   - which rules exist,
+#   - which wave each belongs to and in what ORDER it executes, and
+#   - the default tunable parameters each rule ships with.
+#
+# It replaces the hardcoded Python dicts that previously lived in
+# reasoning_layer/rule_registry.py, for the same reason manifest.yaml owns
+# tool config: this is data that BSI owns and will change, and it must not
+# be buried in code.
+#
+# TWO-LAYER MODEL (Data Persistence Spec, Section C.1 — "rule logic stays in
+# Git; rule parameters live as updatable Neo4j properties"):
+#   1. Rule LOGIC lives in Git as .cypher files (reasoning_layer/rules/**).
+#   2. Rule DEFAULT config lives here, in Git.
+#   3. Rule LIVE config lives in Neo4j as :InferenceRule nodes.
+#
+#   On startup the defaults below SEED the :InferenceRule nodes (ON CREATE
+#   only). Thereafter a fraud analyst can retune a parameter or disable a
+#   rule directly on the Neo4j node, and that change survives every deploy —
+#   this file never overwrites an existing node's params. So: edit this file
+#   to change what a FRESH environment starts with; edit the Neo4j node to
+#   change a RUNNING one.
+#
+# ORDER MATTERS. The `waves.wave_2` list below is the execution order, and it
+# encodes real data dependencies, not preference:
+#   - Rule 8 reads what Rule 7 and the network rules (2/4/6/9) wrote.
+#   - Rule 13 reads what Rule 7 wrote.
+# Do not sort these lists alphabetically or by rule number.
+#
+# VOCABULARY PARAMS are matched case-insensitively with CONTAINS against the
+# lowercased allegation/case fields, because AppWorks stores free-form label
+# text ("Personal Care Attendant Fraud", "PCA - Employment"). If a rule is
+# silently not firing, the first thing to check is whether the real
+# allegation status/type text is covered by the lists below — the
+# diagnose_networks tool reports exactly this.
+# =============================================================================
+
+# Wave membership AND execution order. Membership is by explicit list, never a
+# numeric range: Rules 7, 8, 10 and 11 all fall outside a clean number split
+# (Reference doc, Section 5.4), so the lists are authoritative.
+waves:
+  wave_1:
+    - Rule_01_Shared_Employer
+    - Rule_03_Shared_Address
+    - Rule_05_Alias_Identity
+    - Rule_10_Merged_Case_Propagation
+    - Rule_11_Cross_Case_Hub
+  wave_2:
+    - Rule_02_Employer_Fraud_Network
+    - Rule_04_Address_Fraud_Network
+    - Rule_06_Identity_Fraud_Network
+    - Rule_07_Prior_Guilty
+    - Rule_08_Recidivist_Escalation
+    - Rule_09_PCA_CheckSplit
+    - Rule_12_SLAM_Wage_Corroboration
+    - Rule_13_FastTrack_Escalation
+  # Rule 14 is NOT a wave member and NOT a 15th rule — it is a cross-cutting
+  # modifier that runs after both waves and after the Extraction Stage has
+  # recorded which relationships the narrative independently confirms.
+  modifier: Rule_14_Confirmation_Elevation
+
+# Per-rule definition. `wave` here is descriptive metadata written onto the
+# :InferenceRule node (0 = the cross-cutting modifier); the authoritative
+# execution grouping/order is the `waves` lists above.
+rules:
+
+  # ---- Wave 1: structural, no LLM, no tunable vocabulary ----
+  Rule_01_Shared_Employer:
+    name: "Shared Employer Detection"
+    wave: 1
+    enabled: true
+    params: {}
+
+  Rule_03_Shared_Address:
+    name: "Shared Address Detection"
+    wave: 1
+    enabled: true
+    params: {}
+
+  Rule_05_Alias_Identity:
+    name: "Alias-Based Identity Connection"
+    wave: 1
+    enabled: true
+    params: {}
+
+  Rule_10_Merged_Case_Propagation:
+    name: "Merged Case Subject History Propagation"
+    wave: 1
+    enabled: true
+    params: {}
+
+  Rule_11_Cross_Case_Hub:
+    name: "Cross-Case Co-Subject Network Detection"
+    wave: 1
+    enabled: true
+    params: {}
+
+  # ---- Wave 2: attribution-dependent ----
+  Rule_02_Employer_Fraud_Network:
+    name: "Employer Fraud Network Formation"
+    wave: 2
+    enabled: true
+    params:
+      active_allegation_statuses:
+        - open
+        - active
+        - under investigation
+        - pending
+        - substantiated
+      employer_allegation_types:
+        - pca
+        - personal care
+        - employment
+        - wage
+        - payroll
+
+  Rule_04_Address_Fraud_Network:
+    name: "Address Fraud Network Formation"
+    wave: 2
+    enabled: true
+    params:
+      active_allegation_statuses:
+        - open
+        - active
+        - under investigation
+        - pending
+        - substantiated
+
+  Rule_06_Identity_Fraud_Network:
+    name: "Identity Fraud Network Formation"
+    wave: 2
+    enabled: true
+    params:
+      identity_allegation_types:
+        - false identity
+        - identity
+        - impersonation
+      active_allegation_statuses:
+        - open
+        - active
+        - under investigation
+        - pending
+        - substantiated
+
+  Rule_07_Prior_Guilty:
+    name: "Prior Guilty Subject Identification"
+    wave: 2
+    enabled: true
+    params:
+      closed_case_statuses:
+        - closed
+        - completed
+        - adjudicated
+      guilty_outcome_values:
+        - guilty
+        - convicted
+        - substantiated
+        - guilty plea
+        - found guilty
+
+  Rule_08_Recidivist_Escalation:
+    name: "High Risk Escalation: Recidivist in Active Fraud Network"
+    wave: 2
+    enabled: true
+    params:
+      active_case_statuses:
+        - open
+        - active
+        - under investigation
+        - pending
+
+  Rule_09_PCA_CheckSplit:
+    name: "PCA Check-Split Network Detection"
+    wave: 2
+    enabled: true
+    params:
+      checksplit_allegation_types:
+        - check-splitting
+        - check splitting
+        - check split
+
+  Rule_12_SLAM_Wage_Corroboration:
+    name: "SLAM Wage Corroboration"
+    wave: 2
+    enabled: true
+    params:
+      slam_allegation_types:
+        - slam
+
+  Rule_13_FastTrack_Escalation:
+    name: "FastTrack Escalation Recommendation"
+    wave: 2
+    enabled: true
+    params:
+      # Reference doc Section 6.1: "Case fraud amount above threshold (default
+      # $50,000)". The word "default" is exactly why this is a parameter and
+      # not a literal in the Cypher.
+      fasttrack_fraud_threshold: 50000.0
+
+  # ---- Cross-cutting modifier (wave 0 = not a wave member) ----
+  Rule_14_Confirmation_Elevation:
+    name: "Extraction-Confirmed Relationship Elevation"
+    wave: 0
+    enabled: true
+    params: {}

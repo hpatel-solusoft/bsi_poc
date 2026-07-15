@@ -413,3 +413,80 @@ class AllegationTypesResult(BaseModel):
     total_types:      int    # count of distinct types returned — for traceability
     relevant_type_ids: Optional[list[int]] = None #Populated by the LLM after reasoning over allegation_types.
     model_config = {"extra": "forbid"}
+
+
+# ================================================================
+# REASONING LAYER — Phase 5: Extraction Stage candidate facts
+# (Python Implementation Reference, Section 5.3 Step 3/4; Section 3.2's
+#  ALLEGATION_LIKELY_AGAINST_SUBJECT row; Section 3.3's confidence enum)
+# ================================================================
+
+class AttributionCandidate(BaseModel):
+    """
+    A single candidate allegation-to-subject attribution produced by the
+    LLM-based Extraction Stage from narrative text. Written into Neo4j
+    as an ALLEGATION_LIKELY_AGAINST_SUBJECT relationship (Section 3.2)
+    by reasoning_layer/graph_load.py — this model is what stands between
+    raw LLM JSON and that write, so a malformed or hallucinated LLM
+    response is caught here rather than silently reaching the graph.
+    extra='forbid' — the Extraction Stage's whole job is to conform to
+    this exact shape; unrecognized keys indicate the LLM drifted from
+    the prompt's output contract and should fail validation, not pass
+    through silently (Issue #11's lesson, applied to a new tool).
+    """
+    allegation_id:      str
+    subject_id:         str
+    confidence:         str  # "High" | "Medium" | "Unresolved" — Section 3.3's enum, shared with every other inferred relationship
+    rationale:          str
+    source_comment_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("confidence")
+    @classmethod
+    def _confidence_in_enum(cls, v: str) -> str:
+        allowed = {"High", "Medium", "Unresolved"}
+        if v not in allowed:
+            raise ValueError(f"confidence must be one of {sorted(allowed)}, got {v!r}")
+        return v
+
+    model_config = {"extra": "forbid"}
+
+
+class CorroborationCandidate(BaseModel):
+    """
+    A narrative confirmation of a structural relationship Wave 1 already
+    asserted — the input Rule 14 (Extraction-Confirmed Relationship
+    Elevation) reads to elevate Medium confidence to High.
+
+    Section 6.2's Rule 14 worked example calls this
+    comm.confirms_relationship_id, "set by the Extraction Stage". Without
+    a candidate type for it, nothing in the pipeline ever populated that
+    field, and Rule 14 would have had an input no code ever wrote —
+    firing zero times forever while appearing to be implemented.
+
+    relationship_ref is the elementId of the relationship being confirmed;
+    comment_ref is the comment_id of the :Commentary node doing the
+    confirming. Both are echoed back from what the Extraction Stage was
+    shown, never invented — reasoning_layer/graph_load.py verifies each
+    against the live graph before writing, because a valid SHAPE is not a
+    valid VALUE.
+    """
+    relationship_ref: str
+    comment_ref:      str
+    rationale:        str
+    model_config = {"extra": "forbid"}
+
+
+class ExtractionResult(BaseModel):
+    """
+    Full validated output of one Extraction Stage run for one subject
+    (dispatched from reasoning_layer.extraction_stage.run_extraction).
+    'unresolved_allegation_ids' carries allegations the LLM explicitly
+    could not attribute — kept distinct from an empty 'attributions'
+    list so a downstream reader can tell "nothing to extract" apart
+    from "extraction ran and found no confident attribution".
+    """
+    subject_id:                str
+    attributions:              list[AttributionCandidate] = Field(default_factory=list)
+    unresolved_allegation_ids: list[str] = Field(default_factory=list)
+    corroborations:            list[CorroborationCandidate] = Field(default_factory=list)
+    model_config = {"extra": "forbid"}

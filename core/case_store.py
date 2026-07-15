@@ -302,4 +302,3 @@ def store_copilot_turn(
         "messages": messages,
     }
     return messages
-

@@ -10,6 +10,7 @@ from config.prompts import (
     PLAN_PROMPT,
     RISK_ASSESSMENT_PROMPT,
     SIMILAR_CASES_PROMPT,
+    EXTRACTION_STAGE_PROMPT,
 )
 # -----------------------------------------------------------------------
 # PROMPT RENDERING
@@ -83,6 +84,32 @@ def build_plan_prompt(case_data: dict) -> str:
         PLAN_PROMPT,
         {
             "case_context":  json.dumps(case_data, indent=2),
+        },
+    )
+
+
+def build_extraction_prompt(subject_id: str, narrative_records: list,
+                           structural_relationships: list | None = None) -> str:
+    """
+    Narrative Extraction prompt (Python Implementation Reference,
+    Section 5.3 Step 3). Called from reasoning_layer/extraction_stage.py,
+    not from an API route — there is no HTTP endpoint behind this one;
+    it's an internal step of run_reasoning_pipeline. Kept in this module
+    anyway because prompt construction for every prompt in the system
+    happens here, regardless of caller (Himali's rule: no prompt text
+    outside config/prompts.py, and this file is where it's rendered).
+    """
+    return _render_prompt(
+        EXTRACTION_STAGE_PROMPT,
+        {
+            "subject_id":        subject_id,
+            "narrative_records": json.dumps(narrative_records, indent=2, default=str),
+            # The structural relationships Wave 1 just asserted, offered as
+            # confirmable candidates. json.dumps is the caller's job, not the
+            # prompt's — the prompt is a plain string with placeholders.
+            "structural_relationships": json.dumps(
+                structural_relationships or [], indent=2, default=str,
+            ),
         },
     )
 

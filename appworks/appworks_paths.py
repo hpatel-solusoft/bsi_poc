@@ -62,6 +62,40 @@ class AppWorksPaths:
                 
             )
 
+        @staticmethod
+        def addresses(id: str) -> str:
+            return f"/entities/Subject/items/{id}/relationships/Subject_Address"
+
+        @staticmethod
+        def aliases(id: str) -> str:
+            return f"/entities/Subject/items/{id}/childEntities/Subject_Alias"
+
+        @staticmethod
+        def jobs(id: str) -> str:
+            # Sources EMPLOYED_BY (Section 3.2) — employer_name/fein per employment
+            # record. Never registered before this round: Phase 1's case_intake
+            # only needed Address/Alias, not Employer, so this path was never
+            # added even though the endpoint itself isn't new or AppWorks-side
+            # missing — see etl/GAP_ANALYSIS.md.
+            return f"/entities/Subject/items/{id}/childEntities/Subject_Job"
+
+        @staticmethod
+        def wages(id: str) -> str:
+            # Sources HAS_WAGE_RECORD_WITH (Section 3.2) — a separate,
+            # independent path to Subject-Employer linkage from the Job table,
+            # per the reference doc's own "(independent path, better coverage)"
+            # note. See etl/GAP_ANALYSIS.md for the FEIN-matching caveat on
+            # this specific endpoint.
+            return f"/entities/Subject/items/{id}/childEntities/Subject_SubjectWages"
+
+        @staticmethod
+        def assets(id: str) -> str:
+            # :Asset (Section 3.1) — "modeled but disabled in the reasoner".
+            # Path registered for completeness / future use; etl/graph_sync.py
+            # does not call it yet (see GAP_ANALYSIS.md, Section 3.2 has no
+            # defined Subject-to-Asset relationship type to write into).
+            return f"/entities/Subject/items/{id}/childEntities/Subject_Asset"
+
     class Allegations:
 
         @staticmethod

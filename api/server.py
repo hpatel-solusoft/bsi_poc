@@ -25,9 +25,21 @@ from core.case_store import (
 )
 from core.agent_audit_repository import log_agent_call
 from core.db import init_pool as init_db_pool, close_pool as close_db_pool, DatabaseUnavailableError
+from reasoning_layer.neo4j_client import (
+    init_driver as init_neo4j_driver,
+    close_driver as close_neo4j_driver,
+    GraphUnavailableError,
+)
+from reasoning_layer.apply_schema import apply_schema
+from reasoning_layer.rule_engine import verify_rule_files
+from etl.ingest_service import ingest as run_graph_ingest
+from core import graph_ingest_repository
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-from api.models import intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest, CopilotRequest
+from api.models import (
+    intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
+    CopilotRequest, GraphIngestRequest,
+)
 from agent_service.prompt_builders import (
     build_intake_system_prompt,
     build_risk_assessment_prompt,
@@ -111,6 +123,10 @@ def _init_agent_operational_store() -> None:
     banner = "=" * 72
     try:
         init_db_pool()
+        # Ensure the ETL bookkeeping table exists even when running under a
+        # bare `uvicorn` (local dev), which does not go through the docker
+        # entrypoint that applies migrations/*.sql. Idempotent and best-effort.
+        graph_ingest_repository.ensure_table()
         print(banner)
         print("[BSI] PostgreSQL: CONNECTED — agent_operational_store fallback is live")
         print(banner)
@@ -124,10 +140,60 @@ def _init_agent_operational_store() -> None:
         logger.error("PostgreSQL pool unavailable at startup — fallback reads will miss: %s", exc)
 
 
+@app.on_event("startup")
+def _init_reasoning_layer() -> None:
+    """
+    Warm the Neo4j driver on startup, same banner treatment as Postgres.
+    A failure here is not fatal to the app itself — AppWorks-backed
+    routes (/intake, /similar_cases, /risk_assessment, /plan, /copilot's
+    AppWorks path) are unaffected — but run_reasoning_pipeline and any
+    future Neo4j-backed tool will fail at dispatch time (Gate 3 in
+    dispatcher.py resolves the function fine; the function itself then
+    raises when it can't open a session) until connectivity is restored.
+    """
+    banner = "=" * 72
+    try:
+        init_neo4j_driver()
+
+        # Constraints/indexes and the :InferenceRule registry. Every statement
+        # is IF NOT EXISTS / MERGE, so this is a no-op on an already-provisioned
+        # graph. It runs on startup because the alternative — a human
+        # remembering to pipe schema.cypher into cypher-shell — means the rule
+        # library eventually runs against an unconstrained graph, where every
+        # MERGE is a label scan and two concurrent ingests can create duplicate
+        # :Employer nodes that Rule 1 then silently fails to match across.
+        # Set NEO4J_APPLY_SCHEMA_ON_STARTUP=false to opt out (e.g. if graph DDL
+        # is owned by a DBA in your environment).
+        if os.getenv("NEO4J_APPLY_SCHEMA_ON_STARTUP", "true").lower() != "false":
+            apply_schema()
+
+        # Fail fast if a rule .cypher file is missing: a rule that cannot be
+        # loaded must break the boot, not quietly never fire in production.
+        rule_ids = verify_rule_files()
+
+        print(banner)
+        print(f"[BSI] Neo4j: CONNECTED — reasoning layer live ({len(rule_ids)} rules loaded)")
+        print(banner)
+    except GraphUnavailableError as exc:
+        print(banner)
+        print(f"[BSI] WARNING: Neo4j: NOT CONNECTED — {exc}")
+        print("[BSI] Starting anyway. AppWorks-backed routes are unaffected; ")
+        print("[BSI] run_reasoning_pipeline will fail until Neo4j is reachable.")
+        print(banner)
+        logger.error("Neo4j driver unavailable at startup — reasoning pipeline calls will fail: %s", exc)
+
+
 @app.on_event("shutdown")
 def _close_agent_operational_store() -> None:
     """Release pooled PostgreSQL connections on shutdown."""
     close_db_pool()
+
+
+@app.on_event("shutdown")
+def _close_reasoning_layer() -> None:
+    """Close the Neo4j driver on shutdown."""
+    close_neo4j_driver()
+
 
 # -----------------------------------------------------------------------
 # CS-4: Case session context — in-memory for warm, same-process lookups.
@@ -176,6 +242,60 @@ def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> t
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+
+@app.post("/graph/ingest")
+def graph_ingest(req: GraphIngestRequest):
+    """
+    AppWorks Lifecycle-event entry point: ingest one or more cases into
+    Neo4j and run the full rule pipeline over them.
+
+    AppWorks will call this on a case lifecycle event once that event is
+    wired up. Until then the identical path is reachable from the CLI
+    (python -m etl.run_sync), which calls the same service function — there
+    is no second, manual-only implementation to drift.
+
+    Deliberately NOT an agent route: no LLM, no prompt, no dispatcher. The
+    dispatcher's three gates exist to validate tool calls an LLM *proposed*;
+    there is no LLM here to propose anything, and routing a deterministic
+    backend job through a gate designed for a non-deterministic caller adds
+    a hop without adding a check. Principle 16 (the reasoning pipeline
+    routes through manifest.yaml/the dispatcher) still holds unbroken for
+    the path it is about — Context Enrichment triggering the pipeline via
+    run_reasoning_pipeline — which is unchanged. Flagged in PHASE2_STATUS.md
+    as the one architectural call in this round that wants Himali's sign-off.
+
+    Synchronous by design at POC scale (18 cases). At production volume this
+    is the natural place to hand off to a task queue and return 202 with a
+    job id — the service function underneath would not change.
+    """
+    if not req.case_ids:
+        raise HTTPException(status_code=400, detail="case_ids must not be empty")
+    if req.subjects not in ("primary", "all"):
+        raise HTTPException(status_code=400, detail="subjects must be 'primary' or 'all'")
+
+    try:
+        report = run_graph_ingest(
+            req.case_ids,
+            run_reasoning=req.run_rules,
+            subjects_mode=req.subjects,
+        )
+    except GraphUnavailableError as exc:
+        # No fallback graph exists — unlike a Postgres outage, this cannot
+        # degrade gracefully, so it is a 503, not a silent partial success.
+        raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {exc}")
+
+    return {"status": "ok", "report": report}
+
+
+@app.get("/graph/ingest/status")
+def graph_ingest_status():
+    """What is actually in the graph right now, and did the last sync of
+    each case succeed. Reads graph_ingest_state (PostgreSQL) — no Neo4j
+    call, no LLM. This is the endpoint that answers "why does this case
+    show an empty network" without anyone reading server logs."""
+    return {"cases": graph_ingest_repository.list_states()}
 
 
 @app.post("/intake")
