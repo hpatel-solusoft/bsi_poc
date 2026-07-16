@@ -146,6 +146,12 @@ class AllegationHeader(BaseModel):
     closure_date_reported:   Optional[str] = None
     close_comment:           Optional[str] = None
     comment:                 Optional[str] = None
+    # Confirmed on the Allegations_All list payload, not captured before
+    # the single-call /lists/ endpoint migration.
+    agency_referral_number:  Optional[str] = None
+    completed_date:          Optional[str] = None
+    norris_code:             Optional[str] = None
+    source_agency:           Optional[SourceAgency] = None
     allegation_type:         AllegationType
     model_config = {"extra": "allow"}
 
@@ -163,6 +169,10 @@ class SubjectDetails(BaseModel):
     dob:                    Optional[str] = None
     dod:                    Optional[str] = None
     phone_number:           Optional[str] = None
+    # SSN / Driving License intentionally never declared here — Tier 1 PII,
+    # reference doc Section 3.5. The real guard is upstream: entity_mappers
+    # .map_subjects() never reads Subject_SSN / Subject_DrivingLicenseNumber
+    # into the dict this model validates.
     subject_type:           Optional[str] = None
     company_name:           Optional[str] = None
     provider_number:        Optional[str] = None
@@ -184,6 +194,24 @@ class SubjectHeader(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class FinancialRecord(BaseModel):
+    """
+    A single Financial record. fraud_type / fraud_type_id come from the
+    per-record Financial_PrimaryFraudTypeRelationShip embedded on the
+    Financial_All list payload — previously fetched but discarded, kept
+    only as part of the case-level aggregate.
+    """
+    calculated:    Optional[float] = None
+    ordered:       Optional[float] = None
+    comment:       Optional[str] = None
+    start_date:    Optional[str] = None
+    end_date:      Optional[str] = None
+    date:          Optional[str] = None
+    fraud_type:    Optional[str] = None
+    fraud_type_id: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
 class FinancialsBlock(BaseModel):
     """
     Financial summary attached to the Workfolder (AppWorks Workfolder_FinancialRelationship).
@@ -191,7 +219,7 @@ class FinancialsBlock(BaseModel):
     rather than silently passed through as untyped extras (Issue #11).
     extra='allow' preserved so future AppWorks financial fields are not stripped.
     """
-    #records:         Optional[list] = None
+    records:          Optional[list[FinancialRecord]] = None
     total_calculated: Optional[float] = None
     total_ordered:    Optional[float] = None
     model_config = {"extra": "allow"}

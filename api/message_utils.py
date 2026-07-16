@@ -66,6 +66,31 @@ def extract_tool_results(messages: list,  tool_section_map: Dict[str, str]) -> d
     return sections
 
 
+def merge_direct_result(
+    sections: Dict, provenance_trail: List[dict], section: str, envelope: dict
+) -> List[dict]:
+    """
+    Merge a directly-invoked reasoning-layer result (no LLM decision, no
+    dispatcher gate — e.g. check_network_match, called unconditionally by
+    the /intake route right after intake resolves subject_primary_id) into
+    the same {sections, provenance_trail} shape a dispatcher-routed tool
+    result would have produced. Downstream consumers (CASE_STORE, /plan,
+    /risk_assessment, /copilot) read `sections[section]` either way and
+    cannot tell a direct call from an LLM-selected one.
+
+    Mutates `sections` in place for `section`; returns the updated
+    provenance_trail (append-only, same as the agent loop's own trail).
+    """
+    sections[section] = envelope.get("result", {})
+    prov = envelope.get("provenance", {})
+    provenance_trail.append({
+        "sources":      prov.get("sources", []),
+        "retrieved_at": prov.get("retrieved_at", ""),
+        "computed_by":  prov.get("computed_by", ""),
+    })
+    return provenance_trail
+
+
 def merge_provenance(existing: List[dict], new_entries: List[dict]) -> List[dict]:
     """Merge provenance lists while preserving order and removing duplicates."""
     merged: List[dict] = []

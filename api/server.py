@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from core.case_store import (
     CASE_STORE,
+    fetch_copilot_history,
     store_copilot_turn,
     resolve_copilot_history,
     resolve_case_data,
@@ -30,6 +31,9 @@ from reasoning_layer.neo4j_client import (
     close_driver as close_neo4j_driver,
     GraphUnavailableError,
 )
+from reasoning_layer.graph_queries import check_network_match
+from reasoning_layer.context_enrichment import enrich_graph_context
+from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.rule_engine import verify_rule_files
 from etl.ingest_service import ingest as run_graph_ingest
@@ -37,7 +41,7 @@ from core import graph_ingest_repository
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
 from api.models import (
-    intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
+    ConversationHistoryResponse, intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
     CopilotRequest, GraphIngestRequest,
 )
 from agent_service.prompt_builders import (
@@ -56,7 +60,8 @@ from api.message_utils import (
     build_ai_summary,
     extract_agent_summary,
     extract_tool_results,
-    merge_provenance, )        
+    merge_provenance,
+    merge_direct_result, )        
 
 _runner: Optional[BSIAgentRunner] = None
 
@@ -146,10 +151,11 @@ def _init_reasoning_layer() -> None:
     Warm the Neo4j driver on startup, same banner treatment as Postgres.
     A failure here is not fatal to the app itself — AppWorks-backed
     routes (/intake, /similar_cases, /risk_assessment, /plan, /copilot's
-    AppWorks path) are unaffected — but run_reasoning_pipeline and any
-    future Neo4j-backed tool will fail at dispatch time (Gate 3 in
-    dispatcher.py resolves the function fine; the function itself then
-    raises when it can't open a session) until connectivity is restored.
+    AppWorks path) are unaffected — but reasoning_layer.pipeline.run_pipeline
+    (invoked directly by Context Enrichment and by the ETL ingest service —
+    never LLM-callable, never in manifest.yaml, per Section 9.1) and any
+    future Neo4j-backed dispatcher tool will fail once called until
+    connectivity is restored.
     """
     banner = "=" * 72
     try:
@@ -178,7 +184,7 @@ def _init_reasoning_layer() -> None:
         print(banner)
         print(f"[BSI] WARNING: Neo4j: NOT CONNECTED — {exc}")
         print("[BSI] Starting anyway. AppWorks-backed routes are unaffected; ")
-        print("[BSI] run_reasoning_pipeline will fail until Neo4j is reachable.")
+        print("[BSI] reasoning_layer.pipeline.run_pipeline will fail until Neo4j is reachable.")
         print(banner)
         logger.error("Neo4j driver unavailable at startup — reasoning pipeline calls will fail: %s", exc)
 
@@ -260,11 +266,15 @@ def graph_ingest(req: GraphIngestRequest):
     dispatcher's three gates exist to validate tool calls an LLM *proposed*;
     there is no LLM here to propose anything, and routing a deterministic
     backend job through a gate designed for a non-deterministic caller adds
-    a hop without adding a check. Principle 16 (the reasoning pipeline
-    routes through manifest.yaml/the dispatcher) still holds unbroken for
-    the path it is about — Context Enrichment triggering the pipeline via
-    run_reasoning_pipeline — which is unchanged. Flagged in PHASE2_STATUS.md
-    as the one architectural call in this round that wants Himali's sign-off.
+    a hop without adding a check. This is consistent with reasoning_layer/
+    pipeline.py's run_pipeline itself, which is never registered in
+    manifest.yaml and is never LLM-callable (Section 9.1) — Context
+    Enrichment and this ETL path both invoke it as a direct Python call,
+    not through the dispatcher. The prior round's PHASE2_STATUS.md flagged
+    an assumption that this route went "LLM → dispatcher → pipeline" via a
+    manifest-registered run_reasoning_pipeline tool; that assumption was
+    wrong and has been corrected — the tool entry has been removed from
+    manifest.yaml.
 
     Synchronous by design at POC scale (18 cases). At production volume this
     is the natural place to hand off to a task queue and return 202 with a
@@ -272,19 +282,31 @@ def graph_ingest(req: GraphIngestRequest):
     """
     if not req.case_ids:
         raise HTTPException(status_code=400, detail="case_ids must not be empty")
-    if req.subjects not in ("primary", "all"):
-        raise HTTPException(status_code=400, detail="subjects must be 'primary' or 'all'")
 
     try:
         report = run_graph_ingest(
             req.case_ids,
             run_reasoning=req.run_rules,
-            subjects_mode=req.subjects,
         )
     except GraphUnavailableError as exc:
         # No fallback graph exists — unlike a Postgres outage, this cannot
         # degrade gracefully, so it is a 503, not a silent partial success.
         raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {exc}")
+    except Exception as exc:  # noqa: BLE001 — never let an ingest failure masquerade as success
+        # Anything the service did not handle itself is a real failure. A
+        # 500 with the cause is far more useful than {"status":"ok","report":null},
+        # which is what a swallowed error or a mis-edited service produces.
+        logger.exception("graph_ingest FAILED for case_ids=%s", req.case_ids)
+        raise HTTPException(status_code=500, detail=f"ingest failed: {type(exc).__name__}: {exc}")
+
+    # A well-formed ingest always returns a report dict. If it somehow did
+    # not, that is a bug in the service, not a success — surface it rather
+    # than returning a null report under an "ok" status.
+    if report is None:
+        raise HTTPException(
+            status_code=500,
+            detail="ingest returned no report — this indicates a bug in etl.ingest_service.ingest()",
+        )
 
     return {"status": "ok", "report": report}
 
@@ -304,6 +326,13 @@ def intake(req: intakeRequest):
     AUTO flow — Section 3.1.
     Runs AUTO tools 1-2 (intake, enrichment) in dependency order
     (LLM decides sequence). Similar cases runs via /similar_cases.
+    Immediately after, this route makes one direct, unconditional Python
+    call to check_network_match(subject_primary_id) — not an LLM-decided
+    tool call, not dispatcher-routed, not in manifest.yaml (Section 8.1:
+    non-blocking, never gates complaint acceptance; Section 9.1's
+    "invoked directly, never LLM-callable" pattern, same as run_pipeline).
+    A Neo4j outage or missing subject degrades this to an empty
+    graph_context rather than failing the whole route.
     Populates CS-4 CASE_STORE for all subsequent on-demand calls.
     Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
     """
@@ -324,6 +353,78 @@ def intake(req: intakeRequest):
             scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only; 
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
+
+        # Direct, non-LLM network-match check (Section 8.1). subject_primary_id
+        # was injected into complaint_intelligence by extract_tool_results.
+        subject_id = (sections.get("complaint_intelligence") or {}).get("subject_primary_id")
+        if subject_id:
+            # --- AI-12: proactive network match flag (Section 8.1) ---
+            # Preliminary "is this subject already in a known network" check.
+            # Section 9.1 keeps this as its own section (network_match_flag),
+            # distinct from the full graph_context that Context Enrichment
+            # assembles below.
+            try:
+                envelope = check_network_match(subject_id)
+                provenance_trail = merge_direct_result(
+                    sections, provenance_trail, "network_match_flag", envelope
+                )
+            except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+                # Non-blocking by design: a graph outage or bad subject_id
+                # must not fail complaint intake. Degrade to an empty,
+                # clearly-unavailable flag instead.
+                logger.warning(
+                    "check_network_match unavailable for case_id=%s subject_id=%s — %s",
+                    req.case_id, subject_id, exc,
+                )
+                sections["network_match_flag"] = {
+                    "subject_id": subject_id, "in_network": None,
+                    "network_count": None, "networks": [],
+                    "rejected_membership_count": None,
+                    "unavailable_reason": str(exc),
+                }
+
+            # --- AI-13: Context Enrichment gateway (Section 9.1) ---
+            # Context Enrichment's own processing, once fetch_subject_history
+            # has returned: run the reasoning pipeline directly (never an LLM
+            # tool, not dispatcher-routed, not in manifest.yaml — the same
+            # direct-call pattern as the network match above), then assemble
+            # the full graph_context, graph_signals, and rules_fired.
+            # Non-blocking: a graph or pipeline failure degrades to an empty,
+            # clearly-unavailable graph_context rather than failing intake.
+            try:
+                enrichment = enrich_graph_context(req.case_id, subject_id)["result"]
+                provenance_trail = merge_direct_result(
+                    sections, provenance_trail, "graph_context",
+                    {
+                        "result": enrichment["graph_context"],
+                        "provenance": {
+                            "sources": ["reasoning pipeline", "Neo4j graph query"],
+                            "retrieved_at": "",
+                            "computed_by": "reasoning_layer.context_enrichment.enrich_graph_context",
+                        },
+                    },
+                )
+                sections["graph_signals"] = enrichment["graph_signals"]
+                sections["rules_fired"] = enrichment["rules_fired"]
+            except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+                logger.warning(
+                    "context enrichment unavailable for case_id=%s subject_id=%s — %s",
+                    req.case_id, subject_id, exc,
+                )
+                sections["graph_context"] = {
+                    "subject_id": subject_id,
+                    "is_cross_case_hub": None, "hub_case_ids": [],
+                    "fraud_networks": [], "prior_guilty_cases": [],
+                    "shared_connections": [],
+                    "unavailable_reason": str(exc),
+                }
+                sections["graph_signals"] = {"unavailable_reason": str(exc)}
+                sections["rules_fired"] = []
+        else:
+            logger.warning(
+                "context enrichment + network match skipped for case_id=%s — "
+                "no subject_primary_id resolved", req.case_id,
+            )
 
         # CS-4: populate warm in-memory store with all sections + provenance.
         CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
@@ -843,6 +944,7 @@ def copilot(req: CopilotRequest):
             "sources_cited": sources_cited,
             "sources_cited_details": sources_cited_details,
             "case_data_source": case_data_source,
+            "conversation_history": conversation_history,
             "conversation_history_source": history_source,
         }
     except HTTPException:
@@ -859,3 +961,45 @@ def copilot(req: CopilotRequest):
         raise HTTPException(status_code=500, detail=f"Copilot failed: {exc}") from exc
     finally:
         logger.info("POST /copilot completed for case_id=%s", req.case_id)
+
+
+
+     
+@app.get("/conversation_history/{case_id}", response_model=ConversationHistoryResponse)
+def get_conversation_history(case_id: str):
+    """
+    ON-DEMAND — fetch the server-owned Copilot transcript for a case.
+ 
+    Returns conversation_history in the same user/assistant message shape
+    /copilot returns, resolved from the CS-4 warm store first, then the
+    PostgreSQL conversation_history table (D.2, rolling 20-turn window).
+ 
+    Read-only: no LLM, no prompt, no dispatcher — the same class of
+    endpoint as /graph/ingest/status. A transcript-store outage surfaces
+    as 503 (see core.case_store.fetch_copilot_history) rather than an
+    empty list, so a caller can tell "no history yet" from "store down".
+    """
+    try:
+        conversation_history, history_source = fetch_copilot_history(case_id)
+        logger.info(
+            "GET /conversation_history case_id=%s source=%s turns=%d",
+            case_id, history_source, len(conversation_history),
+        )
+        return {
+            "case_id": case_id,
+            "conversation_history": conversation_history,
+            "conversation_history_source": history_source,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Conversation history fetch failed for case_id=%s", case_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Conversation history fetch failed: {exc}",
+        ) from exc
+    
+    
+    
+    
+ 

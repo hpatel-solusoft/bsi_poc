@@ -116,33 +116,6 @@ tools:
         type: "list[string]"
         description: "Full list of fraud types from verify_case_intake 'fraud_types' field"
       
-    
-
-  - name: "run_reasoning_pipeline"
-    section: "graph_context"
-    description: >
-      Runs graph-based inference over the subject's case network. Returns
-      pipeline_status, scope (how many subjects and cases the inference
-      covered), and rules_fired — a fourteen-entry array where each entry
-      carries rule_id, fired (boolean), confidence (High, Medium, or
-      Unresolved), and corroborated (boolean, true when narrative evidence
-      independently confirmed a structurally-inferred fact). Also returns
-      wave1_results, wave2_results and extraction_results, each a per-rule
-      or per-stage record of what was written. Idempotent per subject per
-      case: calling this again for a case and subject that has already
-      completed returns the existing rules_fired without re-running
-      inference. Requires: case_id, subject_id — the primary subject to run
-      inference for.
-    scope: [CASE_SUMMARY]
-    python_function: "reasoning_layer.pipeline.run_reasoning_pipeline"
-
-    required_params:
-      - name: "case_id"
-        type: "string"
-        description: "Case identifier from verify_case_intake"
-      - name: "subject_id"
-        type: "string"
-        description: "Primary subject ID from 'subject_primary_id' in verify_case_intake"
 
   - name: "get_investigation_plan"
     section: "investigation_plan"
@@ -163,24 +136,5 @@ tools:
         type: "string"
         description: "Risk tier from calculate_risk_metrics output: LOW/MEDIUM/HIGH/CRITICAL"
 
-  - name: "check_network_match"
-    section: "graph_context"
-    description: >
-      Read-only check of whether a subject is already a member of one or
-      more known fraud networks, at the moment a complaint is entered.
-      Returns in_network (boolean), network_count, networks (an array of the
-      subject's active fraud-network memberships, each with network_type,
-      network_key, formed_by_rule, confidence and the count of other
-      members), and rejected_membership_count (memberships an investigator
-      has rejected, surfaced but never presented as current). Performs no
-      writes and does not run inference. Requires: subject_id — the subject
-      to check.
-    scope: [CASE_SUMMARY]
-    python_function: "reasoning_layer.graph_queries.check_network_match"
-
-    required_params:
-      - name: "subject_id"
-        type: "string"
-        description: "Subject ID to check for existing fraud-network membership"
 
   

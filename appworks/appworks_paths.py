@@ -15,12 +15,10 @@ class AppWorksPaths:
     class FraudRules:
         @staticmethod
         def risk_rules_all() -> str:
-            # return "/entities/AgentRulesTable/lists/AgentRulesTable_AgentRulesTableListInternal"
             return "/OSABSIACM/entities/FraudRiskRules/lists/FraudRiskRules_FraudRiskRulesListInternal"
         
         @staticmethod
         def risk_rules_by_id(id: str) -> str:
-            # return f"/entities/AgentRulesTable/items/{id}/childEntities/Rules"
             return f"/entities/FraudRiskRules/items/{id}/childEntities/Rules"
         
     class Workfolder:
@@ -28,22 +26,14 @@ class AppWorksPaths:
         def item(id: str) -> str:
             return f"/entities/Workfolder/items/{id}"
 
-        @staticmethod
-        def allegations(id: str) -> str:
-            return f"/entities/Workfolder/items/{id}/relationships/Workfolder_AllegationsRelationship"
-            
-
-        @staticmethod
-        def commentary(id: str) -> str:
-            return f"/entities/Workfolder/items/{id}/relationships/Workfolder_WorkfolderCommentaryNewRelationship"
-        
-        @staticmethod
-        def financial(id: str) -> str:
-            return f"/entities/Workfolder/items/{id}/relationships/Workfolder_FinancialRelationship"
-        
-        @staticmethod
-        def subjects(id: str) -> str:
-            return f"/entities/Workfolder/items/{id}/relationships/Workfolder_SubjectsRelationship"
+        # NOTE: allegations(), commentary(), financial(), and subjects() were
+        # removed here — each was a single-item relationship chase (1 call to
+        # get the relationship, then 1 fetch per child, then 1 more per
+        # grandchild). They're fully replaced by the /lists/ endpoints below
+        # (Allegations.by_workfolder, CommentaryList.by_workfolder,
+        # FinancialList.by_workfolder, Subjects.by_workfolder), which return
+        # every child row with its related entities already embedded in one
+        # call. Nothing in the active codebase referenced the old methods.
 
     class Subject:
         @staticmethod
@@ -99,19 +89,68 @@ class AppWorksPaths:
     class Allegations:
 
         @staticmethod
-        def case_allegations_by_type_id(type_id: str) -> str:   # Updated parameters needs to passed to fetch allegations by type with status and top  
+        def case_allegations_by_type_id(type_id: str) -> str:
             return f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
-            #return f"http://processsuite-cm.localdomain.com:81/home/BSIDev/app/entityRestService/api/OSABSIACM/entities/Allegations/lists/Allegations_All?$top={top}&Properties.Allegations_AllegationStatus={status}"
 
         @staticmethod
-        def case_allegations_with_fileter(type_id: str, top: int, status: str) -> str:   # Updated parameters needs to passed to fetch allegations by type with status and top  
-            # return f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
-            return f"/entities/Allegations/lists/Allegations_All?$Identity.Id={type_id}&top={top}&Properties.Allegations_AllegationStatus={status}"
-
-        @staticmethod
-        def allegation_type_all() -> str:
-            return "/entities/AllegationType/lists/AllegationType_All"
+        def by_workfolder(workfolder_id: str) -> str:
+            # Single-call list endpoint: one round trip returns Allegation +
+            # AllegationType + Agency embedded per row (Allegations_AllegationsType$Properties,
+            # Allegations_Source$Properties) — replaces the old 3-call chase
+            # (Allegation item -> AllegationType item -> Agency item) that
+            # map_allegations() used to do per allegation.
+            return f"/entities/Allegations/lists/Allegations_All?Allegations_Workfolder$Identity.Id={workfolder_id}"
 
         @staticmethod
         def allegation_type_manage() -> str:
             return "/entities/AllegationType/lists/AllegationType_ManageAllegationType"
+
+    class Subjects:
+        """
+        List endpoint (plural 'Subjects', not the item-level 'Subject' class
+        above) — one call returns the Subjects bridge row + the Subject
+        detail record + the SubjectRole name embedded per row
+        (Subjects_Subject$Properties, Subjects_SubjectRoleRelationship$Properties).
+        Replaces the old 3-call chase in case_intake._parse_subjects
+        (Subjects item -> Subject detail item -> SubjectRole item).
+        """
+        @staticmethod
+        def by_workfolder(workfolder_id: str) -> str:
+            return f"/entities/Subjects/lists/All_Subjects?Subjects_Workfolder$Identity.Id={workfolder_id}"
+
+    class AddressList:
+        """
+        List endpoint for addresses — one call returns Address + AddressType
+        + StateCityZip embedded per row (Address_AddressType_Relation$Properties,
+        Address_StateCityZip_Relation$Properties). Replaces the old 3-call
+        chase per address (Address item -> AddressType item -> StateCityZip item).
+        Named AddressList to avoid colliding with Subject.addresses(), which
+        still returns the relationship href form used elsewhere.
+        """
+        @staticmethod
+        def by_subject(subject_id: str) -> str:
+            return f"/entities/Address/lists/Address_All?Address_Subject$Identity.Id={subject_id}"
+
+    class FinancialList:
+        """
+        List endpoint — one call returns Financial + the per-record primary
+        fraud type embedded (Financial_PrimaryFraudTypeRelationShip$Properties/
+        $Identity). Replaces the old 2-call chase per financial record
+        (Financial item -> FraudTypeClassification item).
+        """
+        @staticmethod
+        def by_workfolder(workfolder_id: str) -> str:
+            return f"/entities/Financial/lists/Financial_All?Financial_WorkfolderRelationship$Identity.Id={workfolder_id}"
+
+    class CommentaryList:
+        """
+        List endpoint — one call returns WorkfolderCommentary + CommentaryType
+        embedded per row (WorkfolderCommentary_CommentaryTypeRelationship$Properties).
+        Replaces the old 2-call chase per comment (Commentary item -> CommentaryType item).
+        """
+        @staticmethod
+        def by_workfolder(workfolder_id: str) -> str:
+            return (
+                "/entities/WorkfolderCommentary/lists/WorkfolderCommentary_All"
+                f"?WorkfolderCommentary_WorkfolderRelationship$Identity.Id={workfolder_id}"
+            )

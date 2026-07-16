@@ -119,7 +119,6 @@ def main(argv: List[str]) -> int:
     report = ingest(
         case_ids,
         run_reasoning=not args.no_reason,
-        subjects_mode=args.subjects,
     )
 
     print()

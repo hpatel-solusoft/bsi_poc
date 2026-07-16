@@ -1,10 +1,10 @@
-
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 
 # -----------------------------------------------------------------------
 # Request / response models
 # -----------------------------------------------------------------------
+
 
 class intakeRequest(BaseModel):
     case_id: str
@@ -24,6 +24,7 @@ class PlanRequest(BaseModel):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
+
 
 class RiskAssessmentRequest(BaseModel):
     case_id: str
@@ -47,6 +48,26 @@ class CopilotRequest(BaseModel):
     modified_ai_investigation_plan: Optional[Dict[str, Any]] = None
 
 
+class ConversationTurn(BaseModel):
+    """One transcript turn in the user/assistant shape /copilot uses."""
+    role: str
+    content: str
+
+
+class ConversationHistoryResponse(BaseModel):
+    """
+    GET /conversation_history/{case_id} response.
+
+    conversation_history mirrors the field /copilot returns — the ordered
+    user/assistant transcript, oldest first. conversation_history_source
+    reports where it was resolved from (CS-4 warm store vs the PostgreSQL
+    conversation_history table) for support/observability, matching the
+    conversation_history_source field on the /copilot response.
+    """
+    case_id: str
+    conversation_history: List[ConversationTurn]
+    conversation_history_source: str
+
 class GraphIngestRequest(BaseModel):
     """
     POST /graph/ingest — the AppWorks Lifecycle-event contract.
@@ -64,11 +85,12 @@ class GraphIngestRequest(BaseModel):
                 over it. Useful when staging a large backfill and running
                 the rules as a separate step; never the default, because a
                 loaded-but-unreasoned graph looks complete and is not.
-    subjects  — "primary" mirrors what an investigator opening the case
-                triggers (Section 5.2's scope). "all" is the demo preload:
-                every subject on the case gets a completed pipeline run, so
-                any test subject can be opened cold and already have one.
+
+    There is no "subjects" selector: reasoning always runs for every subject
+    on the case. The pipeline is scoped per (case, subject), and only a
+    subject with its own run gets the ALLEGATION_LIKELY_AGAINST_SUBJECT
+    attribution edges the Wave 2 network rules need — reasoning only the
+    primary would silently starve those rules of their other endpoints.
     """
     case_ids: List[str]
     run_rules: bool = True
-    subjects: str = "primary"  # "primary" | "all"

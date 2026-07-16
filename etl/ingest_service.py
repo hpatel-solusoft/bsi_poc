@@ -63,20 +63,19 @@ ORDER BY is_primary DESC, subject_id
 """
 
 
-def _subjects_for_case(case_id: str, mode: str) -> List[str]:
+def _subjects_for_case(case_id: str) -> List[str]:
     """
-    mode="primary": the primary subject only — what a real investigator
-        opening the case triggers (Section 5.2: "Scope: Primary Subject of
-        the current case"). Co-subjects are still reasoned ABOUT, via the
-        one-hop scope; they just do not each get their own run.
-    mode="all": every subject on the case. This is the POC/demo mode —
-        the intent is a graph where any test subject can be opened and
-        already have a completed run behind them.
+    Every subject on the case. The pipeline is scoped per (case, subject)
+    (Principle 10), so each subject gets its own run and its own completed
+    pipeline_execution_state row — which is what gives every subject the
+    ALLEGATION_LIKELY_AGAINST_SUBJECT attribution edges the Wave 2 network
+    rules depend on. Reasoning only the primary subject would leave
+    co-subjects unattributed and silently starve rules like the address
+    fraud-network rule of their second endpoint, so there is no "primary
+    only" mode.
 
-    Falls back to every subject when the case has no subject flagged
-    primary, which is common in the AppWorks data: running nothing at all
-    because a flag was not set would be a worse failure than running one
-    extra pipeline.
+    The underlying query still orders is_primary first, so the primary
+    subject is reasoned before the co-subjects — but all of them are run.
     """
     with get_session() as session:
         rows = session.run(_CASE_SUBJECTS_QUERY, case_id=case_id).data()
@@ -85,17 +84,6 @@ def _subjects_for_case(case_id: str, mode: str) -> List[str]:
         logger.warning("ingest_service: case_id=%s has no subjects in the graph", case_id)
         return []
 
-    if mode == "all":
-        return [row["subject_id"] for row in rows]
-
-    primaries = [row["subject_id"] for row in rows if row["is_primary"]]
-    if primaries:
-        return primaries
-
-    logger.warning(
-        "ingest_service: case_id=%s has no subject flagged is_primary — reasoning over all %d "
-        "subjects rather than skipping the case", case_id, len(rows),
-    )
     return [row["subject_id"] for row in rows]
 
 
@@ -134,7 +122,7 @@ def load_case(case_id: str) -> Dict[str, Any]:
             "attempts": _MAX_ATTEMPTS, "error": last_error}
 
 
-def reason_case(case_id: str, subjects_mode: str = "primary") -> Dict[str, Any]:
+def reason_case(case_id: str) -> Dict[str, Any]:
     """
     Phase 2 of an ingest: run the reasoning pipeline for this case's
     subjects.
@@ -149,12 +137,12 @@ def reason_case(case_id: str, subjects_mode: str = "primary") -> Dict[str, Any]:
     path Section 9.5 defines for the reload banner, reached from ETL
     rather than from a human clicking reload.
     """
-    subject_ids = _subjects_for_case(case_id, subjects_mode)
+    subject_ids = _subjects_for_case(case_id)
     runs: List[Dict[str, Any]] = []
 
     for subject_id in subject_ids:
         try:
-            envelope = pipeline.run_reasoning_pipeline(case_id, subject_id, force=True)
+            envelope = pipeline.run_pipeline(case_id, subject_id, force=True)
             result = envelope["result"]
             fired = [r["rule_id"] for r in result.get("rules_fired", []) if r["fired"]]
             runs.append({
@@ -188,8 +176,7 @@ def reason_case(case_id: str, subjects_mode: str = "primary") -> Dict[str, Any]:
     }
 
 
-def ingest(case_ids: List[str], run_reasoning: bool = True,
-           subjects_mode: str = "primary") -> Dict[str, Any]:
+def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
     """
     The single entry point behind both POST /graph/ingest and the CLI.
 
@@ -205,8 +192,8 @@ def ingest(case_ids: List[str], run_reasoning: bool = True,
     Returns a report the caller can log, return over HTTP, or print.
     """
     logger.info(
-        "ingest_service: START cases=%d run_reasoning=%s subjects_mode=%s",
-        len(case_ids), run_reasoning, subjects_mode,
+        "ingest_service: START cases=%d run_reasoning=%s",
+        len(case_ids), run_reasoning,
     )
 
     # --- Phase 1: load everything ---
@@ -220,7 +207,7 @@ def ingest(case_ids: List[str], run_reasoning: bool = True,
     # --- Phase 2: reason over the now-complete graph ---
     reasoning_results: List[Dict[str, Any]] = []
     if run_reasoning:
-        reasoning_results = [reason_case(case_id, subjects_mode) for case_id in loaded]
+        reasoning_results = [reason_case(case_id) for case_id in loaded]
 
     report = {
         "cases_requested": len(case_ids),

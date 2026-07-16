@@ -261,6 +261,60 @@ def resolve_copilot_history(
     return supplied_history, SOURCE_CLIENT_SUPPLIED
 
 
+def fetch_copilot_history(case_id: str) -> Tuple[List[Dict[str, str]], str]:
+    """
+    Read-only fetch of the server-owned Copilot transcript for case_id, in
+    the same user/assistant message shape /copilot returns.
+
+    Lookup order: in-memory COPILOT_HISTORY_STORE (warm) -> PostgreSQL
+    conversation_history table (D.2, durable, rolling 20-turn window). A
+    warm miss populates the in-memory store from Postgres, same as
+    resolve_copilot_history.
+
+    Differs from resolve_copilot_history in two ways that matter for a bare
+    GET fetch: there is no client-supplied seed path (a GET carries no
+    body), and a store outage is surfaced rather than masked.
+    conversation_repository.get_recent_turns returns None on an outage and
+    [] for a case with no turns yet; this function raises 503 on the former
+    so a fetch caller can tell "no history yet" apart from "the transcript
+    store is unreachable" instead of receiving an empty list for both.
+
+    Returns (messages, source) where source is SOURCE_CS_MEMORY or
+    SOURCE_POSTGRES_FALLBACK.
+    """
+    history_entry = COPILOT_HISTORY_STORE.get(case_id)
+    if isinstance(history_entry, dict):
+        if history_entry.get("case_id") != case_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored conversation history does not match the requested case_id.",
+            )
+        logger.info("conversation_history FETCHED case_id=%s source=%s", case_id, SOURCE_CS_MEMORY)
+        return validate_conversation_history(history_entry.get("messages", [])), SOURCE_CS_MEMORY
+
+    persisted_turns = conversation_repository.get_recent_turns(case_id)
+    if persisted_turns is None:
+        logger.error(
+            "conversation_history FETCH failed case_id=%s — transcript store unreachable",
+            case_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Conversation history store is unreachable; cannot distinguish "
+                "an empty transcript from an outage. Retry once the store is reachable."
+            ),
+        )
+
+    messages = validate_conversation_history(persisted_turns)
+    COPILOT_HISTORY_STORE[case_id] = {"case_id": case_id, "messages": messages}
+    logger.info(
+        "conversation_history FETCHED case_id=%s source=%s turns=%d",
+        case_id, SOURCE_POSTGRES_FALLBACK, len(messages),
+    )
+    return messages, SOURCE_POSTGRES_FALLBACK
+
+
 def store_copilot_turn(
     case_id: str,
     question: str,

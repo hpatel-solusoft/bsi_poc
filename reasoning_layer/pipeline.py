@@ -1,8 +1,10 @@
 """
-Reasoning Pipeline orchestrator (Layer 4). Not an agent — an internal
-service invoked by the Context Enrichment agent through the dispatcher's
-"run_reasoning_pipeline" manifest.yaml entry (Principle 16), and by the
-ETL ingest service after a case is loaded (etl/ingest_service.py).
+Reasoning Pipeline orchestrator (Layer 4). Not an agent and NOT an LLM
+tool. Per Section 9.1 it is invoked directly by Context Enrichment's own
+processing (reasoning_layer/context_enrichment.py) once fetch_subject_history
+has returned, and by the ETL ingest service after a case is loaded
+(etl/ingest_service.py). The LLM never sees run_pipeline as a callable
+tool — it is not registered in manifest.yaml.
 
 Implements the full six-step sequence (Python Implementation Reference,
 Section 5.3). All six steps are now built:
@@ -112,11 +114,16 @@ def _run_extraction_stage(case_id: str, subject_id: str) -> Dict[str, Any]:
     }
 
 
-def run_reasoning_pipeline(case_id: str, subject_id: str, force: bool = False) -> dict:
+def run_pipeline(case_id: str, subject_id: str, force: bool = False) -> dict:
     """
-    Entry point for the six-step sequence. Dispatched from the
-    'run_reasoning_pipeline' manifest.yaml tool, and called directly by
-    etl/ingest_service.py after a case is ingested.
+    Entry point for the six-step sequence. Per Section 9.1 this is called
+    DIRECTLY — by Context Enrichment's own processing
+    (reasoning_layer/context_enrichment.py) and by etl/ingest_service.py
+    after a case is ingested. It is deliberately NOT a manifest.yaml tool:
+    the LLM never selects it. Keeping the pipeline out of the tool
+    catalogue is what makes "the pipeline is invoked by Context
+    Enrichment's own processing, not called by the LLM as a tool" true in
+    code rather than by convention.
 
     Idempotent per Principle 10: a case+subject that has already completed
     and has not been explicitly cleared returns immediately without
@@ -139,7 +146,7 @@ def run_reasoning_pipeline(case_id: str, subject_id: str, force: bool = False) -
     )
     if already_done and not force:
         logger.info(
-            "run_reasoning_pipeline SKIPPED case_id=%s subject_id=%s — already completed at %s "
+            "run_pipeline SKIPPED case_id=%s subject_id=%s — already completed at %s "
             "(Principle 10)", case_id, subject_id, existing.get("completed_at"),
         )
         scope = scope_resolver.resolve_scope(case_id, subject_id)
@@ -155,7 +162,7 @@ def run_reasoning_pipeline(case_id: str, subject_id: str, force: bool = False) -
                 "rules_fired": rules_fired.build_rules_fired(scope, []),
             },
             sources=["pipeline_execution_state", "Neo4j graph query"],
-            computed_by="reasoning_layer.pipeline.run_reasoning_pipeline",
+            computed_by="reasoning_layer.pipeline.run_pipeline",
         )
 
     if already_done and force:
@@ -225,5 +232,5 @@ def run_reasoning_pipeline(case_id: str, subject_id: str, force: bool = False) -
             "rules_fired": fired_block,
         },
         sources=["Neo4j graph query"],
-        computed_by="reasoning_layer.pipeline.run_reasoning_pipeline",
+        computed_by="reasoning_layer.pipeline.run_pipeline",
     )

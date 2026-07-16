@@ -94,7 +94,8 @@ def build_extraction_prompt(subject_id: str, narrative_records: list,
     Narrative Extraction prompt (Python Implementation Reference,
     Section 5.3 Step 3). Called from reasoning_layer/extraction_stage.py,
     not from an API route — there is no HTTP endpoint behind this one;
-    it's an internal step of run_reasoning_pipeline. Kept in this module
+    it's an internal step of run_pipeline, which is never LLM-callable and
+    never registered in manifest.yaml (Section 9.1). Kept in this module
     anyway because prompt construction for every prompt in the system
     happens here, regardless of caller (Himali's rule: no prompt text
     outside config/prompts.py, and this file is where it's rendered).

@@ -17,9 +17,13 @@ rather than a matter of discipline: there is no code path from here that
 could start a pipeline run.
 
 Why it is not in the AppWorks layer: it queries Neo4j (Bolt), not
-AppWorks (REST). It therefore routes through the same manifest.yaml
-python_function contract that run_reasoning_pipeline uses, not through
-appworks_services.py.
+AppWorks (REST). Unlike pipeline.run_pipeline, this module's function
+used to be registered in manifest.yaml as an LLM-selectable tool; it has
+since been converted to a direct, unconditional Python call made by
+api/server.py's /intake route right after complaint intake resolves a
+subject_primary_id — the same "invoked directly, never LLM-callable"
+pattern Section 9.1 describes for run_pipeline. It is not registered in
+manifest.yaml.
 
 Does NOT own: the pipeline (pipeline.py), rule content (rules/*.cypher),
 the Copilot's parameterised template catalog (AI-17's own concern, gets
@@ -83,11 +87,13 @@ RETURN
 
 
 def _envelope(result: Dict[str, Any]) -> dict:
-    """The {result, provenance} envelope every dispatcher-routed function
-    returns (Principle 8) — identical in shape to appworks_services.py's
-    and to pipeline.run_reasoning_pipeline's, so a graph-sourced tool
-    result is structurally indistinguishable from an AppWorks one to the
-    agent layer."""
+    """The {result, provenance} envelope pattern Principle 8 uses everywhere
+    in this codebase — identical in shape to appworks_services.py's and to
+    pipeline.run_pipeline's, whether the caller reaches this function
+    through the dispatcher or, as with check_network_match, via a direct
+    Python call. Keeping the shape identical means the /intake route can
+    merge this result into `sections` the same way it merges a
+    dispatcher-routed tool result."""
     return {
         "result": result,
         "provenance": {

@@ -90,6 +90,29 @@ def get_relationship_items(rel_href: str, embedded_key: str) -> List[Dict]:
         return []
     
 
+def embedded(item: Dict, relationship_key: str) -> Dict:
+    """
+    Reads the '{relationship_key}$Properties' block AppWorks embeds directly
+    on a row from the newer /lists/ endpoints (e.g. Financial_All embeds
+    'Financial_PrimaryFraudTypeRelationShip$Properties' on every row).
+
+    This is what makes the new list endpoints a single call instead of the
+    old pattern of following '_links.relationship:X' to a second safe_fetch.
+    Returns {} if the row has no such embedded block (e.g. the related
+    record is empty/unset upstream) — callers should treat that the same
+    as any other missing field, not as an error.
+    """
+    return item.get(f"{relationship_key}$Properties", {}) or {}
+
+
+def embedded_id(item: Dict, relationship_key: str) -> Optional[str]:
+    """Companion to embedded(): reads '{relationship_key}$Identity.Id' off a
+    list-endpoint row without a follow-up fetch."""
+    ident = item.get(f"{relationship_key}$Identity", {}) or {}
+    raw_id = ident.get("Id")
+    return str(raw_id) if raw_id not in (None, "") else None
+
+
 def parse_aw_date(raw: str):
     """Parse AppWorks date safely and ALWAYS return timezone-aware UTC datetime."""
     if not raw: return None
