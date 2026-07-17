@@ -308,7 +308,7 @@ def test_pipeline():
          mock.patch.object(pipeline.rule_engine, "run_modifier", return_value=[{"rule_id": "Rule_14_Confirmation_Elevation", "writes": 0}]) as w14, \
          mock.patch.object(pipeline, "_run_extraction_stage", return_value={"attributions_extracted": 1}) as ext, \
          mock.patch.object(pipeline.rules_fired, "build_rules_fired", return_value=[{"rule_id": "Rule_01_Shared_Employer", "fired": True}]):
-        out = pipeline.run_reasoning_pipeline("C1", "S1")["result"]
+        out = pipeline.run_pipeline("C1", "S1")["result"]
 
     check("happy path completes", out["pipeline_status"] == "completed")
     check("all six steps ran", w1.called and ext.called and w2.called and w14.called)
@@ -325,7 +325,7 @@ def test_pipeline():
          mock.patch.object(pipeline.scope_resolver, "resolve_scope", return_value=scope), \
          mock.patch.object(pipeline.rules_fired, "build_rules_fired", return_value=[]), \
          mock.patch.object(pipeline.rule_engine, "run_wave1") as w1b:
-        out2 = pipeline.run_reasoning_pipeline("C1", "S1")["result"]
+        out2 = pipeline.run_pipeline("C1", "S1")["result"]
 
     check("Principle 10: a completed run is skipped, not re-run",
           out2["pipeline_status"] == "already_completed" and not w1b.called and not start2.called)
@@ -347,7 +347,7 @@ def test_pipeline():
          mock.patch.object(pipeline.rule_engine, "run_modifier", return_value=[]), \
          mock.patch.object(pipeline, "_run_extraction_stage", return_value={}), \
          mock.patch.object(pipeline.rules_fired, "build_rules_fired", return_value=[]):
-        out3 = pipeline.run_reasoning_pipeline("C1", "S1", force=True)["result"]
+        out3 = pipeline.run_pipeline("C1", "S1", force=True)["result"]
 
     check("force=True re-runs after a fresh ingest (stale conclusions over new data)",
           out3["pipeline_status"] == "completed" and w1c.called and cleared.called)
@@ -365,7 +365,7 @@ def test_pipeline():
          mock.patch.object(pipeline, "_run_extraction_stage", side_effect=ValueError("bad LLM JSON")), \
          mock.patch.object(pipeline.rule_engine, "run_wave2") as w2d:
         try:
-            pipeline.run_reasoning_pipeline("C1", "S1")
+            pipeline.run_pipeline("C1", "S1")
             raised = False
         except ValueError:
             raised = True
@@ -397,7 +397,7 @@ def test_ingest_service():
                            "rules_fired": [{"rule_id": "Rule_01_Shared_Employer", "fired": True}]}}
 
     with mock.patch.object(ingest_service.graph_sync, "sync_case", side_effect=fake_sync), \
-         mock.patch.object(ingest_service.pipeline, "run_reasoning_pipeline", side_effect=fake_pipeline), \
+         mock.patch.object(ingest_service.pipeline, "run_pipeline", side_effect=fake_pipeline), \
          mock.patch.object(ingest_service, "_subjects_for_case", return_value=["S1"]), \
          mock.patch.object(ingest_service.graph_ingest_repository, "mark_started"), \
          mock.patch.object(ingest_service.graph_ingest_repository, "mark_loaded"), \
@@ -413,12 +413,12 @@ def test_ingest_service():
           "reasoning case 1 before case 2 is loaded means cross-case rules silently never fire — "
           "the single most important ordering property in this build")
     check("all requested cases were loaded", report["cases_loaded"] == 2)
-    check("reasoning ran for each loaded case", report["subjects_reasoned"] == 2)
+    check("reasoning ran for each loaded case", report["pipeline_reasoned"] == 2)
 
     # A case that fails to load must not be reasoned over.
     order.clear()
     with mock.patch.object(ingest_service.graph_sync, "sync_case", side_effect=fake_sync), \
-         mock.patch.object(ingest_service.pipeline, "run_reasoning_pipeline", side_effect=fake_pipeline), \
+         mock.patch.object(ingest_service.pipeline, "run_pipeline", side_effect=fake_pipeline), \
          mock.patch.object(ingest_service, "_subjects_for_case", return_value=["S1"]), \
          mock.patch.object(ingest_service.graph_ingest_repository, "mark_started"), \
          mock.patch.object(ingest_service.graph_ingest_repository, "mark_loaded"), \
@@ -448,14 +448,16 @@ def test_wiring():
 
     manifest = yaml.safe_load(open("config/manifest.yaml", encoding="utf-8"))
     names = [t["name"] for t in manifest["tools"]]
-    check("manifest still parses and still has all 8 tools", len(names) == 8, str(names))
-    check("run_reasoning_pipeline is still registered", "run_reasoning_pipeline" in names)
-
-    entry = next(t for t in manifest["tools"] if t["name"] == "run_reasoning_pipeline")
-    check("the tool still resolves to the pipeline function",
-          entry["python_function"] == "reasoning_layer.pipeline.run_reasoning_pipeline")
-    check("the manifest description is a data contract, no procedure/sequence language",
-          not any(word in entry["description"].lower() for word in ("first", "then call", "step 1")))
+    check("manifest still parses and still has all 7 tools", len(names) == 7, str(names))
+    # Section 9.1 / the /intake docstring: the reasoning pipeline is invoked
+    # DIRECTLY by Context Enrichment and by the ETL ingest service — it is
+    # deliberately NOT a manifest.yaml tool, so the LLM can never select it
+    # or force a re-run itself. An earlier round of this codebase wrongly
+    # assumed a manifest-registered run_reasoning_pipeline tool existed;
+    # that assumption was corrected and the entry removed. This check
+    # guards the correction, not the mistake it replaced.
+    check("the reasoning pipeline is NOT registered as an LLM-callable tool",
+          "run_reasoning_pipeline" not in names and "run_pipeline" not in names)
 
     check("all 14 rule files exist on disk", len(rule_engine.verify_rule_files()) == 14)
     check("wave membership is by list, and Rules 7/8 are in Wave 2 (not a numeric range)",

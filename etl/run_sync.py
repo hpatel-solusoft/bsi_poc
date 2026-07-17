@@ -125,11 +125,11 @@ def main(argv: List[str]) -> int:
     print(json.dumps(report, indent=2, default=str))
     print()
     print(f"Loaded {report['cases_loaded']}/{report['cases_requested']} case(s); "
-          f"reasoned over {report['subjects_reasoned']} subject(s); "
-          f"{report['subjects_reasoning_failed']} reasoning failure(s).")
+          f"reasoned over {report['pipeline_reasoned']} subject(s); "
+          f"{report['pipeline_reasoning_failed']} reasoning failure(s).")
 
     # Non-zero on any failure so a cron job or CI step notices.
-    failed = report["cases_load_failed"] or report["subjects_reasoning_failed"]
+    failed = report["cases_load_failed"] or report["pipeline_reasoning_failed"]
     return 1 if failed else 0
 
 

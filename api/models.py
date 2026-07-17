@@ -8,6 +8,14 @@ from typing import Dict, List, Optional, Any
 
 class intakeRequest(BaseModel):
     case_id: str
+    # Optional. Default False: if intake has already run for this case_id
+    # (found warm in CS-4 or in the PostgreSQL case_ai_summary_store
+    # fallback), skip re-running the intake agent/tools/reasoning pipeline
+    # and return the existing result. True: always re-run — the intake
+    # agent, its tools, and (via Context Enrichment) the Neo4j reasoning
+    # pipeline — and persist the fresh result to PostgreSQL and Neo4j,
+    # regardless of whether intake ran before.
+    reload_ai_summary: bool = False
 
 
 class SimilarCasesRequest(BaseModel):
@@ -18,18 +26,31 @@ class SimilarCasesRequest(BaseModel):
     # case_ai_summary_store fallback. ai_summary remains accepted for
     # explicit-override / legacy callers only.
     ai_summary: Optional[Dict[str, Any]] = None
+    # Optional. Default False: if a similar_cases result already exists
+    # for this case_id, skip re-running search_similar_cases and return
+    # the existing result. True: always re-run and overwrite it.
+    reload_ai_summary: bool = False
 
 
 class PlanRequest(BaseModel):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
+    # Optional. Default False: if an investigation_plan already exists for
+    # this case_id, skip re-running get_investigation_plan and return the
+    # existing result. True: always re-run and overwrite it.
+    reload_ai_summary: bool = False
 
 
 class RiskAssessmentRequest(BaseModel):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
+    # Optional. Default False: if a risk_assessment (with a risk_score)
+    # already exists for this case_id, skip re-running get_risk_rules /
+    # calculate_risk_metrics and return the existing result. True: always
+    # re-run and overwrite it.
+    reload_ai_summary: bool = False
 
 
 class CopilotRequest(BaseModel):
@@ -46,6 +67,14 @@ class CopilotRequest(BaseModel):
     # When present, the copilot prompt treats these steps as authoritative over the AI-generated ones.
     # Schema: { "source": "human_approved", "steps": [...], "comment": "...", "modified_on": "...", "modified_by": "..." }
     modified_ai_investigation_plan: Optional[Dict[str, Any]] = None
+    # Optional. Default False: Copilot always answers the question, but by
+    # default it does not force the Neo4j reasoning pipeline to re-run for
+    # this case's subject before answering — it answers against whatever
+    # graph_context is already cached. True: force Context Enrichment to
+    # re-run the reasoning pipeline for the subject first (even if it
+    # already completed), refresh graph_context/graph_signals/rules_fired
+    # in PostgreSQL and Neo4j, then answer using the refreshed context.
+    reload_ai_summary: bool = False
 
 
 class ConversationTurn(BaseModel):
@@ -56,7 +85,7 @@ class ConversationTurn(BaseModel):
 
 class ConversationHistoryResponse(BaseModel):
     """
-    GET /conversation_history/{case_id} response.
+    GET /copilot/{case_id} response.
 
     conversation_history mirrors the field /copilot returns — the ordered
     user/assistant transcript, oldest first. conversation_history_source

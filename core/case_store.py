@@ -145,6 +145,30 @@ def resolve_case_data(
     )
 
 
+def try_resolve_case_data(case_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Non-raising lookup used by the reload_ai_summary skip check on every
+    ON-DEMAND route (D.1 lookup order, warm CASE_STORE then the Postgres
+    case_ai_summary_store fallback — no client-supplied ai_summary path,
+    since this is only used to answer "has this already run for this
+    case_id", not to resolve the working context for an agent call).
+
+    Returns the flat case_data dict if something has already been
+    persisted for case_id, or None on a clean miss (never run yet) or a
+    Postgres outage. A route uses this to distinguish "already ran" from
+    "first run" before deciding whether reload_ai_summary=False should
+    skip re-running its agent/tool/pipeline step.
+    """
+    if case_id in CASE_STORE and CASE_STORE[case_id]:
+        return CASE_STORE[case_id]
+
+    cached_session = case_session_repository.get_case_session(case_id)
+    if cached_session is not None:
+        return _case_data_from_session(cached_session)
+
+    return None
+
+
 def _case_data_from_session(cached_session: Dict[str, Any]) -> Dict[str, Any]:
     """Rebuild the flat CS-4 case_data shape from a persisted case_ai_summary_store row."""
     ai_summary = cached_session.get("ai_summary") or {}

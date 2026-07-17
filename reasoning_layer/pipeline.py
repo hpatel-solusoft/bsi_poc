@@ -114,7 +114,7 @@ def _run_extraction_stage(case_id: str, subject_id: str) -> Dict[str, Any]:
     }
 
 
-def run_pipeline(case_id: str, subject_id: str, force: bool = False) -> dict:
+def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str = "etl_resync") -> dict:
     """
     Entry point for the six-step sequence. Per Section 9.1 this is called
     DIRECTLY — by Context Enrichment's own processing
@@ -129,14 +129,15 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False) -> dict:
     and has not been explicitly cleared returns immediately without
     touching the graph again.
 
-    `force` exists for the ETL path only, and is not exposed as a tool
-    parameter: a fresh AppWorks ingest brings new structural facts and new
-    commentary into the graph, so the previous run's conclusions are stale
-    by definition and re-running is the correct behaviour — this is the
-    same "explicitly cleared" path Section 9.5 describes for the reload
-    banner, reached from ETL instead of from a human clicking reload. An
-    agent, by contrast, must never be able to force a re-run: that is
-    exactly the loop Principle 10 exists to prevent.
+    `force` is not exposed as a tool parameter and is never reachable by
+    the LLM — that is exactly the loop Principle 10 exists to prevent.
+    It is set by two callers: etl/ingest_service.py after a fresh AppWorks
+    ingest (previous conclusions are stale by definition), and the API
+    routes' reload_ai_summary=True path (Section 9.5's "reload banner",
+    a human/caller-triggered equivalent of the ETL resync rather than one
+    reached from ETL itself). `reason` records which one, written to
+    pipeline_execution_state.cleared_reason so the audit trail shows why a
+    given run was invalidated.
     """
     existing = pipeline_state_repository.get_run_state(case_id, subject_id)
     already_done = (
@@ -166,7 +167,7 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False) -> dict:
         )
 
     if already_done and force:
-        pipeline_state_repository.clear_run(case_id, subject_id, reason="etl_resync")
+        pipeline_state_repository.clear_run(case_id, subject_id, reason=reason)
 
     pipeline_state_repository.start_run(case_id, subject_id)
 

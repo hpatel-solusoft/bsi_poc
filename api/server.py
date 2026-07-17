@@ -241,6 +241,30 @@ def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> t
     """
     return resolve_case_data(case_id, ai_summary, validate_ai_summary_contract)
 
+
+# -----------------------------------------------------------------------
+# reload_ai_summary
+#
+# This flag governs ONE thing only: whether reasoning_layer/pipeline.py's
+# run_pipeline (invoked via reasoning_layer/context_enrichment.py's
+# enrich_graph_context, called from /intake and /copilot) is allowed to
+# skip re-running when it has already completed for a (case_id,
+# subject_id) — Principle 10 in pipeline.py.
+#   False (default) — the pipeline keeps its own existing skip-if-already-
+#                      run behavior; unchanged either way.
+#   True             — force the pipeline to re-run even though it already
+#                       completed (bypasses the Principle 10 skip for this
+#                       call only).
+#
+# It does NOT gate whether a route's agent/tools run. Every ON-DEMAND
+# route (/intake, /similar_cases, /risk_assessment, /plan) always runs
+# its agent/tools and returns a fresh result when called — that behavior
+# is unchanged from before this flag existed, regardless of whether
+# reload_ai_summary is true or false, and regardless of whether the
+# section already ran.
+# -----------------------------------------------------------------------
+
+
 # -----------------------------------------------------------------------
 # Endpoints
 # -----------------------------------------------------------------------
@@ -340,7 +364,6 @@ def intake(req: intakeRequest):
     try:
         if not os.getenv("OPENAI_API_KEY"):
             raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
-        
 
         runner = _get_runner()
         # Scope to intake + enrichment only; similar cases is a separate route.
@@ -392,7 +415,15 @@ def intake(req: intakeRequest):
             # Non-blocking: a graph or pipeline failure degrades to an empty,
             # clearly-unavailable graph_context rather than failing intake.
             try:
-                enrichment = enrich_graph_context(req.case_id, subject_id)["result"]
+                # force=req.reload_ai_summary: when True this bypasses
+                # Principle 10 and makes the reasoning pipeline re-run for
+                # this (case, subject) even though it may already have
+                # completed, updating pipeline_execution_state (PostgreSQL)
+                # and the Neo4j graph rather than returning the cached
+                # rules_fired.
+                enrichment = enrich_graph_context(
+                    req.case_id, subject_id, force=req.reload_ai_summary,
+                )["result"]
                 provenance_trail = merge_direct_result(
                     sections, provenance_trail, "graph_context",
                     {
@@ -458,6 +489,8 @@ def intake(req: intakeRequest):
                 "meta": {
                     "tool_calls_made":  len(provenance_trail),
                     "duration_seconds": duration_seconds,
+                    "pipeline_status": "reloaded" if req.reload_ai_summary else "ran",
+                    "reload_ai_summary": req.reload_ai_summary,
                 },
             },
         }
@@ -497,6 +530,7 @@ def similar_cases(req: SimilarCasesRequest):
             "case_id=%s data_source=%s key_count=%d",
             req.case_id, data_source, len(list(case_data.keys())),
         )
+
         runner = _get_runner()
         
         
@@ -595,6 +629,7 @@ def risk_assessment(req: RiskAssessmentRequest):
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
+
         runner = _get_runner()
         
 
@@ -725,6 +760,7 @@ def plan(req: PlanRequest):
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
+
         execution_context = {"ai_summary": req.ai_summary}
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
@@ -859,6 +895,44 @@ def copilot(req: CopilotRequest):
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, case_data_source = _resolve_case_store(req.case_id, req.ai_summary)
 
+        # reload_ai_summary=False (default): Copilot always answers the
+        # question below — there is nothing to "skip" for a Q&A route —
+        # but it does NOT force any extra work: it answers against
+        # whatever graph_context is already cached, unchanged from today.
+        # reload_ai_summary=True: force the reasoning pipeline to re-run
+        # for this case's primary subject before answering (even if it
+        # already completed), refreshing graph_context/graph_signals/
+        # rules_fired in both PostgreSQL (pipeline_execution_state) and
+        # Neo4j, then merge the refreshed context into case_data so the
+        # answer below is grounded in it.
+        if req.reload_ai_summary:
+            subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+            if subject_id:
+                try:
+                    enrichment = enrich_graph_context(req.case_id, subject_id, force=True)["result"]
+                    case_data["graph_context"] = enrichment["graph_context"]
+                    case_data["graph_signals"] = enrichment["graph_signals"]
+                    case_data["rules_fired"] = enrichment["rules_fired"]
+                    CASE_STORE[req.case_id] = case_data
+                    persist_case_session(
+                        req.case_id,
+                        build_ai_summary(case_data, {}, case_data.get("provenance_trail", [])),
+                    )
+                    logger.info(
+                        "copilot FORCED graph refresh case_id=%s subject_id=%s",
+                        req.case_id, subject_id,
+                    )
+                except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+                    logger.warning(
+                        "copilot forced graph refresh unavailable for case_id=%s subject_id=%s — %s",
+                        req.case_id, subject_id, exc,
+                    )
+            else:
+                logger.warning(
+                    "copilot reload_ai_summary=True but no subject_primary_id resolved "
+                    "for case_id=%s — nothing to refresh", req.case_id,
+                )
+
         # If the frontend has supplied a human-approved investigation plan, merge it
         # into case_data so the copilot prompt's precedence rule can act on it.
         if req.modified_ai_investigation_plan:
@@ -946,6 +1020,7 @@ def copilot(req: CopilotRequest):
             "case_data_source": case_data_source,
             "conversation_history": conversation_history,
             "conversation_history_source": history_source,
+            "reload_ai_summary": req.reload_ai_summary,
         }
     except HTTPException:
         raise
@@ -965,10 +1040,15 @@ def copilot(req: CopilotRequest):
 
 
      
-@app.get("/conversation_history/{case_id}", response_model=ConversationHistoryResponse)
+@app.get("/copilot/{case_id}", response_model=ConversationHistoryResponse)
 def get_conversation_history(case_id: str):
     """
     ON-DEMAND — fetch the server-owned Copilot transcript for a case.
+
+    GET /copilot/{case_id} — same base path as POST /copilot (ask a
+    question) since these are matched as (method, path) pairs, not by
+    path alone: POST /copilot (exact) and GET /copilot/{case_id}
+    (parameterized) are two distinct routes and never collide.
  
     Returns conversation_history in the same user/assistant message shape
     /copilot returns, resolved from the CS-4 warm store first, then the
@@ -997,9 +1077,4 @@ def get_conversation_history(case_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"Conversation history fetch failed: {exc}",
-        ) from exc
-    
-    
-    
-    
- 
+        ) 

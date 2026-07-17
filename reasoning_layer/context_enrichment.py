@@ -226,7 +226,7 @@ def _compute_signals(session, subject_id: str) -> Dict[str, Any]:
     }
 
 
-def enrich_graph_context(case_id: str, subject_id: str) -> dict:
+def enrich_graph_context(case_id: str, subject_id: str, force: bool = False, reason: str = "api_reload_ai_summary") -> dict:
     """
     Context Enrichment processing (AI-13 / Section 9.1). For the given
     (case, subject):
@@ -243,10 +243,15 @@ def enrich_graph_context(case_id: str, subject_id: str) -> dict:
                             corroboration_ratio},
           "rules_fired":   [ ...the entries the pipeline reported... ] }
 
-    Step 2 uses the pipeline default (force=False): enrichment is a READ of
-    the investigator's world, so Principle 10 applies — an already-completed
+    Step 2 defaults to force=False: enrichment is a READ of the
+    investigator's world, so Principle 10 applies — an already-completed
     (case, subject) is not re-inferred; its existing rules_fired is
-    returned. Only the ETL path forces a re-run.
+    returned. The ETL path always forces a re-run; the /intake and
+    /copilot routes additionally pass force=True through here when the
+    caller explicitly asked for reload_ai_summary=True (Section 9.5's
+    "reload banner" path, reached from an API caller instead of ETL) —
+    that is the only way a route can make this re-infer rather than
+    return the cached rules_fired.
 
     Raises:
         ValueError: on a missing case_id or subject_id.
@@ -263,7 +268,7 @@ def enrich_graph_context(case_id: str, subject_id: str) -> dict:
     case_id, subject_id = str(case_id).strip(), str(subject_id).strip()
 
     # --- Step 2: trigger the pipeline, block until complete ---
-    pipeline_envelope = pipeline.run_pipeline(case_id, subject_id)
+    pipeline_envelope = pipeline.run_pipeline(case_id, subject_id, force=force, reason=reason)
     rules_fired = pipeline_envelope["result"].get("rules_fired", [])
 
     # --- Steps 3 & 4: read graph_context and compute signals ---

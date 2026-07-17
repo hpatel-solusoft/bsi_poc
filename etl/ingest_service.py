@@ -170,7 +170,7 @@ def reason_case(case_id: str) -> Dict[str, Any]:
 
     return {
         "case_id": case_id,
-        "subjects_reasoned": len(runs),
+        "pipeline_reasoned": len(runs),
         "subjects_failed": len(failed),
         "runs": runs,
     }
@@ -205,23 +205,23 @@ def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
                 len(loaded), len(load_failed))
 
     # --- Phase 2: reason over the now-complete graph ---
-    reasoning_results: List[Dict[str, Any]] = []
+    pipeline_results: List[Dict[str, Any]] = []
     if run_reasoning:
-        reasoning_results = [reason_case(case_id) for case_id in loaded]
+        pipeline_results = [reason_case(case_id) for case_id in loaded]
 
     report = {
         "cases_requested": len(case_ids),
         "cases_loaded": len(loaded),
         "cases_load_failed": len(load_failed),
         "load_results": load_results,
-        "reasoning_ran": run_reasoning,
-        "reasoning_results": reasoning_results,
-        "subjects_reasoned": sum(r["subjects_reasoned"] for r in reasoning_results),
-        "subjects_reasoning_failed": sum(r["subjects_failed"] for r in reasoning_results),
+        "pipeline_executed": run_reasoning,
+        "pipeline_results": pipeline_results,
+        "pipeline_reasoned": sum(r["pipeline_reasoned"] for r in pipeline_results),
+        "pipeline_reasoning_failed": sum(r["subjects_failed"] for r in pipeline_results),
     }
     logger.info(
-        "ingest_service: DONE loaded=%d/%d subjects_reasoned=%d reasoning_failures=%d",
+        "ingest_service: DONE loaded=%d/%d pipeline_reasoned=%d reasoning_failures=%d",
         report["cases_loaded"], report["cases_requested"],
-        report["subjects_reasoned"], report["subjects_reasoning_failed"],
+        report["pipeline_reasoned"], report["pipeline_reasoning_failed"],
     )
     return report
