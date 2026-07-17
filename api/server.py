@@ -33,6 +33,7 @@ from reasoning_layer.neo4j_client import (
 )
 from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.context_enrichment import enrich_graph_context
+from reasoning_layer.similar_cases import find_structural_matches
 from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.rule_engine import verify_rule_files
@@ -66,7 +67,6 @@ from api.message_utils import (
 _runner: Optional[BSIAgentRunner] = None
 
 load_dotenv()
-
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BSI Fraud Investigation Platform")
@@ -530,31 +530,60 @@ def similar_cases(req: SimilarCasesRequest):
             "case_id=%s data_source=%s key_count=%d",
             req.case_id, data_source, len(list(case_data.keys())),
         )
-
         runner = _get_runner()
-        
-        
-        
-        # --- EXPLICIT DEPENDENCY INJECTION ---
-        # We package the backend state into a generic execution_context
-        execution_context = {"ai_summary": req.ai_summary}
-        # -----------------------------------
+
+        # --- AI-14: deterministic structural matching (Section 8.3, 9.2) ---
+        # Replaces the Phase 1 two-step LLM type-selection. The matches are
+        # computed by a single Cypher query (reasoning_layer.similar_cases),
+        # called DIRECTLY — not an LLM tool, not dispatcher-routed, not in
+        # manifest.yaml (governance: manifest holds a tool only if it is
+        # LLM-called AND makes an AppWorks call; this is a Neo4j read). The
+        # LLM's role is now to EXPLAIN what the graph found, never to select
+        # it (Section 8.3). Non-blocking: a graph outage degrades to an
+        # empty, clearly-unavailable section rather than failing the route.
+        try:
+            structural = find_structural_matches(req.case_id)["result"]
+        except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+            logger.warning(
+                "structural similar-case matching unavailable for case_id=%s — %s",
+                req.case_id, exc,
+            )
+            structural = {
+                "matches": [], "source": "structural_graph",
+                "total_candidates_scored": 0,
+                "unavailable_reason": str(exc),
+            }
+
+        # Inject the computed matches into the case context the prompt
+        # serialises, so the LLM explains THESE matches (Turn 2 in Section
+        # 9.2) rather than being asked to find any. SIMILAR_CASES scope no
+        # longer carries a matching tool, so the LLM only explains.
+        case_data_for_prompt = {**case_data, "similar_cases": structural}
 
         messages, new_provenance, _ = runner.run_scoped(
-            system_prompt=build_similar_cases_prompt(case_data),
+            system_prompt=build_similar_cases_prompt(case_data_for_prompt),
             user_message=(
-                f"Review the case data for case {req.case_id} and execute the "
-                "appropriate tools to search for similar historical cases and explain "
-                "the pattern matches found."
+                f"Explain the structurally similar historical cases already "
+                f"identified for case {req.case_id}: why each one matched "
+                f"(see match_reasons) and how relevant its pattern is. Do not "
+                f"add or remove cases; the graph has already decided the matches."
             ),
-            scope="SIMILAR_CASES",  # ← this scope includes intake + enrichment tools only
-            execution_context=execution_context
+            scope="SIMILAR_CASES",
         )
 
-        sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
-        
+        # The authoritative similar_cases section is the DETERMINISTIC
+        # structural result, not anything the LLM produced — the LLM
+        # explains, it does not decide inclusion.
+        sections: dict = {}
+        new_provenance = merge_direct_result(
+            sections, new_provenance, "similar_cases",
+            {"result": structural,
+             "provenance": {"sources": ["Neo4j graph query"], "retrieved_at": "",
+                            "computed_by": "reasoning_layer.similar_cases"}},
+        )
+
         agent_summary = extract_agent_summary(messages)
-        
+
         similar_cases_data = sections.get("similar_cases", {})
         similar_section = {
             "similar_cases": similar_cases_data

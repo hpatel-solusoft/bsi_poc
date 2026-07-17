@@ -40,46 +40,46 @@ tools:
         type: "string"
         description: "Current case identifier from verify_case_intake output — excludes this case from prior_cases and prior_case_count so the active investigation is not counted as its own prior history"
 
-  - name: "get_allegation_types"
-    section: "allegation_types"
-    description: >   
-      Fetches all active allegation type definitions from AppWorks. Returns each type with its description and default conduct text. Use the returned    list and the current case allegations to identify all types whose conduct    description is semantically related to the current case — including types    that describe the same scheme under a different label or variant name.    Pass all related type descriptions to the archive search.
-    scope: [SIMILAR_CASES]
-    python_function: "appworks.appworks_services.get_allegation_types"
-    required_params: []
-    optional_params: []
+  # - name: "get_allegation_types"
+  #   section: "allegation_types"
+  #   description: >   
+  #     Fetches all active allegation type definitions from AppWorks. Returns each type with its description and default conduct text. Use the returned    list and the current case allegations to identify all types whose conduct    description is semantically related to the current case — including types    that describe the same scheme under a different label or variant name.    Pass all related type descriptions to the archive search.
+  #   scope: [SIMILAR_CASES]
+  #   python_function: "appworks.appworks_services.get_allegation_types"
+  #   required_params: []
+  #   optional_params: []
     
-  - name: "search_similar_cases"
-    section: "similar_cases"
-    description: >
-      Searches the BSI AppWorks archive for historical cases that share
-      characteristics with the current investigation. Returns closed and
-      active cases with summaries, investigation status, and financial data.
-      Requires fraud_types — pass all relevant allegation type labels
-      identified from get_allegation_types output, not just the current
-      case fraud type label. Multiple fraud types produce a broader
-      cross-label candidate pool that surfaces scheme matches regardless
-      of how prior cases were classified.
-    scope: [SIMILAR_CASES]
-    python_function: "appworks.appworks_services.search_similar_cases"
-    required_params:
-      - name: "fraud_types"
-        type: "list[dict]"
-        description: "List of allegation type objects from get_allegation_types output
-          that are semantically relevant to the current case. Each object
-          must include exactly two fields: type_id (the numeric allegation
-          type identifier string) and description (the allegation type label).
-          CRITICAL: The 'id' MUST be the numeric 'type_id' (e.g., '131073'), NOT the 'short_code'.
-          Include all semantically related types — not only the exact fraud
-          type on the current case. Broader coverage surfaces scheme matches
-          classified under variant labels in prior cases."
-    optional_params:
-      - name: "case_id"
-        type: "string"
-        description: "Current case identifier — excludes this case from results"
-      - name: "max_total_results"
-        type: "integer"
-        description: "The maximum number of closest matching cases to return. Defaults to 3 if not specified."
+  # - name: "search_similar_cases"
+  #   section: "similar_cases"
+  #   description: >
+  #     Searches the BSI AppWorks archive for historical cases that share
+  #     characteristics with the current investigation. Returns closed and
+  #     active cases with summaries, investigation status, and financial data.
+  #     Requires fraud_types — pass all relevant allegation type labels
+  #     identified from get_allegation_types output, not just the current
+  #     case fraud type label. Multiple fraud types produce a broader
+  #     cross-label candidate pool that surfaces scheme matches regardless
+  #     of how prior cases were classified.
+  #   scope: [SIMILAR_CASES]
+  #   python_function: "appworks.appworks_services.search_similar_cases"
+  #   required_params:
+  #     - name: "fraud_types"
+  #       type: "list[dict]"
+  #       description: "List of allegation type objects from get_allegation_types output
+  #         that are semantically relevant to the current case. Each object
+  #         must include exactly two fields: type_id (the numeric allegation
+  #         type identifier string) and description (the allegation type label).
+  #         CRITICAL: The 'id' MUST be the numeric 'type_id' (e.g., '131073'), NOT the 'short_code'.
+  #         Include all semantically related types — not only the exact fraud
+  #         type on the current case. Broader coverage surfaces scheme matches
+  #         classified under variant labels in prior cases."
+  #   optional_params:
+  #     - name: "case_id"
+  #       type: "string"
+  #       description: "Current case identifier — excludes this case from results"
+  #     - name: "max_total_results"
+  #       type: "integer"
+  #       description: "The maximum number of closest matching cases to return. Defaults to 3 if not specified."
  
   - name: "get_risk_rules"
     section: "risk_rules"
