@@ -62,7 +62,10 @@ from api.message_utils import (
     extract_agent_summary,
     extract_tool_results,
     merge_provenance,
-    merge_direct_result, )        
+    merge_direct_result, )    
+
+from reasoning_layer.similar_cases import find_structural_matches
+from reasoning_layer.risk_signals import apply_graph_risk_signals    
 
 _runner: Optional[BSIAgentRunner] = None
 
@@ -690,6 +693,41 @@ def risk_assessment(req: RiskAssessmentRequest):
             raise RuntimeError(
                 "Risk assessment did not complete because calculate_risk_metrics "
                 f"did not return a score. Successful tools: {called_tools}"
+            )
+
+        # --- AI-15: Neo4j graph risk signals (Section 8.4) ---
+        # The AppWorks base score above is UNCHANGED. Four graph-sourced
+        # signals are layered on top by a DIRECT call (Neo4j read, not an
+        # AppWorks call, so not a manifest tool — same pattern as the other
+        # reasoning-layer direct calls). The subject and rules_fired come
+        # from CS-4 (populated at intake / Context Enrichment). Non-blocking:
+        # a graph outage leaves the base result untouched rather than
+        # failing the route.
+        subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+        if subject_id:
+            try:
+                graph_env = apply_graph_risk_signals(
+                    req.case_id,
+                    subject_id,
+                    risk_assessment,
+                    case_data.get("rules_fired", []),
+                )
+                risk_assessment = graph_env["result"]
+                # Section 8.4 provenance requirement: keep the AppWorks base
+                # scorer's computed_by AND add the Neo4j graph-signal
+                # computed_by as a distinct, independently-attributable entry.
+                new_provenance = merge_provenance(new_provenance, [graph_env["provenance"]])
+            except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+                logger.warning(
+                    "graph risk signals unavailable for case_id=%s subject_id=%s — %s; "
+                    "returning AppWorks base score only",
+                    req.case_id, subject_id, exc,
+                )
+                risk_assessment["neo4j_signals"] = {"unavailable_reason": str(exc)}
+        else:
+            logger.warning(
+                "graph risk signals skipped for case_id=%s — no subject_primary_id resolved",
+                req.case_id,
             )
         # Normalize recommendation text: rename singular "recommendation" to plural "recommendations"
         assistant_text = extract_agent_summary(messages)
