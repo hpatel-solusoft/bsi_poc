@@ -43,6 +43,8 @@ from reasoning_layer.neo4j_client import (
 from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.similar_cases import find_structural_matches
+from reasoning_layer.report_generation import assemble_related_network
+from core.report_artifacts_repository import save_report
 from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.rule_engine import verify_rule_files
@@ -50,12 +52,14 @@ from etl.ingest_service import ingest as run_graph_ingest
 from core import graph_ingest_repository
 from dotenv import load_dotenv
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
+from semantic_layer.entity_contracts import GeneratedReport as GeneratedReportContract
 from api.models import (
     ConversationHistoryResponse, intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
     CopilotRequest, GraphIngestRequest,
     ModifyInvestigationStepsRequest, ModifyInvestigationStepsResponse,
     RevertToAiPlanRequest, RevertToAiPlanResponse,
     InvestigationStepsResponse,
+    ReportGenerationRequest
 )
 from agent_service.prompt_builders import (
     build_intake_system_prompt,
@@ -63,6 +67,7 @@ from agent_service.prompt_builders import (
     build_plan_prompt,
     build_similar_cases_prompt,
     build_copilot_prompt,
+    build_report_generation_prompt,
 )
 from api.response_builders import (
     validate_ai_summary_contract,
@@ -1154,6 +1159,180 @@ def get_investigation_steps(case_id: str) -> InvestigationStepsResponse:
         investigation_steps=investigation_steps,
         is_modify_investigation_steps=False,
     )
+
+@app.post("/generate_report")
+def generate_report(req: ReportGenerationRequest):
+    """
+    ON-DEMAND — Report Generation Route (AI-18, Functional Spec Section
+    8.7, Developer Spec Section 7.5). Built last — depends on /intake,
+    /similar_cases, /risk_assessment, and /plan already having populated
+    CS-4 for this case (AI-13, AI-17).
+
+    Assembles the Related Network section deterministically from Neo4j
+    (reasoning_layer.report_generation — every active High/Medium fact
+    plus every rejected fact for the Primary Subject, rejected facts
+    never silently omitted), combines it with the case narrative already
+    on file in CS-4, and has the LLM write the narrative prose ONLY — it
+    is never asked to decide which connections belong in the report
+    (Section 8.7). The result is persisted to report_artifacts (D.5) as
+    a new draft.
+    """
+    start = time.time()
+    try:
+        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
+        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        logger.info(
+            "case_id=%s data_source=%s key_count=%d",
+            req.case_id, data_source, len(list(case_data.keys())),
+        )
+        runner = _get_runner()
+
+        subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+        if not subject_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Report generation requires a resolved primary subject for "
+                    f"case_id={req.case_id}. Run /intake first."
+                ),
+            )
+
+        # --- AI-18: deterministic Related Network assembly (Section 8.7) ---
+        # Called DIRECTLY — not an LLM tool, not dispatcher-routed, not in
+        # manifest.yaml (same governance as similar_cases/AI-14 and
+        # check_network_match/AI-12: manifest holds a tool only if it is
+        # LLM-called AND makes an AppWorks call; this is a Neo4j read).
+        # The LLM's role is to EXPLAIN this section, never to decide its
+        # contents. Non-blocking: a graph outage degrades to an empty,
+        # clearly-unavailable section rather than failing the route.
+        try:
+            related_envelope = assemble_related_network(req.case_id, subject_id)
+            related = related_envelope["result"]
+        except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+            logger.warning(
+                "related-network assembly unavailable for case_id=%s subject_id=%s — %s",
+                req.case_id, subject_id, exc,
+            )
+            related = {
+                "subject_id": subject_id, "related_network": [],
+                "confidence_summary": {"high": 0, "medium": 0, "unresolved": 0},
+                "rejected_count": 0, "unavailable_reason": str(exc),
+            }
+            related_envelope = {
+                "result": related,
+                "provenance": {"sources": [], "retrieved_at": "",
+                               "computed_by": "reasoning_layer.report_generation.assemble_related_network"},
+            }
+
+        # Inject the computed network into the case context the prompt
+        # serialises, so the LLM narrates THESE facts (never adds,
+        # removes, or reorders them — REPORT_GENERATION scope carries no
+        # tools, so the LLM cannot re-query the graph itself either).
+        case_data_for_prompt = {
+            **case_data,
+            "related_network": related.get("related_network", []),
+            "confidence_summary": related.get("confidence_summary", {}),
+            "rejected_count": related.get("rejected_count", 0),
+        }
+
+        messages, new_provenance, _ = runner.run_scoped(
+            system_prompt=build_report_generation_prompt(case_data_for_prompt),
+            user_message=(
+                f"Compose the investigation report narrative for case {req.case_id} "
+                "from the case record already provided. The Related Network and "
+                "Reviewed and Excluded Connections sections are already finalized "
+                "in related_network — narrate every entry given, in full, without "
+                "adding, removing, or reordering any of them."
+            ),
+            scope="REPORT_GENERATION",
+        )
+
+        # The authoritative related_network section is the DETERMINISTIC
+        # graph result, not anything the LLM produced — the LLM narrates,
+        # it does not decide inclusion (mirrors AI-14's similar_cases pattern).
+        sections: dict = {}
+        new_provenance = merge_direct_result(
+            sections, new_provenance, "related_network", related_envelope,
+        )
+
+        assistant_text = extract_agent_summary(messages)
+
+        merged_provenance = merge_provenance(
+            case_data.get("provenance_trail", []),
+            new_provenance,
+        )
+
+        report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        generated_at = datetime.now(timezone.utc).isoformat()
+        confidence_summary = related.get(
+            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
+        )
+        report_content = {
+            "report_id": report_id,
+            "case_id": req.case_id,
+            "generated_at": generated_at,
+            "status": "draft",
+            "standard_sections": {"report_markdown": assistant_text},
+            "related_network": related.get("related_network", []),
+            "confidence_summary": confidence_summary,
+        }
+
+        try:
+            validated_report = GeneratedReportContract(**report_content)
+            report_content = validated_report.model_dump(exclude_none=True)
+        except Exception as e:
+            logger.warning(
+                f"Generated report schema validation failed for case_id={req.case_id} "
+                f"— storing unvalidated: {e}"
+            )
+
+        # D.5: report_artifacts is a working/draft copy only — never the
+        # authoritative one (the AppWorks-saved report is). A write
+        # failure here must not fail this investigator-facing response;
+        # Neo4j + CS-4 already produced the authoritative content above.
+        persisted = save_report(req.case_id, report_content, status="draft")
+
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="report_generation",
+            endpoint="/generate_report",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+
+        return {
+            "case_id": req.case_id,
+            "status": "completed",
+            "report_id": report_id,
+            "generated_at": generated_at,
+            "details": {
+                "agent_summary": render_markdown_html_with_sources(
+                    assistant_text, merged_provenance,
+                ),
+                "related_network": related.get("related_network", []),
+                "confidence_summary": confidence_summary,
+                "rejected_count": related.get("rejected_count", 0),
+                "meta": {
+                    "data_source": data_source,
+                    "report_status": "draft",
+                    "persisted_to_postgres": persisted is not None,
+                },
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Report generation route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="report_generation",
+            endpoint="/generate_report",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
+    finally:
+        logger.info("POST /generate_report completed for case_id=%s", req.case_id)
 
 
 @app.post("/copilot")
