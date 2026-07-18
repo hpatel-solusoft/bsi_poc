@@ -131,7 +131,7 @@ class SemanticDispatcher:
 
         # --- Execute and pass envelope through unchanged ---
         try:
-            #envelope = func(**params)
+            
             # 1. Safely handle cases where execution_context is None
             context_kwargs = execution_context or {}
             

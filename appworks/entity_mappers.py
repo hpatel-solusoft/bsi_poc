@@ -35,7 +35,7 @@ from appworks.appworks_utils import (
     embedded,
     embedded_id,
 )
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 from appworks.appworks_paths import AppWorksPaths as AW
 
 logger = logging.getLogger(__name__)

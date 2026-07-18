@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Any
 
 from appworks.appworks_utils import safe_fetch
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 from appworks.entity_mappers import map_allegations, map_subjects, map_financials
 from appworks.appworks_paths import AppWorksPaths
 

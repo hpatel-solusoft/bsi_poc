@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any
 from appworks.entity_mappers import map_allegations, map_commentary, map_workfolder_core
 from appworks.appworks_paths import AppWorksPaths
 from appworks.appworks_utils import safe_fetch, extract_id_from_href, get_relationship_items
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
 

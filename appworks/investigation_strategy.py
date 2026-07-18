@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from semantic_layer.entity_contracts import InvestigationPlan
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
 

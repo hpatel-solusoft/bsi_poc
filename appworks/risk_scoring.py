@@ -14,6 +14,7 @@
 import logging
 import re
 from datetime import datetime, timezone
+from appworks.appworks_auth import fetch
 from typing import Any, Optional, Tuple, Dict, List
 from appworks.appworks_utils import extract_workfolder_id_from_allegation
 from appworks.appworks_paths import AppWorksPaths
@@ -21,7 +22,7 @@ from semantic_layer.entity_contracts import RiskRuleDef, TriggeredRule
 
 # ── NEW: Architecture Standard Imports ───────────────────────
 from appworks.appworks_utils import safe_fetch, extract_id_from_href, get_relationship_items
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,7 @@ def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTr
                 if not type_id: continue
                 
                 # We need to manually fetch the list endpoint since it differs from item payloads
-                from appworks.appworks_auth import fetch
+                
                 list_res = fetch(AppWorksPaths.Allegations.case_allegations_by_type_id(type_id))
                 matched = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
                 
@@ -247,7 +248,6 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: List[str], t
     tracker.add_source("Workfolder", case_id)
     
     # Needs the full raw response dict for the volume helper
-    from appworks.appworks_auth import fetch
     wf_res_raw = fetch(AppWorksPaths.Workfolder.item(case_id)) if wf_props else {}
 
     total_calculated, total_ordered = 0.0, 0.0
@@ -444,7 +444,6 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
     rules_out = []
     
     try:
-        from appworks.appworks_auth import fetch
         res = fetch(_RULES_LIST_ENDPOINT)
         
         items = res.get("_embedded", {}).get("FraudRiskRules_FraudRiskRulesListInternal", [])

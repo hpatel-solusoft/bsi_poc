@@ -9,10 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from appworks.appworks_utils import parse_aw_date, extract_workfolder_id_from_allegation
 import config.settings as settings
 from appworks.appworks_paths import AppWorksPaths
-
+from appworks.appworks_auth import fetch
 # ── NEW: Architecture Standard Imports ───────────────────────
 from appworks.appworks_utils import safe_fetch, extract_id_from_href
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def search_similar_cases(
         # Note: AppWorks list endpoints return the payload differently than single items, 
         # so we handle the unpack manually here instead of relying on safe_fetch's standard tuple
         try:
-            from appworks.appworks_auth import fetch
+            
             list_res = fetch(list_href)
             rows = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
         except Exception as e:
@@ -162,7 +162,7 @@ def get_allegation_types(**kwargs) -> dict:
     tracker = ProvenanceTracker("Catalog", "AllegationType")
     
     try:
-        from appworks.appworks_auth import fetch
+        
         raw = fetch(AppWorksPaths.Allegations.allegation_type_manage())
         items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])
     except Exception as e:
