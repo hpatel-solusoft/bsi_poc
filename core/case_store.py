@@ -180,6 +180,52 @@ def _case_data_from_session(cached_session: Dict[str, Any]) -> Dict[str, Any]:
     return case_data
 
 
+def get_cached_investigation_steps(case_id: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    Read-only extraction of
+    ai_summary.investigation_plan.investigation_steps from
+    case_ai_summary_store for case_id (Data Persistence Spec v1.0,
+    Section D.1).
+
+    Returns None if there is no cached case at all for case_id — a
+    genuine miss, or the store being unreachable; get_case_session does
+    not distinguish the two, so neither does this. Returns an empty
+    list (not None) if the case is cached but has no investigation_plan
+    yet (e.g. /plan has never run for it) — the case exists, its plan
+    sub-resource is just empty.
+
+    Does NOT apply investigation_plan_overrides — this is a raw read of
+    whatever /plan or /copilot last cached, not the override-applied
+    view those two endpoints serve. See
+    core.investigation_plan_override_repository.get_override for the
+    current human-edited state.
+    """
+    cached_session = case_session_repository.get_case_session(case_id)
+    if cached_session is None:
+        return None
+    ai_summary = cached_session.get("ai_summary") or {}
+    investigation_plan = ai_summary.get("investigation_plan") or {}
+    return investigation_plan.get("investigation_steps") or []
+
+
+def get_case_ai_summary_cache_updated_at(case_id: str) -> Optional[Any]:
+    """
+    Read-only lookup of case_ai_summary_store.updated_at for case_id.
+
+    Used solely for the investigation_plan_overrides staleness
+    comparison (Data Persistence Spec v1.0, Section E.5) — callers must
+    read this BEFORE this request's own persist_case_session call,
+    since that call always rewrites updated_at to now() and would
+    otherwise make every override look stale.
+
+    Returns None on a miss or a Postgres outage; the caller
+    (investigation_plan_override_repository.compute_plan_staleness)
+    treats that as "no staleness signal", never as an error.
+    """
+    cached_session = case_session_repository.get_case_session(case_id)
+    return cached_session.get("updated_at") if cached_session else None
+
+
 def persist_case_session(case_id: str, ai_summary: Dict[str, Any]) -> None:
     """
     Write-through the current merged ai_summary to the PostgreSQL fallback

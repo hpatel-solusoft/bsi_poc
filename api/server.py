@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+import psycopg2
 from agent_service.agent_runner import BSIAgentRunner
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
@@ -23,8 +24,16 @@ from core.case_store import (
     resolve_copilot_history,
     resolve_case_data,
     persist_case_session,
+    get_case_ai_summary_cache_updated_at,
+    get_cached_investigation_steps,
 )
 from core.agent_audit_repository import log_agent_call
+from core.investigation_plan_override_repository import (
+    upsert_override,
+    get_override,
+    delete_override,
+    compute_plan_staleness,
+)
 from core.db import init_pool as init_db_pool, close_pool as close_db_pool, DatabaseUnavailableError
 from reasoning_layer.neo4j_client import (
     init_driver as init_neo4j_driver,
@@ -44,6 +53,9 @@ from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPl
 from api.models import (
     ConversationHistoryResponse, intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
     CopilotRequest, GraphIngestRequest,
+    ModifyInvestigationStepsRequest, ModifyInvestigationStepsResponse,
+    RevertToAiPlanRequest, RevertToAiPlanResponse,
+    InvestigationStepsResponse,
 )
 from agent_service.prompt_builders import (
     build_intake_system_prompt,
@@ -55,18 +67,17 @@ from agent_service.prompt_builders import (
 from api.response_builders import (
     validate_ai_summary_contract,
     render_markdown_html_with_sources,
-    parse_bsi_section, render_markdown_html
+    parse_bsi_section, render_markdown_html,
+    resolve_plan_agent_summary,
 )
 from api.message_utils import (
     build_ai_summary,
     extract_agent_summary,
     extract_tool_results,
     merge_provenance,
-    merge_direct_result, )    
-
+    merge_direct_result, )        
 from reasoning_layer.similar_cases import find_structural_matches
-from reasoning_layer.risk_signals import apply_graph_risk_signals    
-
+from reasoning_layer.risk_signals import apply_graph_risk_signals 
 _runner: Optional[BSIAgentRunner] = None
 
 load_dotenv()
@@ -828,6 +839,11 @@ def plan(req: PlanRequest):
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
 
+        # Captured BEFORE this route's own persist_case_session call below,
+        # which always rewrites updated_at to now() — reading it late would
+        # make every override look stale (Section E.5).
+        cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
+
         execution_context = {"ai_summary": req.ai_summary}
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
@@ -885,6 +901,27 @@ def plan(req: PlanRequest):
                 f"Investigation plan schema validation failed — storing unvalidated: {e}"
             )
 
+        # Modify Investigation Steps flow (Section D.6): a saved override
+        # replaces investigation_steps only — evidence_checklist,
+        # escalation_criteria, fraud_types, and risk_tier stay AI-generated.
+        # Read server-side on every /plan call so the override is always
+        # reflected regardless of which client called this endpoint.
+        override = get_override(req.case_id)
+        if override is not None:
+            investigation_plan["investigation_steps"] = override["modified_steps"]
+            plan_source = "human_modified"
+            modified_by = override["modified_by"]
+            modified_on = override["modified_on"]
+        else:
+            plan_source = "ai_generated"
+            modified_by = None
+            modified_on = None
+
+        plan_stale = (
+            compute_plan_staleness(cache_updated_at_before_call, modified_on)
+            if override is not None
+            else False
+        )
 
         plan_section = {
             "investigation_plan": investigation_plan
@@ -921,11 +958,18 @@ def plan(req: PlanRequest):
             "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(
-                    assistant_text,
+                    resolve_plan_agent_summary(
+                        assistant_text, investigation_plan, req.case_id,
+                        case_data, merged_provenance,
+                    ),
                     merged_provenance,
                 ),
                 "meta": {
                     "data_source": data_source,
+                    "plan_source": plan_source,
+                    "modified_by": modified_by,
+                    "modified_on": modified_on.isoformat() if modified_on else None,
+                    "plan_stale": plan_stale,
                 },
             },
         }
@@ -944,6 +988,174 @@ def plan(req: PlanRequest):
     finally:
         logger.info("POST /plan completed for case_id=%s", req.case_id)
 
+
+@app.post("/plan/modify_investigation_steps", response_model=ModifyInvestigationStepsResponse)
+def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyInvestigationStepsResponse:
+    """
+    Investigator saves an edited investigation_steps list from the
+    Investigation Plan "Modify" popup (Data Persistence Spec v1.0,
+    Section D.6; Modify Investigation Steps flow).
+
+    Persists the edit to investigation_plan_overrides — durable,
+    attributable, one row per case_id, a new save overwriting the
+    prior one. Every later /plan or /copilot call for this case_id
+    looks this row up server-side and applies it, regardless of which
+    client calls those endpoints or what they pass in their own
+    request body.
+    """
+    start = time.time()
+    try:
+        modified_on = upsert_override(
+            case_id=req.case_id,
+            modified_steps=[step.model_dump(exclude_none=True) for step in req.steps],
+            modified_by=req.investigator_id,
+            comment=req.comment,
+        )
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan_override",
+            endpoint="/plan/modify_investigation_steps",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+        return ModifyInvestigationStepsResponse(
+            case_id=req.case_id,
+            status="saved",
+            plan_source="human_modified",
+            modified_by=req.investigator_id,
+            modified_on=modified_on,
+        )
+    except (psycopg2.Error, DatabaseUnavailableError) as exc:
+        logger.exception(
+            "modify_investigation_steps FAILED to save for case_id=%s", req.case_id,
+        )
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan_override",
+            endpoint="/plan/modify_investigation_steps",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not save the modified investigation steps: {exc}",
+        ) from exc
+    finally:
+        logger.info(
+            "POST /plan/modify_investigation_steps completed for case_id=%s", req.case_id,
+        )
+
+
+@app.post("/plan/revert_to_ai", response_model=RevertToAiPlanResponse)
+def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
+    """
+    Investigator clicks "Revert to AI Plan" — deletes case_id's saved
+    investigation_plan_overrides row. The next /plan or /copilot call
+    for this case_id finds no override row and falls back to
+    plan_source: ai_generated.
+    """
+    start = time.time()
+    try:
+        existed = delete_override(req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan_override",
+            endpoint="/plan/revert_to_ai",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+        return RevertToAiPlanResponse(
+            case_id=req.case_id,
+            status="reverted" if existed else "no_override_existed",
+            plan_source="ai_generated",
+        )
+    except (psycopg2.Error, DatabaseUnavailableError) as exc:
+        logger.exception(
+            "revert_to_ai_plan FAILED for case_id=%s", req.case_id,
+        )
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan_override",
+            endpoint="/plan/revert_to_ai",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not revert case {req.case_id} to the AI-generated plan: {exc}",
+        ) from exc
+    finally:
+        logger.info("POST /plan/revert_to_ai completed for case_id=%s", req.case_id)
+
+
+@app.get(
+    "/plan/modify_investigation_steps/{case_id}",
+    response_model=InvestigationStepsResponse,
+    response_model_exclude_none=True,
+)
+def get_investigation_steps(case_id: str) -> InvestigationStepsResponse:
+    """
+    ON-DEMAND — read-only fetch of the current investigation_steps for
+    case_id.
+
+    Same base path as POST /plan/modify_investigation_steps since these
+    are matched as (method, path) pairs, not by path alone — the POST
+    (exact) and this parameterized GET never collide, same as GET
+    /copilot/{case_id} alongside POST /copilot.
+
+    Single field, single source at a time — investigation_steps is
+    never split across two parallel fields with one left null.
+    is_modify_investigation_steps carries which table it came from:
+
+    1. True  — investigation_plan_overrides. The investigator's saved
+       edit, if one exists for case_id. Always checked first, and
+       always the current, attributable fact when present.
+    2. False — case_ai_summary_store.ai_summary.investigation_plan. The
+       last AI-generated (or previously-overridden-and-cached) plan,
+       used only when no override exists.
+
+    Read-only: no LLM, no dispatcher, no CASE_STORE write — the same
+    class of endpoint as GET /copilot/{case_id}.
+    """
+    override = get_override(case_id)
+    if override is not None:
+        investigation_steps = override["modified_steps"]
+        logger.info(
+            "GET /plan/modify_investigation_steps case_id=%s source=override steps=%d",
+            case_id, len(investigation_steps),
+        )
+        return InvestigationStepsResponse(
+            case_id=case_id,
+            investigation_steps=investigation_steps,
+            is_modify_investigation_steps=True,
+        )
+
+    try:
+        investigation_steps = get_cached_investigation_steps(case_id)
+    except Exception as exc:
+        logger.exception("investigation_steps lookup FAILED for case_id=%s", case_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Investigation steps lookup failed: {exc}",
+        ) from exc
+
+    if investigation_steps is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached case data found for case_id={case_id}. Call /plan first.",
+        )
+
+    logger.info(
+        "GET /plan/modify_investigation_steps case_id=%s source=case_ai_summary_store steps=%d",
+        case_id, len(investigation_steps),
+    )
+    return InvestigationStepsResponse(
+        case_id=case_id,
+        investigation_steps=investigation_steps,
+        is_modify_investigation_steps=False,
+    )
+
+
 @app.post("/copilot")
 def copilot(req: CopilotRequest):
     """
@@ -961,6 +1173,10 @@ def copilot(req: CopilotRequest):
     try:
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, case_data_source = _resolve_case_store(req.case_id, req.ai_summary)
+
+        # Captured BEFORE this route's own persist_case_session call below
+        # (Section E.5) — see the identical comment in /plan.
+        cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
 
         # reload_ai_summary=False (default): Copilot always answers the
         # question below — there is nothing to "skip" for a Q&A route —
@@ -1000,10 +1216,30 @@ def copilot(req: CopilotRequest):
                     "for case_id=%s — nothing to refresh", req.case_id,
                 )
 
-        # If the frontend has supplied a human-approved investigation plan, merge it
-        # into case_data so the copilot prompt's precedence rule can act on it.
-        if req.modified_ai_investigation_plan:
+        # Modify Investigation Steps flow (Section D.6): looked up
+        # server-side, from any client, any session — never relying on
+        # the caller to relay it — so Copilot always sees the
+        # human-modified steps and can answer questions about the
+        # modification itself. Takes precedence over the legacy
+        # frontend-relayed modified_ai_investigation_plan field, which
+        # is kept only for callers that have not migrated yet.
+        override = get_override(req.case_id)
+        if override is not None:
+            case_data["modified_ai_investigation_plan"] = {
+                "source": "human_approved",
+                "steps": override["modified_steps"],
+                "modified_by": override["modified_by"],
+                "modified_on": override["modified_on"].isoformat(),
+                "comment": override.get("comment") or "",
+            }
+        elif req.modified_ai_investigation_plan:
             case_data["modified_ai_investigation_plan"] = req.modified_ai_investigation_plan
+
+        plan_stale = (
+            compute_plan_staleness(cache_updated_at_before_call, override["modified_on"])
+            if override is not None
+            else False
+        )
 
         conversation_history, history_source = resolve_copilot_history(
             req.case_id,
@@ -1088,6 +1324,8 @@ def copilot(req: CopilotRequest):
             "conversation_history": conversation_history,
             "conversation_history_source": history_source,
             "reload_ai_summary": req.reload_ai_summary,
+            "plan_source": "human_modified" if override is not None else "ai_generated",
+            "plan_stale": plan_stale,
         }
     except HTTPException:
         raise
@@ -1144,4 +1382,4 @@ def get_conversation_history(case_id: str):
         raise HTTPException(
             status_code=500,
             detail=f"Conversation history fetch failed: {exc}",
-        ) 
+        )

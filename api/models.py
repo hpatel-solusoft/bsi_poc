@@ -1,5 +1,10 @@
-from pydantic import BaseModel
+from datetime import datetime
+
+from pydantic import BaseModel, field_validator
+
 from typing import Dict, List, Optional, Any
+
+from semantic_layer.entity_contracts import InvestigationStep
 
 # -----------------------------------------------------------------------
 # Request / response models
@@ -40,6 +45,83 @@ class PlanRequest(BaseModel):
     # this case_id, skip re-running get_investigation_plan and return the
     # existing result. True: always re-run and overwrite it.
     reload_ai_summary: bool = False
+
+
+class ModifyInvestigationStepsRequest(BaseModel):
+    """
+    POST /plan/modify_investigation_steps — the Investigation Plan
+    "Modify" popup contract (Data Persistence Spec v1.0, Section D.6;
+    Modify Investigation Steps flow).
+
+    Overrides investigation_steps only. evidence_checklist,
+    escalation_criteria, fraud_types, risk_tier, and the narrative
+    summary are never accepted here — they remain AI-generated at all
+    times, per the Section D.6 scope rule.
+    """
+    case_id: str
+    # Reuses the same {step, action, owner?, deadline_days?} shape the
+    # AI-generated plan already uses (semantic_layer.entity_contracts.
+    # InvestigationStep) — the investigator is editing the same list,
+    # not authoring a different one.
+    steps: List[InvestigationStep]
+    comment: Optional[str] = None
+    investigator_id: str
+
+    @field_validator("steps")
+    @classmethod
+    def steps_must_be_non_empty(cls, value: List[InvestigationStep]) -> List[InvestigationStep]:
+        """Reject a save with no steps — that is what "Revert to AI Plan" is for."""
+        if not value:
+            raise ValueError("steps must contain at least one investigation step.")
+        return value
+
+    @field_validator("investigator_id")
+    @classmethod
+    def investigator_id_must_be_non_blank(cls, value: str) -> str:
+        """modified_by must be attributable — never store an anonymous override."""
+        if not value or not value.strip():
+            raise ValueError("investigator_id must be a non-empty string.")
+        return value
+
+
+class ModifyInvestigationStepsResponse(BaseModel):
+    """Response for POST /plan/modify_investigation_steps."""
+    case_id: str
+    status: str
+    plan_source: str
+    modified_by: str
+    modified_on: datetime
+
+
+class RevertToAiPlanRequest(BaseModel):
+    """POST /plan/revert_to_ai — deletes case_id's saved override."""
+    case_id: str
+
+
+class RevertToAiPlanResponse(BaseModel):
+    """Response for POST /plan/revert_to_ai."""
+    case_id: str
+    status: str
+    plan_source: str
+
+
+class InvestigationStepsResponse(BaseModel):
+    """
+    Response for GET /plan/modify_investigation_steps/{case_id}.
+
+    investigation_steps is always the single, current list — never two
+    parallel fields with one left null depending on source. Which
+    table it came from is carried entirely by
+    is_modify_investigation_steps, so a caller checks one flag rather
+    than inspecting which of two fields is populated.
+    """
+    case_id: str
+    investigation_steps: List[InvestigationStep]
+    # True  -> investigation_steps came from investigation_plan_overrides
+    #          (the investigator's saved edit).
+    # False -> investigation_steps came from case_ai_summary_store
+    #          (the AI-generated / last-cached plan; no override exists).
+    is_modify_investigation_steps: bool
 
 
 class RiskAssessmentRequest(BaseModel):
