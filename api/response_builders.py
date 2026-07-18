@@ -230,6 +230,20 @@ def resolve_plan_agent_summary(
 
 
 
+def build_confidence_summary(rules_fired: Optional[List[dict]]) -> Dict[str, int]:
+    """Tally the rules_fired block (Functional Spec A.4 — rule_id, fired,
+    confidence, corroborated per entry) into a {high, medium, unresolved}
+    count of FIRED rules, for the /intake graph_findings response block."""
+    summary = {"high": 0, "medium": 0, "unresolved": 0}
+    for entry in (rules_fired or []):
+        if not isinstance(entry, dict) or not entry.get("fired"):
+            continue
+        confidence = str(entry.get("confidence") or "").strip().lower()
+        if confidence in summary:
+            summary[confidence] += 1
+    return summary
+
+
 def validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:
     """Validate required v6 ai_summary payload shape for ON-DEMAND requests."""
     if not isinstance(ai_summary, dict):
