@@ -447,6 +447,55 @@ class FinalReport(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+# ================================================================
+# AI-18 — /generate_report (Functional Spec Section 8.7, Developer
+# Spec Section 7.5). Deliberately NOT a reuse of FinalReport above:
+# that contract is the eliminated Phase 1 single-flow report agent
+# (Section 7 — "different contract"). This one adds related_network
+# and confidence_summary, sourced from reasoning_layer.report_generation,
+# never from the LLM (Section 8.7: graph data assembly is deterministic).
+# ================================================================
+
+class RejectionNotation(BaseModel):
+    investigator_id: Optional[str] = None
+    rejected_at:      Optional[str] = None
+    reason:           Optional[str] = None
+    rule_id:          Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
+class RelatedNetworkFact(BaseModel):
+    relationship_type: str
+    counterpart_id:    Optional[str] = None
+    counterpart_type:  Optional[str] = None
+    counterpart_label: Optional[str] = None
+    source_rule:       Optional[str] = None
+    confidence:        str
+    corroborated:      bool = False
+    status:             str   # "active" | "rejected" — never silently omitted
+    asserted_at:        Optional[str] = None
+    rejection:           Optional[RejectionNotation] = None
+    model_config = {"extra": "allow"}
+
+
+class ConfidenceSummary(BaseModel):
+    high:       int = 0
+    medium:     int = 0
+    unresolved: int = 0
+    model_config = {"extra": "allow"}
+
+
+class GeneratedReport(BaseModel):
+    report_id:         str
+    case_id:            str
+    generated_at:        str
+    status:              str          # "draft" | "saved_to_appworks"
+    standard_sections:   dict         # unchanged Phase 1 sections (narrative)
+    related_network:     list[RelatedNetworkFact]
+    confidence_summary:  ConfidenceSummary
+    model_config = {"extra": "forbid"}
+
+
 
 # ================================================================
 

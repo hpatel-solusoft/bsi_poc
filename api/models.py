@@ -135,6 +135,18 @@ class RiskAssessmentRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
+class ReportGenerationRequest(BaseModel):
+    case_id: str
+    # ai_summary is optional — see SimilarCasesRequest for the resolution order.
+    ai_summary: Optional[Dict[str, Any]] = None
+    # No reload_ai_summary field, deliberately: unlike similar_cases/plan/
+    # risk_assessment, a generated report is never cached-and-skipped —
+    # Data Persistence Spec D.5 exists specifically so a report "can be
+    # regenerated, compared across drafts". Every /generate_report call
+    # assembles a fresh Related Network read and writes a new draft row;
+    # there is no stale-result case to guard against.
+
+
 class CopilotRequest(BaseModel):
     case_id: str
     question: str

@@ -11,6 +11,7 @@ from config.prompts import (
     RISK_ASSESSMENT_PROMPT,
     SIMILAR_CASES_PROMPT,
     EXTRACTION_STAGE_PROMPT,
+    REPORT_GENERATION_PROMPT,
 )
 # -----------------------------------------------------------------------
 # PROMPT RENDERING
@@ -147,5 +148,26 @@ def build_copilot_prompt(case_id: str, case_data: dict) -> str:
         {
             "case_id":                           case_id,
             "case_context":   json.dumps(context, indent=2),
+        },
+    )
+
+
+def build_report_generation_prompt(case_data: dict) -> str:
+    """
+    ON-DEMAND /generate_report prompt (AI-18, Section 8.7).
+
+    Mirrors build_similar_cases_prompt's pattern exactly: the caller
+    (api/server.py) has already merged the deterministically-computed
+    related_network, confidence_summary, and rejected_count into
+    case_data before this is called -- reasoning_layer.report_generation
+    has already decided the Related Network section's contents. This
+    builder's only job is to serialise that finished context; the LLM
+    narrates it (Section 8.7: LLM used for narrative prose only, not
+    graph data assembly), it never re-derives it.
+    """
+    return _render_prompt(
+        REPORT_GENERATION_PROMPT,
+        {
+            "case_context": json.dumps(case_data, indent=2, default=str),
         },
     )
