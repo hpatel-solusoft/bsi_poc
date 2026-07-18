@@ -50,6 +50,13 @@ class InvestigationStep(BaseModel):
     action:        str
     owner:         Optional[str] = None
     deadline_days: Optional[int] = None
+    # AI-16 / Section 8.5: where this step came from — "catalog" (BSI
+    # allegation-type task catalogue), "rule_aware" (derived from a fired
+    # inference rule), or "llm_generated" (synthesised by the agent). Makes
+    # the basis for every step visible to the investigator.
+    source:        Optional[str] = None
+    source_rule:   Optional[str] = None
+    priority:      Optional[str] = None
     model_config = {"extra": "allow"}
 
 
@@ -383,6 +390,36 @@ class RiskAssessment(BaseModel):
 # ================================================================
 # TOOL 5 — get_investigation_plan
 # ================================================================
+
+class AllegationTypeTask(BaseModel):
+    """A single BSI configured investigative task (AI-16 / Section 8.5)."""
+    task_id:         Optional[str] = None
+    task_type:       str
+    is_default_task: bool = False
+    source:          str = "catalog"
+    model_config = {"extra": "allow"}
+
+
+class AllegationTypeTasksResult(BaseModel):
+    """Output contract for get_allegation_type_tasks."""
+    catalog_tasks:   list[AllegationTypeTask] = Field(default_factory=list)
+    default_tasks:   list[str] = Field(default_factory=list)
+    requested_types: list[str] = Field(default_factory=list)
+    total_tasks:     int = 0
+    model_config = {"extra": "allow"}
+
+
+class RuleAwareTask(BaseModel):
+    """A task recommended because a specific inference rule fired
+    (AI-16 / Section 8.5). Displayed separately from generic LLM steps."""
+    source_rule:  str
+    task_type:    str
+    priority:     str
+    detects:      Optional[str] = None
+    confidence:   Optional[str] = None
+    corroborated: bool = False
+    model_config = {"extra": "allow"}
+
 
 class InvestigationPlan(BaseModel):
     plan_id: str

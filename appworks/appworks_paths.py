@@ -105,6 +105,17 @@ class AppWorksPaths:
         def allegation_type_manage() -> str:
             return "/entities/AllegationType/lists/AllegationType_ManageAllegationType"
 
+    class AllegationTypeTask:
+        """BSI standard investigative task catalogue (AI-16 / Section 8.5)."""
+
+        @staticmethod
+        def manage_allegation_type_tasks() -> str:
+            # Flat catalogue of every configured BSI task type. Each row
+            # carries TaskName, AllegationTypeTask_IsDefaultTask and
+            # Show_IN_UI. The list is global — it does not associate tasks
+            # with allegation types.
+            return "/entities/AllegationTypeTask/lists/AllegationTypeTask_ManageAllegationTypeTasks"
+
     class Subjects:
         """
         List endpoint (plural 'Subjects', not the item-level 'Subject' class

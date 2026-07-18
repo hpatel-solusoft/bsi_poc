@@ -116,6 +116,17 @@ def format_plan_markdown_item(item, index: int = 1) -> str:
                 meta.append(f"Owner: {item['owner']}")
             if item.get("deadline_days") is not None:
                 meta.append(f"Deadline: {item['deadline_days']} day(s)")
+            # AI-16 / Section 8.5: surface where the step came from, and the
+            # rule that justifies it when it is rule-derived, so the basis for
+            # the recommendation is visible in the rendered plan.
+            source = item.get("source")
+            if source == "rule_aware":
+                source_rule = item.get("source_rule")
+                meta.append(f"Source: rule-aware{f' ({source_rule})' if source_rule else ''}")
+            elif source == "catalog":
+                meta.append("Source: BSI catalogue")
+            if item.get("priority"):
+                meta.append(f"Priority: {item['priority']}")
             if meta:
                 return f"- **Step {step_no}:** {label} ({', '.join(meta)})"
             return f"- **Step {step_no}:** {label}"
@@ -175,6 +186,29 @@ def build_plan_summary(
         )
     lines.append("")
 
+    # Section 8.5: rule-aware recommendations are displayed SEPARATELY from
+    # the generic investigation steps, each labelled with the rule that
+    # produced it, so an investigator can see the basis for the task rather
+    # than a flat undifferentiated list.
+    rule_aware_tasks = plan_list_field(plan, "rule_aware_tasks")
+    if rule_aware_tasks:
+        lines.extend(["#### Rule-Aware Task Recommendations", ""])
+        for task in rule_aware_tasks:
+            if not isinstance(task, dict):
+                continue
+            label = str(task.get("task_type") or "").strip()
+            if not label:
+                continue
+            meta = []
+            if task.get("priority"):
+                meta.append(f"Priority: {task['priority']}")
+            if task.get("source_rule"):
+                meta.append(f"Rule: {task['source_rule']}")
+            if task.get("detects"):
+                meta.append(f"Detects: {task['detects']}")
+            lines.append(f"- {label}" + (f" ({', '.join(meta)})" if meta else ""))
+        lines.append("")
+
     lines.extend(["#### Investigation Steps", ""])
     if steps:
         for idx, step in enumerate(steps, start=1):
@@ -228,6 +262,20 @@ def resolve_plan_agent_summary(
         return build_plan_summary(case_id, plan, case_data, provenance_trail)
     return assistant_text or build_plan_summary(case_id, plan, case_data, provenance_trail)
 
+
+
+def build_confidence_summary(rules_fired: Optional[List[dict]]) -> Dict[str, int]:
+    """Tally the rules_fired block (Functional Spec A.4 — rule_id, fired,
+    confidence, corroborated per entry) into a {high, medium, unresolved}
+    count of FIRED rules, for the /intake graph_findings response block."""
+    summary = {"high": 0, "medium": 0, "unresolved": 0}
+    for entry in (rules_fired or []):
+        if not isinstance(entry, dict) or not entry.get("fired"):
+            continue
+        confidence = str(entry.get("confidence") or "").strip().lower()
+        if confidence in summary:
+            summary[confidence] += 1
+    return summary
 
 
 def validate_ai_summary_contract(ai_summary: Optional[Dict[str, Any]]) -> None:

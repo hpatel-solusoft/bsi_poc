@@ -9,7 +9,6 @@ PostgreSQL fallback (that lives in core/case_store.py and its repositories).
 
 import logging
 import os
-import re
 import time
 import psycopg2
 from agent_service.agent_runner import BSIAgentRunner
@@ -40,16 +39,13 @@ from reasoning_layer.neo4j_client import (
     close_driver as close_neo4j_driver,
     GraphUnavailableError,
 )
-from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.context_enrichment import enrich_graph_context
-from reasoning_layer.similar_cases import find_structural_matches
 from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.rule_engine import verify_rule_files
 from etl.ingest_service import ingest as run_graph_ingest
 from core import graph_ingest_repository
 from dotenv import load_dotenv
-from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
 from api.models import (
     ConversationHistoryResponse, intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
     CopilotRequest, GraphIngestRequest,
@@ -67,17 +63,23 @@ from agent_service.prompt_builders import (
 from api.response_builders import (
     validate_ai_summary_contract,
     render_markdown_html_with_sources,
-    parse_bsi_section, render_markdown_html,
+    render_markdown_html,
     resolve_plan_agent_summary,
+    build_confidence_summary,
 )
 from api.message_utils import (
     build_ai_summary,
     extract_agent_summary,
     extract_tool_results,
     merge_provenance,
-    merge_direct_result, )        
-from reasoning_layer.similar_cases import find_structural_matches
-from reasoning_layer.risk_signals import apply_graph_risk_signals 
+)
+from api.pipeline_execution import (
+    run_intake_direct_pipeline,
+    run_similar_cases_pipeline,
+    run_risk_assessment_pipeline,
+    run_plan_pipeline,
+    prepare_plan_context,
+) 
 _runner: Optional[BSIAgentRunner] = None
 
 load_dotenv()
@@ -391,85 +393,13 @@ def intake(req: intakeRequest):
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
-        # Direct, non-LLM network-match check (Section 8.1). subject_primary_id
-        # was injected into complaint_intelligence by extract_tool_results.
-        subject_id = (sections.get("complaint_intelligence") or {}).get("subject_primary_id")
-        if subject_id:
-            # --- AI-12: proactive network match flag (Section 8.1) ---
-            # Preliminary "is this subject already in a known network" check.
-            # Section 9.1 keeps this as its own section (network_match_flag),
-            # distinct from the full graph_context that Context Enrichment
-            # assembles below.
-            try:
-                envelope = check_network_match(subject_id)
-                provenance_trail = merge_direct_result(
-                    sections, provenance_trail, "network_match_flag", envelope
-                )
-            except (ValueError, GraphUnavailableError, Neo4jError) as exc:
-                # Non-blocking by design: a graph outage or bad subject_id
-                # must not fail complaint intake. Degrade to an empty,
-                # clearly-unavailable flag instead.
-                logger.warning(
-                    "check_network_match unavailable for case_id=%s subject_id=%s — %s",
-                    req.case_id, subject_id, exc,
-                )
-                sections["network_match_flag"] = {
-                    "subject_id": subject_id, "in_network": None,
-                    "network_count": None, "networks": [],
-                    "rejected_membership_count": None,
-                    "unavailable_reason": str(exc),
-                }
-
-            # --- AI-13: Context Enrichment gateway (Section 9.1) ---
-            # Context Enrichment's own processing, once fetch_subject_history
-            # has returned: run the reasoning pipeline directly (never an LLM
-            # tool, not dispatcher-routed, not in manifest.yaml — the same
-            # direct-call pattern as the network match above), then assemble
-            # the full graph_context, graph_signals, and rules_fired.
-            # Non-blocking: a graph or pipeline failure degrades to an empty,
-            # clearly-unavailable graph_context rather than failing intake.
-            try:
-                # force=req.reload_ai_summary: when True this bypasses
-                # Principle 10 and makes the reasoning pipeline re-run for
-                # this (case, subject) even though it may already have
-                # completed, updating pipeline_execution_state (PostgreSQL)
-                # and the Neo4j graph rather than returning the cached
-                # rules_fired.
-                enrichment = enrich_graph_context(
-                    req.case_id, subject_id, force=req.reload_ai_summary,
-                )["result"]
-                provenance_trail = merge_direct_result(
-                    sections, provenance_trail, "graph_context",
-                    {
-                        "result": enrichment["graph_context"],
-                        "provenance": {
-                            "sources": ["reasoning pipeline", "Neo4j graph query"],
-                            "retrieved_at": "",
-                            "computed_by": "reasoning_layer.context_enrichment.enrich_graph_context",
-                        },
-                    },
-                )
-                sections["graph_signals"] = enrichment["graph_signals"]
-                sections["rules_fired"] = enrichment["rules_fired"]
-            except (ValueError, GraphUnavailableError, Neo4jError) as exc:
-                logger.warning(
-                    "context enrichment unavailable for case_id=%s subject_id=%s — %s",
-                    req.case_id, subject_id, exc,
-                )
-                sections["graph_context"] = {
-                    "subject_id": subject_id,
-                    "is_cross_case_hub": None, "hub_case_ids": [],
-                    "fraud_networks": [], "prior_guilty_cases": [],
-                    "shared_connections": [],
-                    "unavailable_reason": str(exc),
-                }
-                sections["graph_signals"] = {"unavailable_reason": str(exc)}
-                sections["rules_fired"] = []
-        else:
-            logger.warning(
-                "context enrichment + network match skipped for case_id=%s — "
-                "no subject_primary_id resolved", req.case_id,
-            )
+        # Direct, non-LLM network-match + context-enrichment pipeline work
+        # (Section 8.1 AI-12, Section 9.1 AI-13) — factored out to
+        # api/pipeline_execution.py. subject_primary_id was injected into
+        # complaint_intelligence by extract_tool_results above.
+        sections, provenance_trail = run_intake_direct_pipeline(
+            req.case_id, req.reload_ai_summary, sections, provenance_trail,
+        )
 
         # CS-4: populate warm in-memory store with all sections + provenance.
         CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
@@ -500,6 +430,20 @@ def intake(req: intakeRequest):
             "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), provenance_trail),
+                # Graph reasoning results (AI-12 network_match_flag, AI-13
+                # graph_context/graph_signals/rules_fired) previously only
+                # reached ai_summary.investigation — computed after the LLM's
+                # agent_summary text was already finalised, so it never
+                # surfaced in the response the UI actually renders. Surfaced
+                # explicitly here so the pipeline's output stops being
+                # silently dropped before it reaches the screen.
+                "graph_findings": {
+                    "network_match_flag": sections.get("network_match_flag"),
+                    "graph_context":      sections.get("graph_context"),
+                    "graph_signals":      sections.get("graph_signals"),
+                    "rules_fired":        sections.get("rules_fired"),
+                    "confidence_summary": build_confidence_summary(sections.get("rules_fired")),
+                },
                 "meta": {
                     "tool_calls_made":  len(provenance_trail),
                     "duration_seconds": duration_seconds,
@@ -546,66 +490,11 @@ def similar_cases(req: SimilarCasesRequest):
         )
         runner = _get_runner()
 
-        # --- AI-14: deterministic structural matching (Section 8.3, 9.2) ---
-        # Replaces the Phase 1 two-step LLM type-selection. The matches are
-        # computed by a single Cypher query (reasoning_layer.similar_cases),
-        # called DIRECTLY — not an LLM tool, not dispatcher-routed, not in
-        # manifest.yaml (governance: manifest holds a tool only if it is
-        # LLM-called AND makes an AppWorks call; this is a Neo4j read). The
-        # LLM's role is now to EXPLAIN what the graph found, never to select
-        # it (Section 8.3). Non-blocking: a graph outage degrades to an
-        # empty, clearly-unavailable section rather than failing the route.
-        try:
-            structural = find_structural_matches(req.case_id)["result"]
-        except (ValueError, GraphUnavailableError, Neo4jError) as exc:
-            logger.warning(
-                "structural similar-case matching unavailable for case_id=%s — %s",
-                req.case_id, exc,
-            )
-            structural = {
-                "matches": [], "source": "structural_graph",
-                "total_candidates_scored": 0,
-                "unavailable_reason": str(exc),
-            }
-
-        # Inject the computed matches into the case context the prompt
-        # serialises, so the LLM explains THESE matches (Turn 2 in Section
-        # 9.2) rather than being asked to find any. SIMILAR_CASES scope no
-        # longer carries a matching tool, so the LLM only explains.
-        case_data_for_prompt = {**case_data, "similar_cases": structural}
-
-        messages, new_provenance, _ = runner.run_scoped(
-            system_prompt=build_similar_cases_prompt(case_data_for_prompt),
-            user_message=(
-                f"Explain the structurally similar historical cases already "
-                f"identified for case {req.case_id}: why each one matched "
-                f"(see match_reasons) and how relevant its pattern is. Do not "
-                f"add or remove cases; the graph has already decided the matches."
-            ),
-            scope="SIMILAR_CASES",
-        )
-
-        # The authoritative similar_cases section is the DETERMINISTIC
-        # structural result, not anything the LLM produced — the LLM
-        # explains, it does not decide inclusion.
-        sections: dict = {}
-        new_provenance = merge_direct_result(
-            sections, new_provenance, "similar_cases",
-            {"result": structural,
-             "provenance": {"sources": ["Neo4j graph query"], "retrieved_at": "",
-                            "computed_by": "reasoning_layer.similar_cases"}},
-        )
-
-        agent_summary = extract_agent_summary(messages)
-
-        similar_cases_data = sections.get("similar_cases", {})
-        similar_section = {
-            "similar_cases": similar_cases_data
-        }
-
-        merged_provenance = merge_provenance(
-            case_data.get("provenance_trail", []),
-            new_provenance,
+        # Direct structural-matching + LLM-explain pipeline work
+        # (Section 8.3 AI-14, Section 9.2) — factored out to
+        # api/pipeline_execution.py.
+        agent_summary, similar_cases_data, similar_section, merged_provenance = run_similar_cases_pipeline(
+            req.case_id, case_data, runner, build_similar_cases_prompt,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -635,6 +524,16 @@ def similar_cases(req: SimilarCasesRequest):
             "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(agent_summary, merged_provenance),
+                # Raw Neo4j structural match result (AI-14 —
+                # reasoning_layer.similar_cases.find_structural_matches):
+                # matches, match_reasons, score, source, total_candidates_scored.
+                # Previously computed into `sections`/ai_summary but never
+                # returned to the caller — only the LLM's narrative explanation
+                # of it was. Surfaced here the same way graph_findings is on
+                # /intake, so the graph JSON itself reaches the UI.
+                "graph_findings": {
+                    "similar_cases": similar_cases_data,
+                },
                 "meta": {
                     "data_source": data_source,
                 },
@@ -693,90 +592,12 @@ def risk_assessment(req: RiskAssessmentRequest):
         )
 
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
-        
-        risk_assessment = sections.get("risk_assessment", {})
-        if not isinstance(risk_assessment, dict) or "risk_score" not in risk_assessment:
-            called_tools = [
-                entry.get("tool")
-                for entry in tool_call_log
-                if isinstance(entry, dict) and entry.get("status") == "ok"
-            ]
-            raise RuntimeError(
-                "Risk assessment did not complete because calculate_risk_metrics "
-                f"did not return a score. Successful tools: {called_tools}"
-            )
 
-        # --- AI-15: Neo4j graph risk signals (Section 8.4) ---
-        # The AppWorks base score above is UNCHANGED. Four graph-sourced
-        # signals are layered on top by a DIRECT call (Neo4j read, not an
-        # AppWorks call, so not a manifest tool — same pattern as the other
-        # reasoning-layer direct calls). The subject and rules_fired come
-        # from CS-4 (populated at intake / Context Enrichment). Non-blocking:
-        # a graph outage leaves the base result untouched rather than
-        # failing the route.
-        subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
-        if subject_id:
-            try:
-                graph_env = apply_graph_risk_signals(
-                    req.case_id,
-                    subject_id,
-                    risk_assessment,
-                    case_data.get("rules_fired", []),
-                )
-                risk_assessment = graph_env["result"]
-                # Section 8.4 provenance requirement: keep the AppWorks base
-                # scorer's computed_by AND add the Neo4j graph-signal
-                # computed_by as a distinct, independently-attributable entry.
-                new_provenance = merge_provenance(new_provenance, [graph_env["provenance"]])
-            except (ValueError, GraphUnavailableError, Neo4jError) as exc:
-                logger.warning(
-                    "graph risk signals unavailable for case_id=%s subject_id=%s — %s; "
-                    "returning AppWorks base score only",
-                    req.case_id, subject_id, exc,
-                )
-                risk_assessment["neo4j_signals"] = {"unavailable_reason": str(exc)}
-        else:
-            logger.warning(
-                "graph risk signals skipped for case_id=%s — no subject_primary_id resolved",
-                req.case_id,
-            )
-        # Normalize recommendation text: rename singular "recommendation" to plural "recommendations"
-        assistant_text = extract_agent_summary(messages)
-        rec_text = None
-        try:
-            if isinstance(risk_assessment, dict):
-                # Extract from either singular or plural field
-                rec_text = risk_assessment.get("recommendation") or risk_assessment.get("recommendations")
-                # Remove the singular field to avoid duplication
-                risk_assessment.pop("recommendation", None)
-        except Exception:
-            rec_text = None
-
-        if not rec_text and isinstance(assistant_text, str):
-            # attempt to parse a recommendation section from assistant markdown
-            m = re.search(
-                r"(?:^|\n)#{1,6}\s*(?:Recommended Action|Recommendation|Recommendations)\s*\n(.*?)(?=\n#{1,6}\s|\Z)",
-                assistant_text,
-                re.DOTALL | re.IGNORECASE,
-            )
-            if m:
-                rec_text = m.group(1).strip()
-
-        if rec_text and isinstance(risk_assessment, dict):
-            risk_assessment["recommendations"] = rec_text
-
-        if isinstance(risk_assessment, dict):
-            if "recommendations" not in risk_assessment:
-                risk_assessment["recommendations"] = ""
-        else:
-            risk_assessment = {"recommendations": ""}
-        risk_section = {
-            "risk_assessment": risk_assessment
-        }
-
-        merged_provenance = merge_provenance(
-            case_data.get("provenance_trail", []),
-            new_provenance,
+        # Direct graph risk-signal pipeline work (Section 8.4 AI-15) plus
+        # recommendation-text normalization — factored out to
+        # api/pipeline_execution.py.
+        risk_assessment, risk_section, merged_provenance = run_risk_assessment_pipeline(
+            req.case_id, case_data, sections, tool_call_log, new_provenance, messages,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -802,6 +623,21 @@ def risk_assessment(req: RiskAssessmentRequest):
             "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), merged_provenance),
+                # Neo4j graph risk signals (AI-15 —
+                # reasoning_layer.risk_signals.apply_graph_risk_signals):
+                # the four Section 8.4 signals plus the AppWorks base score
+                # they were layered on. Returned the same way graph_findings
+                # is on /intake and /similar_cases, so the investigator can
+                # see WHICH graph signal moved the score rather than only the
+                # LLM's prose about the final number. base_* are carried
+                # alongside so the graph contribution stays auditable.
+                "graph_findings": {
+                    "neo4j_signals":   risk_assessment.get("neo4j_signals"),
+                    "base_risk_score": risk_assessment.get("base_risk_score"),
+                    "base_risk_tier":  risk_assessment.get("base_risk_tier"),
+                    "risk_score":      risk_assessment.get("risk_score"),
+                    "risk_tier":       risk_assessment.get("risk_tier"),
+                },
                 "meta": {
                     "data_source": data_source,
                 },
@@ -848,88 +684,32 @@ def plan(req: PlanRequest):
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
         
+        # AI-16 (Section 8.5): build the rule-aware task recommendations from
+        # the rules_fired already in context and hand them to the prompt, so
+        # the agent selects investigation steps from both the rule-derived
+        # tasks and the BSI catalogue tasks its scoped tool returns.
+        case_data_for_prompt, rule_aware_tasks = prepare_plan_context(case_data)
+
         messages, new_provenance, _ = runner.run_scoped(
-            system_prompt=build_plan_prompt(case_data),
+            system_prompt=build_plan_prompt(case_data_for_prompt),
             user_message=(
                 f"Review the investigation context for case {req.case_id} and execute the "
-                "appropriate on-demand tool to retrieve the investigation plan."
+                "appropriate on-demand tools to assemble the investigation plan."
             ),
             scope="INVESTIGATION_PLAN",  # ← this scope includes intake + enrichment tools only
             execution_context=execution_context
         )
 
         sections = extract_tool_results(messages,runner.dispatcher.tool_to_section)
-        investigation_plan = sections.get("investigation_plan", {})
 
-        assistant_text = extract_agent_summary(messages)
-
-        # Parse markdown prose into structured fields (same source used for agent_summary)
-        steps = parse_bsi_section(assistant_text, "Investigation Steps")
-        checklist = parse_bsi_section(assistant_text, "Evidence Checklist")
-        criteria = parse_bsi_section(assistant_text, "Escalation Criteria")
-
-        # Convert parsed strings to typed dicts.
-        # 'owner' and 'deadline_days' are intentionally absent —
-        # they are populated during the human analyst review step.
-        steps_dicts     = [{"step": i + 1, "action": s} for i, s in enumerate(steps)]     if steps     else None
-        checklist_dicts = [{"item": s}                  for s in checklist]                 if checklist else None
-        # Build structured plan from parsed prose
-        # Start with metadata from tool result if available
-        plan_result = sections.get("investigation_plan", {})
-        
-        
-        id_match = re.search(r"Case\s*(?:ID|#)?\s*[:\s]*(\d+)", assistant_text, re.I)
-        cid = id_match.group(1) if id_match else req.case_id
-        plan_id = plan_result.get("plan_id") or f"PLAN-{cid}-{datetime.now().strftime('%Y%m%d')}"
-
-        investigation_plan = {
-            "plan_id":             plan_id,
-            "fraud_types":         plan_result.get("fraud_types", []),
-            "risk_tier":           plan_result.get("risk_tier", "UNSPECIFIED"),
-            "investigation_steps": steps_dicts,
-            "evidence_checklist":  checklist_dicts,
-            "escalation_criteria": criteria or None,
-            "escalation_required": plan_result.get("escalation_required", False)
-        }
-
-        try:
-           
-            validated_plan = InvestigationPlanContract(**investigation_plan)
-            investigation_plan = validated_plan.model_dump(exclude_none=True)
-        except Exception as e:
-            logger.warning(
-                f"Investigation plan schema validation failed — storing unvalidated: {e}"
-            )
-
-        # Modify Investigation Steps flow (Section D.6): a saved override
-        # replaces investigation_steps only — evidence_checklist,
-        # escalation_criteria, fraud_types, and risk_tier stay AI-generated.
-        # Read server-side on every /plan call so the override is always
-        # reflected regardless of which client called this endpoint.
-        override = get_override(req.case_id)
-        if override is not None:
-            investigation_plan["investigation_steps"] = override["modified_steps"]
-            plan_source = "human_modified"
-            modified_by = override["modified_by"]
-            modified_on = override["modified_on"]
-        else:
-            plan_source = "ai_generated"
-            modified_by = None
-            modified_on = None
-
-        plan_stale = (
-            compute_plan_staleness(cache_updated_at_before_call, modified_on)
-            if override is not None
-            else False
-        )
-
-        plan_section = {
-            "investigation_plan": investigation_plan
-        }
-
-        merged_provenance = merge_provenance(
-            case_data.get("provenance_trail", []),
-            new_provenance,
+        # Parse/validate the LLM's plan output and apply any human override
+        # (Section D.6) — factored out to api/pipeline_execution.py.
+        (
+            assistant_text, investigation_plan, plan_section, merged_provenance,
+            plan_source, modified_by, modified_on, plan_stale,
+        ) = run_plan_pipeline(
+            req.case_id, case_data, sections, messages, new_provenance,
+            cache_updated_at_before_call, rule_aware_tasks,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -964,6 +744,19 @@ def plan(req: PlanRequest):
                     ),
                     merged_provenance,
                 ),
+                # Graph-derived plan output (AI-16 —
+                # reasoning_layer.investigation_tasks.build_rule_aware_tasks):
+                # the rule-aware task recommendations and the rules_fired
+                # block they were derived from. Section 8.5 requires these to
+                # be displayed SEPARATELY from the generic steps, which the UI
+                # can only do if it receives them as data — the rendered
+                # agent_summary alone cannot be split reliably. catalog_tasks
+                # is deliberately not here: it is the AppWorks task catalogue,
+                # not a graph finding, and it already travels on the plan.
+                "graph_findings": {
+                    "rule_aware_tasks": investigation_plan.get("rule_aware_tasks"),
+                    "rules_fired":      case_data.get("rules_fired"),
+                },
                 "meta": {
                     "data_source": data_source,
                     "plan_source": plan_source,

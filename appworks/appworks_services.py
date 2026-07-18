@@ -8,6 +8,7 @@ import appworks.subject_enrichment as subject_enrichment
 import appworks.similar_cases as similar_cases
 import appworks.risk_scoring as risk_scoring
 import appworks.investigation_strategy as investigation_strategy
+import appworks.allegation_tasks as allegation_tasks
 import semantic_layer.entity_contracts as contracts
 from appworks.appworks_auth import fetch,fetch_list
 from datetime import datetime, timezone
@@ -180,3 +181,12 @@ def get_allegation_types(**kwargs) -> dict:
     """Dispatched from 'get_allegation_types' — feeds search_similar_cases"""
     res = similar_cases.get_allegation_types(**kwargs)
     return _validate(contracts.AllegationTypesResult, res, "get_allegation_types")
+
+
+def get_allegation_type_tasks(allegation_types=None, **kwargs) -> dict:
+    """Dispatched from 'get_allegation_type_tasks' (AI-16 / Section 8.5) —
+    BSI standard catalogue tasks for the case's allegation types."""
+    res = allegation_tasks.get_allegation_type_tasks(
+        allegation_types=allegation_types, **kwargs
+    )
+    return _validate(contracts.AllegationTypeTasksResult, res, "get_allegation_type_tasks")
