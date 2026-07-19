@@ -27,6 +27,7 @@ from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.similar_cases import find_structural_matches
 from reasoning_layer.risk_signals import apply_graph_risk_signals
+from reasoning_layer.investigation_tasks import build_rule_aware_tasks, tag_step_sources
 
 from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
 
@@ -309,6 +310,33 @@ def run_risk_assessment_pipeline(
     return risk_assessment, risk_section, merged_provenance
 
 
+def prepare_plan_context(
+    case_data: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    /plan pre-LLM work (Section 8.5 AI-16). Builds the rule-aware task
+    recommendations from the rules_fired block Context Enrichment (AI-13)
+    already placed in context, and returns the case context to serialise
+    into the plan prompt alongside them.
+
+    No new database connection and no AppWorks call: Section 8.5 requires
+    this to work entirely from context. A case with no rules_fired yields
+    an empty list, and the plan degrades to generic LLM synthesis exactly
+    as it did before.
+
+    Returns (case_data_for_prompt, rule_aware_tasks).
+    """
+    rule_aware_tasks = build_rule_aware_tasks(
+        case_data.get("rules_fired", []),
+        case_data.get("graph_context", {}),
+    )
+    # The LLM selects investigation_steps from BOTH candidate pools: these
+    # rule-derived tasks (injected here) and the catalogue tasks it fetches
+    # through its own scoped tool.
+    case_data_for_prompt = {**case_data, "rule_aware_tasks": rule_aware_tasks}
+    return case_data_for_prompt, rule_aware_tasks
+
+
 def run_plan_pipeline(
     case_id: str,
     case_data: Dict[str, Any],
@@ -316,6 +344,7 @@ def run_plan_pipeline(
     messages,
     new_provenance: List[dict],
     cache_updated_at_before_call,
+    rule_aware_tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any], List[dict], str, Optional[str], Optional[Any], bool]:
     """
     /plan pipeline work: parse the LLM's markdown into a structured plan,
@@ -335,6 +364,14 @@ def run_plan_pipeline(
     # they are populated during the human analyst review step.
     steps_dicts     = [{"step": i + 1, "action": s} for i, s in enumerate(steps)]     if steps     else None
     checklist_dicts = [{"item": s}                  for s in checklist]                 if checklist else None
+
+    # AI-16 / Section 8.5: annotate every step with where it came from — a
+    # rule-aware task, a BSI catalogue task, or the agent's own synthesis —
+    # so the basis for each recommendation is visible.
+    rule_aware_tasks = rule_aware_tasks or []
+    catalog_tasks = (sections.get("catalog_tasks") or {}).get("catalog_tasks", [])
+    if steps_dicts:
+        steps_dicts = tag_step_sources(steps_dicts, rule_aware_tasks, catalog_tasks)
     # Build structured plan from parsed prose
     # Start with metadata from tool result if available
     plan_result = sections.get("investigation_plan", {})
@@ -350,7 +387,12 @@ def run_plan_pipeline(
         "investigation_steps": steps_dicts,
         "evidence_checklist":  checklist_dicts,
         "escalation_criteria": criteria or None,
-        "escalation_required": plan_result.get("escalation_required", False)
+        "escalation_required": plan_result.get("escalation_required", False),
+        # Section 8.5: carried on the plan and displayed SEPARATELY from the
+        # generic investigation steps, so the rule that justifies each
+        # recommendation stays visible to the investigator.
+        "rule_aware_tasks":    rule_aware_tasks,
+        "catalog_tasks":       catalog_tasks,
     }
 
     try:

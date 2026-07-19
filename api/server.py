@@ -9,7 +9,6 @@ PostgreSQL fallback (that lives in core/case_store.py and its repositories).
 
 import logging
 import os
-import re
 import time
 import psycopg2
 from agent_service.agent_runner import BSIAgentRunner
@@ -40,7 +39,6 @@ from reasoning_layer.neo4j_client import (
     close_driver as close_neo4j_driver,
     GraphUnavailableError,
 )
-from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.similar_cases import find_structural_matches
 from reasoning_layer.report_generation import assemble_related_network
@@ -91,15 +89,13 @@ from api.message_utils import (
     extract_agent_summary,
     extract_tool_results,
     merge_provenance,
-    merge_direct_result, )        
-from reasoning_layer.similar_cases import find_structural_matches
-from reasoning_layer.risk_signals import apply_graph_risk_signals 
-
+)
 from api.pipeline_execution import (
     run_intake_direct_pipeline,
     run_similar_cases_pipeline,
     run_risk_assessment_pipeline,
     run_plan_pipeline,
+    prepare_plan_context,
 ) 
 _runner: Optional[BSIAgentRunner] = None
 
@@ -644,6 +640,21 @@ def risk_assessment(req: RiskAssessmentRequest):
             "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), merged_provenance),
+                # Neo4j graph risk signals (AI-15 —
+                # reasoning_layer.risk_signals.apply_graph_risk_signals):
+                # the four Section 8.4 signals plus the AppWorks base score
+                # they were layered on. Returned the same way graph_findings
+                # is on /intake and /similar_cases, so the investigator can
+                # see WHICH graph signal moved the score rather than only the
+                # LLM's prose about the final number. base_* are carried
+                # alongside so the graph contribution stays auditable.
+                "graph_findings": {
+                    "neo4j_signals":   risk_assessment.get("neo4j_signals"),
+                    "base_risk_score": risk_assessment.get("base_risk_score"),
+                    "base_risk_tier":  risk_assessment.get("base_risk_tier"),
+                    "risk_score":      risk_assessment.get("risk_score"),
+                    "risk_tier":       risk_assessment.get("risk_tier"),
+                },
                 "meta": {
                     "data_source": data_source,
                 },
@@ -690,11 +701,17 @@ def plan(req: PlanRequest):
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
         
+        # AI-16 (Section 8.5): build the rule-aware task recommendations from
+        # the rules_fired already in context and hand them to the prompt, so
+        # the agent selects investigation steps from both the rule-derived
+        # tasks and the BSI catalogue tasks its scoped tool returns.
+        case_data_for_prompt, rule_aware_tasks = prepare_plan_context(case_data)
+
         messages, new_provenance, _ = runner.run_scoped(
-            system_prompt=build_plan_prompt(case_data),
+            system_prompt=build_plan_prompt(case_data_for_prompt),
             user_message=(
                 f"Review the investigation context for case {req.case_id} and execute the "
-                "appropriate on-demand tool to retrieve the investigation plan."
+                "appropriate on-demand tools to assemble the investigation plan."
             ),
             scope="INVESTIGATION_PLAN",  # ← this scope includes intake + enrichment tools only
             execution_context=execution_context
@@ -709,7 +726,7 @@ def plan(req: PlanRequest):
             plan_source, modified_by, modified_on, plan_stale,
         ) = run_plan_pipeline(
             req.case_id, case_data, sections, messages, new_provenance,
-            cache_updated_at_before_call,
+            cache_updated_at_before_call, rule_aware_tasks,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -744,6 +761,19 @@ def plan(req: PlanRequest):
                     ),
                     merged_provenance,
                 ),
+                # Graph-derived plan output (AI-16 —
+                # reasoning_layer.investigation_tasks.build_rule_aware_tasks):
+                # the rule-aware task recommendations and the rules_fired
+                # block they were derived from. Section 8.5 requires these to
+                # be displayed SEPARATELY from the generic steps, which the UI
+                # can only do if it receives them as data — the rendered
+                # agent_summary alone cannot be split reliably. catalog_tasks
+                # is deliberately not here: it is the AppWorks task catalogue,
+                # not a graph finding, and it already travels on the plan.
+                "graph_findings": {
+                    "rule_aware_tasks": investigation_plan.get("rule_aware_tasks"),
+                    "rules_fired":      case_data.get("rules_fired"),
+                },
                 "meta": {
                     "data_source": data_source,
                     "plan_source": plan_source,

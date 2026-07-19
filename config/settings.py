@@ -23,6 +23,7 @@ ALLOWED_ENTITIES = frozenset([
     "FraudRiskRule",
     "Subject_SubjectWorkfolderMapping",
     "AllegationType_ManageAllegationType",
+    "AllegationTypeTask",
     "SystemMemory"
 ])
 

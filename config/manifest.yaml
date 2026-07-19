@@ -136,5 +136,19 @@ tools:
         type: "string"
         description: "Risk tier from calculate_risk_metrics output: LOW/MEDIUM/HIGH/CRITICAL"
 
+  - name: "get_allegation_type_tasks"
+    section: "catalog_tasks"
+    description: >
+      Retrieves the BSI configured investigative task catalogue. Returns
+      catalog_tasks, each carrying task_id, task_type (the task name),
+      is_default_task and source set to "catalog"; plus default_tasks (the
+      standard opening set), requested_types and total_tasks. These are the
+      catalogue-sourced candidate tasks; rule-derived candidate tasks are
+      supplied separately in the case context.
+    scope: [INVESTIGATION_PLAN]
+    python_function: "appworks.appworks_services.get_allegation_type_tasks"
 
-  
+    required_params:
+      - name: "allegation_types"
+        type: "list[string]"
+        description: "Allegation type labels on the current case, echoed back as requested_types"

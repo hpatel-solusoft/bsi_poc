@@ -71,6 +71,7 @@ PLAN_PROMPT = """You are the BSI Investigation Strategy Agent for the Bureau of 
                   ## Investigation Steps
                   [Provide a numbered list of the actionable steps to resolve the case. 
                   BUSINESS RULE: You must generate a minimum of 3 or more distinct investigation steps. 
+                  SOURCE PREFERENCE: Two kinds of ready-made tasks may be available to you — recommended tasks that follow from findings already confirmed on this case, and the organisation's standard catalogue of investigative task names. Build each step from one of those ready-made tasks whenever one covers the action you intend, and reuse its wording so the investigator recognises the task. Write an original step only where no ready-made task fits, and never restate an action a ready-made task already covers. Where a recommended task and a standard task cover the same action, prefer the recommended one, because it is justified by a confirmed finding on this case. 
                   Do not split one step across multiple array entries. All context, sub-points, and reasoning for a step belong inside that step's entry — never as a separate item. 
                   Each step must be a complete, self-contained sentence that names specific subjects, systems, or records involved.]
 
