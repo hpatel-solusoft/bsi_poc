@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from appworks.appworks_paths import AppWorksPaths
 from appworks.appworks_utils import extract_id_from_href
-from appworks.provenance import ProvenanceTracker
+from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
 

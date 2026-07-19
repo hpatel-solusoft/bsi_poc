@@ -68,6 +68,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -332,11 +333,9 @@ def _envelope(result: Dict[str, Any]) -> dict:
     shape to every other direct-call reasoning_layer module."""
     return {
         "result": result,
-        "provenance": {
-            "sources": ["Neo4j write — :Rejection"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.rejection.reject_inference",
-        },
+        "provenance": graph_provenance(
+            "reasoning_layer.rejection.reject_inference", ["Neo4j write — :Rejection"],
+        ),
     }
 
 

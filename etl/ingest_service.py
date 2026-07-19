@@ -65,26 +65,21 @@ ORDER BY is_primary DESC, subject_id
 
 def _subjects_for_case(case_id: str) -> List[str]:
     """
-    Every subject on the case. The pipeline is scoped per (case, subject)
-    (Principle 10), so each subject gets its own run and its own completed
-    pipeline_execution_state row — which is what gives every subject the
+    Every subject on the case, primary first.
+
+    Delegates to reasoning_layer.pipeline.subjects_for_case so the
+    definition of "the subjects on a case" lives in exactly one place.
+    It previously existed here as a second copy of the same query, which
+    is how the ETL path and the /intake path could drift apart on which
+    subjects get reasoned.
+
+    The pipeline is scoped per (case, subject) (Principle 10), so each
+    subject gets its own run and its own completed pipeline_execution_state
+    row — which is what gives every subject the
     ALLEGATION_LIKELY_AGAINST_SUBJECT attribution edges the Wave 2 network
-    rules depend on. Reasoning only the primary subject would leave
-    co-subjects unattributed and silently starve rules like the address
-    fraud-network rule of their second endpoint, so there is no "primary
-    only" mode.
-
-    The underlying query still orders is_primary first, so the primary
-    subject is reasoned before the co-subjects — but all of them are run.
+    rules depend on. There is no "primary only" mode.
     """
-    with get_session() as session:
-        rows = session.run(_CASE_SUBJECTS_QUERY, case_id=case_id).data()
-
-    if not rows:
-        logger.warning("ingest_service: case_id=%s has no subjects in the graph", case_id)
-        return []
-
-    return [row["subject_id"] for row in rows]
+    return pipeline.subjects_for_case(case_id)
 
 
 def load_case(case_id: str) -> Dict[str, Any]:

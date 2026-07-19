@@ -88,6 +88,7 @@ from api.message_utils import (
     build_ai_summary,
     extract_agent_summary,
     extract_tool_results,
+    merge_direct_result,
     merge_provenance,
 )
 from api.pipeline_execution import (

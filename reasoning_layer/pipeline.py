@@ -33,7 +33,6 @@ zero AppWorks REST calls. Structured data arrives pre-loaded via ETL
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from neo4j.exceptions import Neo4jError
@@ -48,7 +47,10 @@ from reasoning_layer import (
     rules_fired,
     scope as scope_resolver,
 )
-from reasoning_layer.neo4j_client import GraphUnavailableError
+from reasoning_layer.neo4j_client import GraphUnavailableError, get_session
+from utils.provenance import graph_provenance
+
+_CONFIDENCE_ORDER = {"Unresolved": 0, "Medium": 1, "High": 2}
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +69,7 @@ def _envelope(result: Dict[str, Any], sources: List[str], computed_by: str) -> d
     indistinguishable to the agent layer (CS-2/CS-7)."""
     return {
         "result": result,
-        "provenance": {
-            "sources": sources,
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": computed_by,
-        },
+        "provenance": graph_provenance(computed_by, sources),
     }
 
 
@@ -234,4 +232,154 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str
         },
         sources=["Neo4j graph query"],
         computed_by="reasoning_layer.pipeline.run_pipeline",
+    )
+
+# ---------------------------------------------------------------------------
+# Case-level orchestration: every subject, not just the primary
+# ---------------------------------------------------------------------------
+_CASE_SUBJECTS_QUERY = """
+MATCH (s:Subject)-[r:APPEARS_IN_CASE]->(c:Case {case_id: $case_id})
+RETURN s.subject_id AS subject_id, coalesce(r.is_primary, false) AS is_primary
+ORDER BY is_primary DESC, subject_id
+"""
+
+
+def subjects_for_case(case_id: str) -> List[str]:
+    """
+    Every subject on the case, primary first.
+
+    The pipeline is scoped per (case, subject) — Principle 10 keys its
+    completion state that way — so each subject needs its own run. Reasoning
+    only the primary subject leaves co-subjects without their
+    ALLEGATION_LIKELY_AGAINST_SUBJECT attribution edges, which silently
+    starves the Wave 2 network rules of their second endpoint: an address
+    fraud network needs BOTH subjects reasoned before it can form. That is
+    why there is no "primary only" mode.
+
+    Primary-first ordering is deliberate rather than cosmetic: the primary
+    subject's Wave 1 edges are in place before a co-subject's Wave 2 run
+    looks for them.
+    """
+    with get_session() as session:
+        rows = session.run(_CASE_SUBJECTS_QUERY, case_id=case_id).data()
+    if not rows:
+        logger.warning("run_pipeline_for_case: case_id=%s has no subjects in the graph", case_id)
+        return []
+    return [r["subject_id"] for r in rows if r.get("subject_id")]
+
+
+def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """
+    Fold per-subject rules_fired blocks into ONE case-level block.
+
+    Each block is the same fixed 14 entries, so they are merged rule by
+    rule. Instances are concatenated and de-duplicated: overlapping scopes
+    mean the same edge is legitimately seen from both endpoints, and
+    counting it twice would inflate evidence_count.
+
+    Rule-level confidence is the highest across all subjects and
+    corroborated is true if any instance was corroborated — the same
+    optimistic roll-up _summarise applies within a subject, for the same
+    reason: the detail survives in `instances`.
+    """
+    if not blocks:
+        return []
+
+    merged: List[Dict[str, Any]] = []
+    for index, template in enumerate(blocks[0]):
+        entry = dict(template)
+        instances: List[Dict[str, Any]] = []
+        seen = set()
+        for block in blocks:
+            for instance in block[index].get("instances", []):
+                key = tuple(sorted(
+                    (k, str(v)) for k, v in instance.items()
+                    if k not in ("confidence", "corroborated")
+                ))
+                if key in seen:
+                    continue
+                seen.add(key)
+                instances.append(instance)
+
+        confidences = [i.get("confidence") for i in instances if i.get("confidence")]
+        entry["instances"] = instances
+        entry["evidence_count"] = len(instances)
+        entry["fired"] = len(instances) > 0
+        entry["confidence"] = (
+            max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
+            if confidences else "Unresolved"
+        )
+        entry["corroborated"] = any(i.get("corroborated") for i in instances)
+        entry["writes_this_run"] = sum(
+            block[index].get("writes_this_run", 0) or 0 for block in blocks
+        )
+        # A rule is only genuinely "skipped" if it was skipped for every
+        # subject; skipped for one and run for another is not a skip.
+        reasons = {block[index].get("skipped_reason") for block in blocks}
+        entry["skipped_reason"] = reasons.pop() if len(reasons) == 1 else None
+        merged.append(entry)
+    return merged
+
+
+def run_pipeline_for_case(case_id: str, force: bool = False,
+                          reason: str = "etl_resync") -> dict:
+    """
+    Run the pipeline for EVERY subject on the case and return one merged
+    rules_fired block.
+
+    This is the entry point Context Enrichment and the ETL should use.
+    run_pipeline stays per-subject because that is the unit Principle 10
+    tracks in pipeline_execution_state — this function orchestrates it, it
+    does not replace it. A subject whose run fails does not abort the
+    others: a co-subject with bad data must not cost the investigator the
+    reasoning on everyone else.
+    """
+    if not case_id or not str(case_id).strip():
+        raise ValueError("run_pipeline_for_case requires a non-empty case_id")
+    case_id = str(case_id).strip()
+
+    subject_ids = subjects_for_case(case_id)
+    if not subject_ids:
+        return _envelope(
+            result={"pipeline_status": "no_subjects", "case_id": case_id,
+                    "subjects_run": [], "subject_count": 0, "rules_fired": []},
+            sources=["Neo4j graph query"],
+            computed_by="reasoning_layer.pipeline.run_pipeline_for_case",
+        )
+
+    blocks: List[List[Dict[str, Any]]] = []
+    ran: List[Dict[str, Any]] = []
+    for subject_id in subject_ids:
+        try:
+            envelope = run_pipeline(case_id, subject_id, force=force, reason=reason)
+            result = envelope["result"]
+            block = result.get("rules_fired") or []
+            if block:
+                blocks.append(block)
+            ran.append({"subject_id": subject_id,
+                        "pipeline_status": result.get("pipeline_status")})
+        except Exception as exc:  # noqa: BLE001 — one subject must not sink the case
+            logger.error(
+                "run_pipeline_for_case: case_id=%s subject_id=%s FAILED — %s",
+                case_id, subject_id, exc,
+            )
+            ran.append({"subject_id": subject_id, "pipeline_status": "failed",
+                        "error": str(exc)})
+
+    merged = _merge_rules_fired(blocks)
+    fired = sum(1 for e in merged if e.get("fired"))
+    logger.info(
+        "run_pipeline_for_case: case_id=%s subjects=%d rules_fired=%d/%d",
+        case_id, len(subject_ids), fired, len(merged),
+    )
+    return _envelope(
+        result={
+            "pipeline_status": "completed",
+            "case_id": case_id,
+            "subjects_run": ran,
+            "subject_count": len(subject_ids),
+            "rules_fired": merged,
+        },
+        sources=["Neo4j graph query"],
+        computed_by="reasoning_layer.pipeline.run_pipeline_for_case",
     )

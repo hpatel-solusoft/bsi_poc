@@ -38,10 +38,10 @@ generation (agent_service/prompt_builders.py).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -158,11 +158,7 @@ def _envelope(result: Dict[str, Any]) -> dict:
     other direct-call graph read is merged."""
     return {
         "result": result,
-        "provenance": {
-            "sources": ["Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.report_generation.assemble_related_network",
-        },
+        "provenance": graph_provenance("reasoning_layer.report_generation.assemble_related_network"),
     }
 
 

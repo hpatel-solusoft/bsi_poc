@@ -1,16 +1,99 @@
 """
-Provenance Tracker
-------------------
-Standardizes data citations for the LLM UI. 
-Acts as a strict gatekeeper to filter out noisy backend AppWorks endpoints
-using the centralized configuration.
+Provenance
+----------
+Single source of truth for the {sources, retrieved_at, computed_by}
+provenance envelope, for BOTH data paths:
+
+  * ProvenanceTracker  — AppWorks REST retrievals. Accumulates individual
+    record citations through a gatekeeper allowlist, because an AppWorks
+    answer is assembled from many records and each one must be nameable.
+
+  * graph_provenance / graph_envelope — Neo4j reasoning-layer results.
+    A graph answer comes from ONE query against an already-reasoned graph,
+    so there are no per-record IDs to gate; the citation is the query
+    itself plus which function ran it.
+
+Both produce the identical envelope shape, so nothing downstream —
+merge_provenance, CASE_STORE, the Data Sources renderer — can tell them
+apart or needs to care.
+
+The timestamp is generated in exactly one place (_now_iso). It was
+previously re-derived in a dozen modules, which is how blank and
+inconsistent retrieved_at values got into the trail.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, Any, Set, Optional
+from typing import Any, Dict, Optional, Sequence, Set
 
 # ── Import the Gatekeeper Allowlist from Central Config ──
 from config.settings import ALLOWED_ENTITIES 
+
+# ── Canonical source labels ──
+# Named so a typo cannot silently create a second spelling of the same
+# source, which would defeat de-duplication in merge_provenance.
+GRAPH_QUERY = "Neo4j graph query"
+REASONING_PIPELINE = "reasoning pipeline"
+
+
+def _now_iso() -> str:
+    """UTC, ISO-8601. The one place a provenance timestamp is created."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def graph_provenance(
+    computed_by: str,
+    sources: Optional[Sequence[str]] = None,
+    retrieved_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build the provenance block for a reasoning-layer (Neo4j) result.
+
+    Args:
+        computed_by:  the function that produced the result, e.g.
+                      "reasoning_layer.similar_cases".
+        sources:      what was read or written. Defaults to a single
+                      graph-query citation, which is the common case.
+        retrieved_at: override only when the caller already has the
+                      authoritative moment — a write path should cite
+                      when the write was ASSERTED, not when the envelope
+                      happened to be built.
+
+    computed_by is required and unvalidated by design: an empty or wrong
+    value is a bug worth seeing in the trail, not one worth hiding behind
+    a default.
+    """
+    if sources is None:
+        resolved = [GRAPH_QUERY]
+    else:
+        # Preserve caller order (it is meaningful — pipeline before query)
+        # while dropping blanks and repeats.
+        seen, resolved = set(), []
+        for src in sources:
+            text = str(src).strip()
+            if text and text not in seen:
+                seen.add(text)
+                resolved.append(text)
+
+    return {
+        "sources": resolved,
+        "retrieved_at": retrieved_at or _now_iso(),
+        "computed_by": computed_by,
+    }
+
+
+def graph_envelope(
+    result: Any,
+    computed_by: str,
+    sources: Optional[Sequence[str]] = None,
+    retrieved_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The full {result, provenance} envelope every reasoning-layer
+    function returns. Identical in shape to an AppWorks tool result."""
+    return {
+        "result": result,
+        "provenance": graph_provenance(computed_by, sources, retrieved_at),
+    }
+
 
 class ProvenanceTracker:
     # UI DISPLAY ALIASES (The Beautifier)
@@ -62,6 +145,6 @@ class ProvenanceTracker:
         """Returns the standardized provenance envelope."""
         return {
             "sources": sorted(list(self.sources)),
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "retrieved_at": _now_iso(),
             "computed_by": computed_by
         }

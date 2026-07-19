@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -209,9 +210,11 @@ def load_extraction_output(case_id: str, subject_id: str,
             "dropped": dropped,
             "corroborations_linked": corroborations_linked,
         },
-        "provenance": {
-            "sources": ["Neo4j write — ALLEGATION_LIKELY_AGAINST_SUBJECT, Commentary corroboration"],
-            "retrieved_at": asserted_at,
-            "computed_by": "reasoning_layer.graph_load.load_extraction_output",
-        },
+        "provenance": graph_provenance(
+            "reasoning_layer.graph_load.load_extraction_output",
+            ["Neo4j write — ALLEGATION_LIKELY_AGAINST_SUBJECT, Commentary corroboration"],
+            # A write cites when it was ASSERTED, not when this envelope
+            # was assembled.
+            retrieved_at=asserted_at,
+        ),
     }

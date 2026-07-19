@@ -33,12 +33,12 @@ write.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from reasoning_layer import rule_registry
 from reasoning_layer.neo4j_client import get_session
 from reasoning_layer.scope import resolve_scope
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -183,11 +183,7 @@ _PROP_QUERIES: Dict[str, str] = {
 def _envelope(result: Dict[str, Any]) -> dict:
     return {
         "result": result,
-        "provenance": {
-            "sources": ["Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.rule_audit.get_rule_audit",
-        },
+        "provenance": graph_provenance("reasoning_layer.rule_audit.get_rule_audit"),
     }
 
 

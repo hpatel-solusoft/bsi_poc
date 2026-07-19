@@ -41,10 +41,10 @@ flow), the pipeline, or any write.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -170,9 +170,5 @@ def find_structural_matches(case_id: str, limit: int = 25) -> dict:
             "source": "structural_graph",
             "total_candidates_scored": total_scored,
         },
-        "provenance": {
-            "sources": ["Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.similar_cases",
-        },
+        "provenance": graph_provenance("reasoning_layer.similar_cases"),
     }

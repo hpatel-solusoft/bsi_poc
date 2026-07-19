@@ -33,10 +33,10 @@ its own home when built), or any write.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +96,7 @@ def _envelope(result: Dict[str, Any]) -> dict:
     dispatcher-routed tool result."""
     return {
         "result": result,
-        "provenance": {
-            "sources": ["Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.graph_queries.check_network_match",
-        },
+        "provenance": graph_provenance("reasoning_layer.graph_queries.check_network_match"),
     }
 
 

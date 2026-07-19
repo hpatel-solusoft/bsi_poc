@@ -18,7 +18,7 @@ Contract, per entry (A.4):
     corroborated — was the inferred fact also confirmed by narrative
                    evidence (Rule 14; Wave 2 and structural rules only)
 
-Everything beyond those four fields (evidence_count, wave, rule_name,
+Everything beyond those four fields (evidence_count, instances, wave,
 skipped_reason) is additive and safe for existing consumers to ignore —
 but it is what makes /rule_audit and the investigator-facing "why did
 this fire" panel possible without a second round of queries.
@@ -47,71 +47,92 @@ _REL_RULES: Dict[str, str] = {
         MATCH (a:Subject)-[r:SHARES_EMPLOYER_WITH]-(b:Subject)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_01_Shared_Employer" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, b.subject_id AS related_subject_id,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_subject_id
     """,
     "Rule_03_Shared_Address": """
         MATCH (a:Subject)-[r:SHARES_ADDRESS_WITH]-(b:Subject)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_03_Shared_Address" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, b.subject_id AS related_subject_id,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_subject_id
     """,
     "Rule_05_Alias_Identity": """
         MATCH (a:Subject)-[r:SHARES_ALIAS_PATTERN_WITH]-(b:Subject)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_05_Alias_Identity" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, b.subject_id AS related_subject_id,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_subject_id
     """,
     "Rule_10_Merged_Case_Propagation": """
         MATCH (a:Subject)-[r:APPEARS_IN_CASE]->(c:Case)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_10_Merged_Case_Propagation" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, c.case_id AS related_case_id,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_case_id
     """,
     "Rule_02_Employer_Fraud_Network": """
-        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(:FraudNetwork)
+        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_02_Employer_Fraud_Network" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, n.network_key AS related_network_key,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_network_key
     """,
     "Rule_04_Address_Fraud_Network": """
-        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(:FraudNetwork)
+        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_04_Address_Fraud_Network" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, n.network_key AS related_network_key,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_network_key
     """,
     "Rule_06_Identity_Fraud_Network": """
-        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(:FraudNetwork)
+        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_06_Identity_Fraud_Network" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, n.network_key AS related_network_key,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_network_key
     """,
     "Rule_09_PCA_CheckSplit": """
-        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(:FraudNetwork)
+        MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_09_PCA_CheckSplit" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, n.network_key AS related_network_key,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_network_key
     """,
     "Rule_07_Prior_Guilty": """
         MATCH (a:Subject)-[r:HAS_PRIOR_GUILTY_CASE]->(c:Case)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_07_Prior_Guilty" AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, collect(DISTINCT r.confidence) AS confidences,
-               any(x IN collect(r.corroborated) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, c.case_id AS related_case_id,
+               r.confidence AS confidence,
+               coalesce(r.corroborated, false) AS corroborated
+        ORDER BY subject_id, related_case_id
     """,
     "Rule_14_Confirmation_Elevation": """
-        MATCH (a:Subject)-[r]-()
+        MATCH (a:Subject)-[r]-(other)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.corroborated_by = "Rule_14_Confirmation_Elevation"
           AND r.status = "active"
-        RETURN count(DISTINCT r) AS n, ["High"] AS confidences, true AS corroborated
+        RETURN a.subject_id AS subject_id,
+               coalesce(other.subject_id, other.case_id, other.network_key) AS related_subject_id,
+               "High" AS confidence, true AS corroborated
+        ORDER BY subject_id, related_subject_id
     """,
 }
 
@@ -125,33 +146,40 @@ _PROP_RULES: Dict[str, str] = {
         WHERE a.subject_id IN $scope_subject_ids
           AND a.cross_case_source_rule = "Rule_11_Cross_Case_Hub"
           AND a.is_cross_case = true
-        RETURN count(a) AS n, collect(DISTINCT a.cross_case_confidence) AS confidences,
+        RETURN a.subject_id AS subject_id,
+               a.cross_case_confidence AS confidence,
                false AS corroborated
+        ORDER BY subject_id
     """,
     "Rule_08_Recidivist_Escalation": """
         MATCH (c:Case)
         WHERE c.case_id IN $scope_case_ids
           AND c.risk_escalation_source_rule = "Rule_08_Recidivist_Escalation"
           AND c.risk_escalation_status = "active"
-        RETURN count(c) AS n, collect(DISTINCT c.risk_escalation_confidence) AS confidences,
+        RETURN c.case_id AS related_case_id,
+               c.risk_escalation_confidence AS confidence,
                false AS corroborated
+        ORDER BY related_case_id
     """,
     "Rule_12_SLAM_Wage_Corroboration": """
         MATCH (c:Case)-[:HAS_ALLEGATION]->(al:Allegation)-[att:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject)
         WHERE a.subject_id IN $scope_subject_ids
           AND al.wage_corroboration_rule = "Rule_12_SLAM_Wage_Corroboration"
           AND al.wage_corroboration_status = "active"
-        RETURN count(DISTINCT al) AS n,
-               collect(DISTINCT al.wage_corroboration_confidence) AS confidences,
-               any(x IN collect(al.wage_corroboration_verified) WHERE x = true) AS corroborated
+        RETURN a.subject_id AS subject_id, c.case_id AS related_case_id,
+               al.allegation_type AS allegation_type,
+               al.wage_corroboration_confidence AS confidence,
+               coalesce(al.wage_corroboration_verified, false) AS corroborated
+        ORDER BY subject_id, related_case_id
     """,
     "Rule_13_FastTrack_Escalation": """
         MATCH (c:Case {case_id: $case_id})
         WHERE c.fasttrack_recommendation_rule = "Rule_13_FastTrack_Escalation"
           AND c.fasttrack_recommendation_status = "active"
-        RETURN count(c) AS n,
-               collect(DISTINCT c.fasttrack_recommendation_confidence) AS confidences,
+        RETURN c.case_id AS related_case_id,
+               c.fasttrack_recommendation_confidence AS confidence,
                false AS corroborated
+        ORDER BY related_case_id
     """,
 }
 # Rule 12's `corroborated` is deliberately wage_corroboration_verified, not
@@ -161,21 +189,54 @@ _PROP_RULES: Dict[str, str] = {
 # available to verify against. See the rule file.
 
 
-def _summarise(rows: Dict[str, Any]) -> Dict[str, Any]:
-    count = int(rows["n"] or 0)
-    confidences = [c for c in (rows["confidences"] or []) if c]
-    if not confidences:
-        confidence = "Unresolved"
-    else:
-        confidence = max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
+# Instance keys, in the order they are emitted. Only the ones a given rule
+# actually produces appear on its instances — a subject-to-subject rule has
+# no related_case_id, and inventing a null one would suggest the rule looked
+# for a case and found none.
+_INSTANCE_KEYS = (
+    "subject_id", "related_subject_id", "related_case_id",
+    "related_network_key", "allegation_type",
+)
+
+
+def _instance(row: Dict[str, Any]) -> Dict[str, Any]:
+    """One concrete match: WHICH subjects/records this rule fired on."""
+    instance = {
+        key: row[key] for key in _INSTANCE_KEYS
+        if row.get(key) is not None
+    }
+    instance["confidence"] = row.get("confidence") or "Unresolved"
+    instance["corroborated"] = bool(row.get("corroborated", False))
+    return instance
+
+
+def _summarise(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Roll instance rows up into the rule-level summary.
+
+    The rule-level `confidence` is the HIGHEST across instances and
+    `corroborated` is true if ANY instance was corroborated. Both are
+    deliberately optimistic: the rule-level flags answer "is there anything
+    here worth an investigator's attention", and per-instance detail — the
+    Medium, uncorroborated match sitting behind a High one — is preserved
+    in `instances` rather than averaged away.
+    """
+    instances = [_instance(row) for row in rows]
+    count = len(instances)
+    confidences = [i["confidence"] for i in instances if i["confidence"]]
+    confidence = (
+        max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
+        if confidences else "Unresolved"
+    )
     return {
         "fired": count > 0,
         # A rule that did not fire has no confidence to report. "Unresolved"
         # is the correct value here (A.4's own enum) — not None, and not a
         # cheerful "High" inherited from a previous run.
         "confidence": confidence if count > 0 else "Unresolved",
-        "corroborated": bool(rows["corroborated"]) if count > 0 else False,
+        "corroborated": any(i["corroborated"] for i in instances),
         "evidence_count": count,
+        "instances": instances,
     }
 
 
@@ -203,11 +264,8 @@ def build_rules_fired(scope: Dict[str, Any],
     with get_session() as session:
         for rule_id in rule_registry.ALL_RULE_IDS:
             query = _REL_RULES.get(rule_id) or _PROP_RULES.get(rule_id)
-            record = session.run(query, **params).single()
-            summary = _summarise(record) if record else {
-                "fired": False, "confidence": "Unresolved",
-                "corroborated": False, "evidence_count": 0,
-            }
+            rows = session.run(query, **params).data()
+            summary = _summarise(rows)
             execution = executed_by_id.get(rule_id, {})
             block.append({
                 "rule_id": rule_id,
@@ -216,6 +274,11 @@ def build_rules_fired(scope: Dict[str, Any],
                 "corroborated": summary["corroborated"],
                 # --- additive, beyond A.4's four required fields ---
                 "evidence_count": summary["evidence_count"],
+                # Which concrete subjects/records this rule fired on. Without
+                # it, "Rule 3 fired, evidence_count 2" tells an investigator
+                # something happened but not to whom — and the co-subject
+                # pipeline runs below make multi-instance results the norm.
+                "instances": summary["instances"],
                 "wave": (
                     1 if rule_id in rule_registry.WAVE_1_RULE_IDS
                     else 2 if rule_id in rule_registry.WAVE_2_RULE_IDS

@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional
 
 from reasoning_layer import pipeline
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance, REASONING_PIPELINE, GRAPH_QUERY
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +269,12 @@ def enrich_graph_context(case_id: str, subject_id: str, force: bool = False, rea
     case_id, subject_id = str(case_id).strip(), str(subject_id).strip()
 
     # --- Step 2: trigger the pipeline, block until complete ---
-    pipeline_envelope = pipeline.run_pipeline(case_id, subject_id, force=force, reason=reason)
+    # EVERY subject on the case is reasoned, not just the primary one.
+    # The Wave 2 network rules need both endpoints of a relationship
+    # reasoned before they can form a network, so reasoning the primary
+    # alone silently suppressed them. The returned rules_fired is the
+    # merged case-level block, with per-instance detail.
+    pipeline_envelope = pipeline.run_pipeline_for_case(case_id, force=force, reason=reason)
     rules_fired = pipeline_envelope["result"].get("rules_fired", [])
 
     # --- Steps 3 & 4: read graph_context and compute signals ---
@@ -296,9 +302,8 @@ def enrich_graph_context(case_id: str, subject_id: str, force: bool = False, rea
             "graph_signals": graph_signals,
             "rules_fired": rules_fired,
         },
-        "provenance": {
-            "sources": ["reasoning pipeline", "Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.context_enrichment.enrich_graph_context",
-        },
+        "provenance": graph_provenance(
+            "reasoning_layer.context_enrichment.enrich_graph_context",
+            [REASONING_PIPELINE, GRAPH_QUERY],
+        ),
     }

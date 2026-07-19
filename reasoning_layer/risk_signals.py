@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -259,17 +260,15 @@ def apply_graph_risk_signals(
 
     return {
         "result": augmented,
-        "provenance": {
-            "sources": ["Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            # Section 8.4 requires the source of each risk component to be
-            # independently attributable. This is delivered as TWO provenance
-            # BLOCKS in the trail: the AppWorks base scorer's block (computed_by
-            # "BSI deterministic rules engine", added by calculate_risk_metrics)
-            # and THIS block for the Neo4j graph signals. computed_by is kept a
-            # single string per block so merge_provenance can hash it for
-            # de-duplication; the two-entry requirement is met by the two blocks,
-            # not by a list inside one.
-            "computed_by": "reasoning_layer.risk_signals (Neo4j graph signals)",
-        },
+        "provenance": graph_provenance(
+            # Section 8.4 requires each risk component to be independently
+            # attributable. That is delivered as TWO provenance BLOCKS in the
+            # trail: the AppWorks base scorer's block (computed_by "BSI
+            # deterministic rules engine", added by calculate_risk_metrics) and
+            # THIS block for the Neo4j graph signals. computed_by stays a single
+            # string per block so merge_provenance can hash it for
+            # de-duplication; the two-entry requirement is met by the two
+            # blocks, not by a list inside one.
+            "reasoning_layer.risk_signals (Neo4j graph signals)",
+        ),
     }

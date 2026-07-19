@@ -26,7 +26,6 @@ prompt-construction infrastructure, not agent-loop logic.
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from openai import OpenAI
@@ -34,6 +33,7 @@ from pydantic import ValidationError
 
 from agent_service.prompt_builders import build_extraction_prompt
 from semantic_layer.entity_contracts import ExtractionResult
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +59,9 @@ def _model() -> str:
 def _envelope(result: Dict[str, Any], computed_by: str) -> dict:
     return {
         "result": result,
-        "provenance": {
-            "sources": ["Neo4j :Commentary / :Allegation narrative fields"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": computed_by,
-        },
+        "provenance": graph_provenance(
+            computed_by, ["Neo4j :Commentary / :Allegation narrative fields"],
+        ),
     }
 
 

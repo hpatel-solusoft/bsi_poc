@@ -33,10 +33,10 @@ any inferred fact's status field.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
+from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +90,7 @@ RETURN a.subject_id AS source, b.subject_id AS target,
 def _envelope(result: Dict[str, Any]) -> dict:
     return {
         "result": result,
-        "provenance": {
-            "sources": ["Neo4j graph query"],
-            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-            "computed_by": "reasoning_layer.fraud_network.get_fraud_network",
-        },
+        "provenance": graph_provenance("reasoning_layer.fraud_network.get_fraud_network"),
     }
 
 
