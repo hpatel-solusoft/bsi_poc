@@ -217,3 +217,112 @@ class GraphIngestRequest(BaseModel):
     """
     case_ids: List[str]
     run_rules: bool = True
+
+
+# -----------------------------------------------------------------------
+# D2 — POST /reject_inference (Functional Specification D2;
+# reasoning_layer/rejection.py)
+# -----------------------------------------------------------------------
+
+class RejectInferenceRequest(BaseModel):
+    """
+    POST /reject_inference — the Human-in-the-Loop "Reject" button's
+    HTTP contract (Functional Specification D2 Input Contract). Field
+    names deliberately match what fraud_network.py's edges[] and
+    rule_audit.py's inferred_relationships[] already return, so the UI
+    can build this request directly from whichever screen the
+    investigator clicked Reject on, with no field translation.
+    """
+    case_id: str
+    subject_id_a: str
+    rule_id: str
+    relationship_type: str
+    investigator_id: str
+    # Required for two-subject facts (Rules 1/3/5), optional for network
+    # membership (Rules 2/4/6/9 — omit to reject only subject_id_a's
+    # membership), and must be omitted for every other rule_id.
+    # reasoning_layer.rejection.reject_inference validates this per rule.
+    subject_id_b: Optional[str] = None
+    reason: Optional[str] = None
+
+    @field_validator("case_id", "subject_id_a", "rule_id", "relationship_type", "investigator_id")
+    @classmethod
+    def must_be_non_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("must be a non-empty string.")
+        return value
+
+
+class RejectInferenceResponse(BaseModel):
+    """Response for POST /reject_inference (D2 Output Contract)."""
+    accepted: bool
+    rejection_id: str
+    rejected_at: str
+    rejected_by: str
+    relationship_type: str
+    rule_id: str
+
+
+# -----------------------------------------------------------------------
+# D3 — GET /fraud_network/{case_id} (Functional Specification D3;
+# reasoning_layer/fraud_network.py)
+# -----------------------------------------------------------------------
+
+class FraudNetworkNode(BaseModel):
+    id: str
+    display_name: Optional[str] = None
+    is_primary: bool = False
+
+
+class FraudNetworkEdge(BaseModel):
+    source: str
+    target: str
+    relationship_type: str
+    confidence: Optional[str] = None
+    status: str
+    source_rule: Optional[str] = None
+
+
+class FraudNetworkBlock(BaseModel):
+    network_type: str
+    network_key: Optional[str] = None
+    formed_by_rule: Optional[str] = None
+    confidence: str
+    nodes: List[FraudNetworkNode]
+    edges: List[FraudNetworkEdge]
+
+
+class FraudNetworkResponse(BaseModel):
+    """Response for GET /fraud_network/{case_id} (D3 Output Contract)."""
+    case_id: str
+    networks: List[FraudNetworkBlock]
+    network_count: int
+
+
+# -----------------------------------------------------------------------
+# D4 — GET /rule_audit/{case_id} (Functional Specification D4;
+# reasoning_layer/rule_audit.py)
+# -----------------------------------------------------------------------
+
+class InferredRelationship(BaseModel):
+    subject_id_a: str
+    subject_id_b: Optional[str] = None
+    relationship_type: str
+    confidence: str
+    asserted_at: Optional[str] = None
+    corroborated: bool = False
+    status: str
+
+
+class RuleAuditEntry(BaseModel):
+    rule_id: str
+    rule_description: str
+    fired: bool
+    inferred_relationships: List[InferredRelationship]
+
+
+class RuleAuditResponse(BaseModel):
+    """Response for GET /rule_audit/{case_id} (D4 Output Contract)."""
+    case_id: str
+    primary_subject_id: Optional[str] = None
+    rules: List[RuleAuditEntry]

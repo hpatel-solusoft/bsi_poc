@@ -44,6 +44,13 @@ from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.similar_cases import find_structural_matches
 from reasoning_layer.report_generation import assemble_related_network
+from reasoning_layer.rejection import (
+    reject_inference,
+    InferenceNotFoundError,
+    RelationshipTypeMismatchError,
+)
+from reasoning_layer.fraud_network import get_fraud_network
+from reasoning_layer.rule_audit import get_rule_audit
 from core.report_artifacts_repository import save_report
 from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
@@ -59,7 +66,10 @@ from api.models import (
     ModifyInvestigationStepsRequest, ModifyInvestigationStepsResponse,
     RevertToAiPlanRequest, RevertToAiPlanResponse,
     InvestigationStepsResponse,
-    ReportGenerationRequest
+    ReportGenerationRequest,
+    RejectInferenceRequest, RejectInferenceResponse,
+    FraudNetworkResponse,
+    RuleAuditResponse,
 )
 from agent_service.prompt_builders import (
     build_intake_system_prompt,
@@ -1098,6 +1108,95 @@ def generate_report(req: ReportGenerationRequest):
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
     finally:
         logger.info("POST /generate_report completed for case_id=%s", req.case_id)
+
+
+@app.post("/reject_inference", response_model=RejectInferenceResponse)
+def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceResponse:
+    """
+    D2 — Inference Rejection Handler. An investigator clicks "Reject" on
+    an inferred fact shown in the Context Enrichment panel, the Fraud
+    Network screen (GET /fraud_network/{case_id}), or the Rule Audit
+    panel (GET /rule_audit/{case_id}), and the UI POSTs here with the
+    fields that entry already carries.
+
+    No LLM involvement (D2 Boundaries). Does not touch CASE_STORE or
+    investigation_plan_overrides — this is a Neo4j write only, handled
+    entirely by reasoning_layer.rejection.reject_inference.
+    """
+    start = time.time()
+    try:
+        envelope = reject_inference(
+            case_id=req.case_id,
+            subject_id_a=req.subject_id_a,
+            subject_id_b=req.subject_id_b,
+            rule_id=req.rule_id,
+            relationship_type=req.relationship_type,
+            investigator_id=req.investigator_id,
+            reason=req.reason,
+        )
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="inference_rejection",
+            endpoint="/reject_inference",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+        return RejectInferenceResponse(**envelope["result"])
+    except InferenceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, RelationshipTypeMismatchError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (GraphUnavailableError, Neo4jError) as exc:
+        logger.exception("reject_inference FAILED for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="inference_rejection",
+            endpoint="/reject_inference",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
+        raise HTTPException(status_code=502, detail=f"Could not reach the graph: {exc}") from exc
+    finally:
+        logger.info("POST /reject_inference completed for case_id=%s", req.case_id)
+
+
+@app.get("/fraud_network/{case_id}", response_model=FraudNetworkResponse)
+def fraud_network_route(case_id: str) -> FraudNetworkResponse:
+    """
+    D3 — Fraud Network Graph API. Read-only, no LLM, no writes (Key
+    Design Rules). Powers the frontend's D3.js/Cytoscape.js network
+    visualisation and is the data source the UI's per-edge Reject
+    button reads its POST /reject_inference parameters from.
+    """
+    try:
+        envelope = get_fraud_network(case_id)
+        return FraudNetworkResponse(**envelope["result"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (GraphUnavailableError, Neo4jError) as exc:
+        logger.exception("fraud_network FAILED for case_id=%s", case_id)
+        raise HTTPException(status_code=502, detail=f"Could not reach the graph: {exc}") from exc
+    finally:
+        logger.info("GET /fraud_network completed for case_id=%s", case_id)
+
+
+@app.get("/rule_audit/{case_id}", response_model=RuleAuditResponse)
+def rule_audit_route(case_id: str) -> RuleAuditResponse:
+    """
+    D4 — Rule Audit / Inference Explainability. Read-only, no LLM. The
+    prerequisite view for D2: an investigator reviews everything a case
+    inferred, with full provenance, before deciding what to reject.
+    """
+    try:
+        envelope = get_rule_audit(case_id)
+        return RuleAuditResponse(**envelope["result"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (GraphUnavailableError, Neo4jError) as exc:
+        logger.exception("rule_audit FAILED for case_id=%s", case_id)
+        raise HTTPException(status_code=502, detail=f"Could not reach the graph: {exc}") from exc
+    finally:
+        logger.info("GET /rule_audit completed for case_id=%s", case_id)
 
 
 @app.post("/copilot")

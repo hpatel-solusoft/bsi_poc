@@ -107,6 +107,19 @@ _RULE_NAMES: Dict[str, str] = {
 }
 
 
+def get_rule_names() -> Dict[str, str]:
+    """
+    Public {rule_id: human-readable name} accessor, sourced from the
+    same YAML-loaded _RULE_NAMES every other rule_registry consumer
+    uses. Added for reasoning_layer/rule_audit.py's rule_description
+    field (Functional Specification D4) — callers outside this module
+    read rule names through here rather than reaching into the private
+    _RULE_NAMES dict directly, so config/rules.yaml stays the one place
+    a rule's display name is defined.
+    """
+    return dict(_RULE_NAMES)
+
+
 _SEED_QUERY = """
 UNWIND $rules AS rule
 MERGE (r:InferenceRule {rule_id: rule.rule_id})
