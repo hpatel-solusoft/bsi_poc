@@ -152,3 +152,167 @@ tools:
       - name: "allegation_types"
         type: "list[string]"
         description: "Allegation type labels on the current case, echoed back as requested_types"
+
+  # ---------------------------------------------------------------------------
+  # AI-17 / Section 6.3 — Investigation Copilot Cypher template library.
+  # Twelve fixed templates. The model selects a template and supplies
+  # parameters; it never generates Cypher. Registered here because, unlike
+  # every other reasoning_layer function, the model must CHOOSE these at
+  # question time — Section 9.3 routes that choice through the same three
+  # dispatcher gates as an AppWorks tool, forming the single unified
+  # catalogue of Section 8.6. All are read-only; none re-triggers the
+  # Reasoning Pipeline.
+  # ---------------------------------------------------------------------------
+
+  - name: "get_subject_connections"
+    section: "subject_connections"
+    description: >
+      Who is this subject connected to in the graph? Returns connections (each with subject_id, connection_type, confidence, corroborated, source_rule), connection_count, and separately rejected_connections with rejected_count for inferences an investigator reviewed and rejected.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_subject_connections"
+
+    required_params:
+      - name: "subject_id"
+        type: "string"
+        description: "Subject identifier"
+
+  - name: "get_rules_fired"
+    section: "rules_fired_detail"
+    description: >
+      What inference rules fired on this case and why. Returns rules, each with rule_id, fired, active_edge_count, rejected_edge_count, corroborated_edge_count and confidences, plus fired_rule_count.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_rules_fired"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+
+  - name: "get_risk_signals"
+    section: "risk_signals_detail"
+    description: >
+      The graph inputs behind this case's risk flag. Returns fasttrack_eligible, fraud_amount, is_cross_case_hub, prior_guilty_case_count, prior_guilty_dates_closed, fraud_networks, network_member_count and recidivist_in_active_network. Does not recompute the risk score.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_risk_signals"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+      - name: "subject_id"
+        type: "string"
+        description: "Subject identifier"
+
+  - name: "get_employer_case_history"
+    section: "employer_case_history"
+    description: >
+      Has this employer appeared in other cases. Returns employer_name and cases, each with case_id, complaint_no, status, fraud_amount, opened_date and subject_ids, plus case_count.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_employer_case_history"
+
+    required_params:
+      - name: "fein"
+        type: "string"
+        description: "Employer FEIN"
+
+  - name: "get_full_network"
+    section: "full_network"
+    description: >
+      Who is in the fraud network and what are their cases. Returns networks, each with network_key, network_type, formed_by_rule, members (subject_id, confidence, case_ids) and member_count, plus network_count.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_full_network"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+
+  - name: "get_structural_similar_cases"
+    section: "structural_similar_cases"
+    description: >
+      Cases sharing structural graph properties with this one. Returns matches, each with case_id, complaint_no, status, fraud_amount, date_opened, matched_allegation_types, similarity_score and match_reasons, plus source and total_candidates_scored.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_structural_similar_cases"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+
+  - name: "get_rejection_history"
+    section: "rejection_history"
+    description: >
+      Which inferred facts have been reviewed or rejected on this case. Returns rejected_relationships and rejection_records, each with relationship_type, rejected_by, rejected_at and reason, plus rejected_count and a status_note. These are historical review context and must never be reported as current findings.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_rejection_history"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+
+  - name: "get_case_merge_history"
+    section: "case_merge_history"
+    description: >
+      Was any of this case's subject history inherited from a merged case. Returns merged_in_cases, merged_out_cases, merge_derived_subjects and has_merge_history.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_case_merge_history"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+
+  - name: "get_cross_case_hub_summary"
+    section: "cross_case_hub_summary"
+    description: >
+      Which cases this subject is a cross-case hub across. Returns is_cross_case_hub, hub_case_ids and cases, each with case_id, complaint_no, status, opened_date, subject_role, is_primary and merge_derived, plus case_count and primary_case_count.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_cross_case_hub_summary"
+
+    required_params:
+      - name: "subject_id"
+        type: "string"
+        description: "Subject identifier"
+
+  - name: "get_wage_corroboration_detail"
+    section: "wage_corroboration_detail"
+    description: >
+      What wage evidence corroborates this allegation. Returns fraud_start_date, fraud_end_date and allegations, each with allegation_type, wage_corroborated, corroboration_confidence, date_overlap_verified, corroboration_rule and wage_records, plus corroborated_count.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_wage_corroboration_detail"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"
+      - name: "subject_id"
+        type: "string"
+        description: "Subject identifier"
+
+  - name: "get_connection_path"
+    section: "connection_path"
+    description: >
+      How exactly one subject is connected to another, including across subjects not in the same detected network. Returns connection_path as an ordered list of relationship types, path_nodes, hop_count, connected and search_depth_limit.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_connection_path"
+
+    required_params:
+      - name: "subject_id_a"
+        type: "string"
+        description: "First subject identifier"
+      - name: "subject_id_b"
+        type: "string"
+        description: "Second subject identifier"
+
+  - name: "get_network_financial_exposure"
+    section: "network_financial_exposure"
+    description: >
+      Total financial exposure across a detected network. Returns networks, each with network_key, network_type, member_count, case_count, total_exposure, cases and cases_missing_amount, plus total_exposure_all_networks.
+    scope: [COPILOT]
+    python_function: "reasoning_layer.copilot_templates.get_network_financial_exposure"
+
+    required_params:
+      - name: "case_id"
+        type: "string"
+        description: "Case identifier"

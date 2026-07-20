@@ -1,29 +1,13 @@
 """
-Provenance
-----------
-Single source of truth for the {sources, retrieved_at, computed_by}
-provenance envelope, for BOTH data paths:
-
-  * ProvenanceTracker  — AppWorks REST retrievals. Accumulates individual
-    record citations through a gatekeeper allowlist, because an AppWorks
-    answer is assembled from many records and each one must be nameable.
-
-  * graph_provenance / graph_envelope — Neo4j reasoning-layer results.
-    A graph answer comes from ONE query against an already-reasoned graph,
-    so there are no per-record IDs to gate; the citation is the query
-    itself plus which function ran it.
-
-Both produce the identical envelope shape, so nothing downstream —
-merge_provenance, CASE_STORE, the Data Sources renderer — can tell them
-apart or needs to care.
-
-The timestamp is generated in exactly one place (_now_iso). It was
-previously re-derived in a dozen modules, which is how blank and
-inconsistent retrieved_at values got into the trail.
+Provenance Tracker
+------------------
+Standardizes data citations for the LLM UI. 
+Acts as a strict gatekeeper to filter out noisy backend AppWorks endpoints
+using the centralized configuration.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Sequence, Set
+from typing import Dict, Any, Set, Optional, Sequence
 
 # ── Import the Gatekeeper Allowlist from Central Config ──
 from config.settings import ALLOWED_ENTITIES 
@@ -145,6 +129,6 @@ class ProvenanceTracker:
         """Returns the standardized provenance envelope."""
         return {
             "sources": sorted(list(self.sources)),
-            "retrieved_at": _now_iso(),
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
             "computed_by": computed_by
         }

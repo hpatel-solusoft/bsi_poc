@@ -75,6 +75,16 @@ def get_allegation_type_tasks(
         requested_types or "(none supplied)",
     )
 
+    # PROVENANCE IS CITED ONCE FOR THE CATALOGUE, NOT ONCE PER TASK.
+    # This is a single list read of reference data, not 42 separate record
+    # retrievals. Citing every row added 42 "Data Sources" lines to the
+    # case's provenance trail on EVERY /plan call, and because
+    # merge_provenance de-duplicates on retrieved_at (which differs each
+    # run) they accumulated without bound in case_ai_summary_store — a
+    # payload and context cost that grew with usage while telling an
+    # auditor nothing beyond "the catalogue, at this time". The individual
+    # task_ids remain on each returned task, so any specific task is still
+    # traceable to its AppWorks record.
     tracker = ProvenanceTracker("Catalog", "AllegationTypeTask")
 
     try:
@@ -104,7 +114,7 @@ def get_allegation_type_tasks(
             continue
         if task_id:
             seen_task_ids.add(task_id)
-            tracker.add_source("AllegationTypeTask", task_id)
+            # tracker.add_source("AllegationTypeTask", task_id)
 
         catalog_tasks.append({
             "task_id": task_id,
@@ -119,6 +129,10 @@ def get_allegation_type_tasks(
     # Deterministic order: BSI's default tasks first (they are the standard
     # opening set), then alphabetically. Two runs over an unchanged
     # catalogue return identical output.
+    if catalog_tasks:
+        # One citation for the one list endpoint that was actually read.
+        tracker.add_source("AllegationTypeTask", "catalogue")
+
     catalog_tasks.sort(key=lambda t: (not t["is_default_task"], t["task_type"].lower()))
     default_tasks = [t["task_type"] for t in catalog_tasks if t["is_default_task"]]
 

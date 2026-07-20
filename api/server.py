@@ -1262,33 +1262,23 @@ def copilot(req: CopilotRequest):
         # rules_fired in both PostgreSQL (pipeline_execution_state) and
         # Neo4j, then merge the refreshed context into case_data so the
         # answer below is grounded in it.
+        # AI-17 / Section 6.3: "Copilot never re-triggers the Reasoning
+        # Pipeline under any condition." This block previously called
+        # enrich_graph_context(force=True) on reload_ai_summary, which did
+        # exactly that. Copilot only ever READS the already-reasoned graph
+        # (Principle 10) — the pipeline is owned by /intake and the ETL, and
+        # a Q&A turn re-running inference would let a question mutate the
+        # case an investigator is reading, and change answers mid-conversation.
+        #
+        # reload_ai_summary is therefore honoured as a CACHE instruction only:
+        # _resolve_case_store above has already re-read the freshest stored
+        # context, and any graph refresh must be requested from /intake.
         if req.reload_ai_summary:
-            subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
-            if subject_id:
-                try:
-                    enrichment = enrich_graph_context(req.case_id, subject_id, force=True)["result"]
-                    case_data["graph_context"] = enrichment["graph_context"]
-                    case_data["graph_signals"] = enrichment["graph_signals"]
-                    case_data["rules_fired"] = enrichment["rules_fired"]
-                    CASE_STORE[req.case_id] = case_data
-                    persist_case_session(
-                        req.case_id,
-                        build_ai_summary(case_data, {}, case_data.get("provenance_trail", [])),
-                    )
-                    logger.info(
-                        "copilot FORCED graph refresh case_id=%s subject_id=%s",
-                        req.case_id, subject_id,
-                    )
-                except (ValueError, GraphUnavailableError, Neo4jError) as exc:
-                    logger.warning(
-                        "copilot forced graph refresh unavailable for case_id=%s subject_id=%s — %s",
-                        req.case_id, subject_id, exc,
-                    )
-            else:
-                logger.warning(
-                    "copilot reload_ai_summary=True but no subject_primary_id resolved "
-                    "for case_id=%s — nothing to refresh", req.case_id,
-                )
+            logger.info(
+                "copilot reload_ai_summary=True for case_id=%s — answering from the "
+                "freshest stored context; the reasoning pipeline is never re-triggered "
+                "from Copilot (Section 6.3)", req.case_id,
+            )
 
         # Modify Investigation Steps flow (Section D.6): looked up
         # server-side, from any client, any session — never relying on
