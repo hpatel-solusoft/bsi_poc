@@ -44,6 +44,7 @@ from reasoning_layer.similar_cases import find_structural_matches
 from reasoning_layer.report_generation import assemble_related_network
 from reasoning_layer.rejection import (
     reject_inference,
+    revert_rejection,
     InferenceNotFoundError,
     RelationshipTypeMismatchError,
 )
@@ -65,7 +66,9 @@ from api.models import (
     RevertToAiPlanRequest, RevertToAiPlanResponse,
     InvestigationStepsResponse,
     ReportGenerationRequest,
-    RejectInferenceRequest, RejectInferenceResponse,
+    RejectInferenceRequest,
+    RevertRejectionRequest,
+    RevertRejectionResponse, RejectInferenceResponse,
     FraudNetworkResponse,
     RuleAuditResponse,
 )
@@ -1190,6 +1193,56 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
     finally:
         logger.info("POST /reject_inference completed for case_id=%s", req.case_id)
 
+
+@app.post("/revert_rejection", response_model=RevertRejectionResponse)
+def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionResponse:
+    """
+    Undo an inference rejection. The Revert button is shown ONLY on rows
+    the Case Summary graph-findings table already reports as rejected, so
+    this endpoint is the exact inverse of POST /reject_inference and takes
+    the same identifiers.
+
+    Restores the suppressed fact to active, clears its rejection reason and
+    audit fields, and deletes the :Rejection guard node so the rule can
+    fire again on the next pipeline run. No LLM, no AppWorks, no
+    CASE_STORE write — a Neo4j write only, handled entirely by
+    reasoning_layer.rejection.revert_rejection.
+    """
+    start = time.time()
+    try:
+        envelope = revert_rejection(
+            case_id=req.case_id,
+            subject_id_a=req.subject_id_a,
+            subject_id_b=req.subject_id_b,
+            rule_id=req.rule_id,
+            relationship_type=req.relationship_type,
+            investigator_id=req.investigator_id,
+        )
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="inference_rejection_revert",
+            endpoint="/revert_rejection",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+        return RevertRejectionResponse(**envelope["result"])
+    except InferenceNotFoundError as exc:
+        # Nothing rejected matches — already reverted, or never rejected.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, RelationshipTypeMismatchError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (GraphUnavailableError, Neo4jError) as exc:
+        logger.exception("revert_rejection FAILED for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="inference_rejection_revert",
+            endpoint="/revert_rejection",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
+        raise HTTPException(status_code=502, detail=f"Could not reach the graph: {exc}") from exc
+    finally:
+        logger.info("POST /revert_rejection completed for case_id=%s", req.case_id)
 
 @app.get("/fraud_network/{case_id}", response_model=FraudNetworkResponse)
 def fraud_network_route(case_id: str) -> FraudNetworkResponse:

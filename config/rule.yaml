@@ -71,30 +71,35 @@ rules:
   # ---- Wave 1: structural, no LLM, no tunable vocabulary ----
   Rule_01_Shared_Employer:
     name: "Shared Employer Detection"
+    description: "Two subjects are employed by the same employer (matched on FEIN), linking them structurally."
     wave: 1
     enabled: true
     params: {}
 
   Rule_03_Shared_Address:
     name: "Shared Address Detection"
+    description: "Two subjects reside at the same normalised address, linking them structurally."
     wave: 1
     enabled: true
     params: {}
 
   Rule_05_Alias_Identity:
     name: "Alias-Based Identity Connection"
+    description: "Two subjects share an alias pattern, indicating they may be the same identity or deliberately linked."
     wave: 1
     enabled: true
     params: {}
 
   Rule_10_Merged_Case_Propagation:
     name: "Merged Case Subject History Propagation"
+    description: "Subject history was inherited from a case that was merged into this one."
     wave: 1
     enabled: true
     params: {}
 
   Rule_11_Cross_Case_Hub:
     name: "Cross-Case Co-Subject Network Detection"
+    description: "The subject appears as a co-subject across multiple distinct cases, acting as a hub."
     wave: 1
     enabled: true
     params: {}
@@ -102,6 +107,7 @@ rules:
   # ---- Wave 2: attribution-dependent ----
   Rule_02_Employer_Fraud_Network:
     name: "Employer Fraud Network Formation"
+    description: "Multiple subjects with active allegations share the same employer across different cases, forming an employer fraud network."
     wave: 2
     enabled: true
     params:
@@ -120,6 +126,7 @@ rules:
 
   Rule_04_Address_Fraud_Network:
     name: "Address Fraud Network Formation"
+    description: "Multiple subjects with active allegations share the same address across different cases, forming an address fraud network."
     wave: 2
     enabled: true
     params:
@@ -132,6 +139,7 @@ rules:
 
   Rule_06_Identity_Fraud_Network:
     name: "Identity Fraud Network Formation"
+    description: "Multiple subjects linked by alias pattern hold active allegations across different cases, forming an identity fraud network."
     wave: 2
     enabled: true
     params:
@@ -148,6 +156,7 @@ rules:
 
   Rule_07_Prior_Guilty:
     name: "Prior Guilty Subject Identification"
+    description: "The subject has a prior case closed with a guilty disposition."
     wave: 2
     enabled: true
     params:
@@ -164,6 +173,7 @@ rules:
 
   Rule_08_Recidivist_Escalation:
     name: "High Risk Escalation: Recidivist in Active Fraud Network"
+    description: "The subject is a recidivist who is also an active member of a detected fraud network, escalating case risk."
     wave: 2
     enabled: true
     params:
@@ -175,6 +185,7 @@ rules:
 
   Rule_09_PCA_CheckSplit:
     name: "PCA Check-Split Network Detection"
+    description: "Personal Care Attendant check-splitting pattern detected across subjects sharing an employer."
     wave: 2
     enabled: true
     params:
@@ -185,6 +196,7 @@ rules:
 
   Rule_12_SLAM_Wage_Corroboration:
     name: "SLAM Wage Corroboration"
+    description: "Wage records corroborate a Subject Living Above Means allegation for the case's fraud date range."
     wave: 2
     enabled: true
     params:
@@ -193,6 +205,7 @@ rules:
 
   Rule_13_FastTrack_Escalation:
     name: "FastTrack Escalation Recommendation"
+    description: "The case meets the criteria for FastTrack escalation."
     wave: 2
     enabled: true
     params:
@@ -204,6 +217,7 @@ rules:
   # ---- Cross-cutting modifier (wave 0 = not a wave member) ----
   Rule_14_Confirmation_Elevation:
     name: "Extraction-Confirmed Relationship Elevation"
+    description: "An inferred relationship was independently confirmed by narrative evidence, elevating its confidence."
     wave: 0
     enabled: true
     params: {}

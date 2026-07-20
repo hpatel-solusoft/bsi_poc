@@ -224,6 +224,40 @@ class GraphIngestRequest(BaseModel):
 # reasoning_layer/rejection.py)
 # -----------------------------------------------------------------------
 
+class RevertRejectionRequest(BaseModel):
+    """
+    POST /revert_rejection — the Case Summary "Revert" button's HTTP
+    contract. Field names mirror RejectInferenceRequest exactly so the UI
+    can post back the identifiers it already holds on the rejected row,
+    with no translation and no second lookup.
+
+    There is no `reason` here on purpose: reverting restores the rule's
+    own finding, it does not assert a new one, so there is nothing for an
+    investigator to justify. investigator_id is still recorded, in the log
+    and the response, so the action stays attributable.
+    """
+    case_id: str
+    subject_id_a: str
+    rule_id: str
+    investigator_id: str
+    relationship_type: Optional[str] = None
+    subject_id_b: Optional[str] = None
+
+
+class RevertRejectionResponse(BaseModel):
+    """What the UI needs to flip the row back to its un-rejected state."""
+    reverted: bool
+    case_id: str
+    rule_id: str
+    subject_id_a: str
+    subject_id_b: Optional[str] = None
+    relationship_type: str
+    status: str
+    rejection_reason: Optional[str] = None
+    reverted_by: Optional[str] = None
+    reverted_at: Optional[str] = None
+    model_config = {"extra": "allow"}
+
 class RejectInferenceRequest(BaseModel):
     """
     POST /reject_inference — the Human-in-the-Loop "Reject" button's

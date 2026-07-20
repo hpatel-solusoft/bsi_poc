@@ -21,7 +21,7 @@ from appworks.appworks_paths import AppWorksPaths
 from semantic_layer.entity_contracts import RiskRuleDef, TriggeredRule
 
 # ── NEW: Architecture Standard Imports ───────────────────────
-from appworks.appworks_utils import safe_fetch, extract_id_from_href, get_relationship_items
+from appworks.appworks_utils import safe_fetch, extract_id_from_href, get_relationship_items, embedded_id
 from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
@@ -231,13 +231,17 @@ def _build_case_context(case_id: str, subject_id: str, fraud_types: List[str], t
 
     prior_case_count, primary_in_prior_cases = 0, 0
     try:
-        subj_props, subj_links = safe_fetch(AppWorksPaths.Subject.item(subject_id), "Subject")
+        # Single call: Subjects/lists/All_Subjects filtered by
+        # Subjects_Subject$Identity.Id — one row per case this subject is
+        # on, each embedding its own Subjects_Workfolder$Identity and
+        # Subjects_IsPrimarySubject. Replaces the old Subject.item() +
+        # relationship-link mapping chase.
+        rows = get_relationship_items(AppWorksPaths.Subjects.by_subject(subject_id), "All_Subjects")
         tracker.add_source("Subject", subject_id)
-        
-        mapping_href = subj_links.get("relationship:Subject_SubjectWorkfolderMapping", {}).get("href")
-        mappings = get_relationship_items(mapping_href, "Subject_SubjectWorkfolderMapping")
-        prior_case_count = len(mappings)
-        primary_in_prior_cases = sum(1 for m in mappings if m.get("Properties", {}).get("SubjectWorkfolderMapping_IsPrimary"))
+
+        prior_rows = [r for r in rows if str(embedded_id(r, "Subjects_Workfolder")) != str(case_id)]
+        prior_case_count = len(prior_rows)
+        primary_in_prior_cases = sum(1 for r in prior_rows if r.get("Properties", {}).get("Subjects_IsPrimarySubject"))
     except Exception as e:
         logger.warning(f"Failed fallback subject history context: {e}")
 

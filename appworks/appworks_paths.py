@@ -6,7 +6,7 @@ No path string is written in any other file — call these methods instead.
 Usage:
     from appworks.appworks_paths import AW
     fetch(AW.Workfolder.item(case_id))
-    fetch(AW.Subject.workfolder_mappings(subject_id))
+    fetch(AW.Subjects.by_subject(subject_id))
     fetch(AW.Lists.allegations_by_type(type_id))
 """
 
@@ -36,25 +36,17 @@ class AppWorksPaths:
         # call. Nothing in the active codebase referenced the old methods.
 
     class Subject:
-        @staticmethod
-        def item(id: str) -> str:
-            return f"/entities/Subject/items/{id}"
+        # NOTE: item(), workfolder_mappings(), and workfolder_mapping_item()
+        # were removed here. They cost 3 round trips (item -> mapping list ->
+        # per-mapping item re-fetch, since childEntities list rows only carry
+        # a 'self' href, not the parent Workfolder relationship) just to find
+        # which other cases a subject appears in. Subjects.by_subject() below
+        # replaces all three with a single call: the same Subjects/lists/
+        # All_Subjects endpoint used for case->subjects, filtered by
+        # Subjects_Subject$Identity.Id instead of Subjects_Workfolder$Identity.Id,
+        # which returns one row per case the subject is on — Subject detail
+        # Properties, own Workfolder id, and IsPrimarySubject flag all embedded.
 
-        @staticmethod
-        def workfolder_mappings(id: str) -> str:
-            return f"/entities/Subject/items/{id}/childEntities/Subject_SubjectWorkfolderMapping"
-
-        @staticmethod
-        def workfolder_mapping_item(subject_id: str, mapping_id: str) -> str:
-            return (
-                f"/entities/Subject/items/{subject_id}"
-                f"/childEntities/Subject_SubjectWorkfolderMapping/items/{mapping_id}"
-                
-            )
-
-        @staticmethod
-        def addresses(id: str) -> str:
-            return f"/entities/Subject/items/{id}/relationships/Subject_Address"
 
         @staticmethod
         def aliases(id: str) -> str:
@@ -63,11 +55,9 @@ class AppWorksPaths:
         @staticmethod
         def jobs(id: str) -> str:
             # Sources EMPLOYED_BY (Section 3.2) — employer_name/fein per employment
-            # record. Never registered before this round: Phase 1's case_intake
-            # only needed Address/Alias, not Employer, so this path was never
-            # added even though the endpoint itself isn't new or AppWorks-side
-            # missing — see etl/GAP_ANALYSIS.md.
-            return f"/entities/Subject/items/{id}/childEntities/Subject_Job"
+            # record. Use the actual AppWorks service path for the Job list
+            # endpoint filtered by subject.
+            return f"entityRestService/api/OSABSIACM/entities/Job/lists/AllJobs?Job_Subject$Identity.Id={id}"
 
         @staticmethod
         def wages(id: str) -> str:
@@ -76,15 +66,17 @@ class AppWorksPaths:
             # per the reference doc's own "(independent path, better coverage)"
             # note. See etl/GAP_ANALYSIS.md for the FEIN-matching caveat on
             # this specific endpoint.
-            return f"/entities/Subject/items/{id}/childEntities/Subject_SubjectWages"
+            return f"/entities/Subject/items/{id}/relationships/Subject_SubjectWages"
 
         @staticmethod
         def assets(id: str) -> str:
             # :Asset (Section 3.1) — "modeled but disabled in the reasoner".
-            # Path registered for completeness / future use; etl/graph_sync.py
-            # does not call it yet (see GAP_ANALYSIS.md, Section 3.2 has no
-            # defined Subject-to-Asset relationship type to write into).
-            return f"/entities/Subject/items/{id}/childEntities/Subject_Asset"
+            # Confirmed against the live AppWorks response: this is a
+            # 'relationships' endpoint, not 'childEntities'. Path registered
+            # for completeness / future use; etl/graph_sync.py does not call
+            # it yet (see GAP_ANALYSIS.md, Section 3.2 has no defined
+            # Subject-to-Asset relationship type to write into).
+            return f"/entities/Subject/items/{id}/relationships/Subject_Asset"
 
     class Allegations:
 
@@ -128,6 +120,17 @@ class AppWorksPaths:
         @staticmethod
         def by_workfolder(workfolder_id: str) -> str:
             return f"/entities/Subjects/lists/All_Subjects?Subjects_Workfolder$Identity.Id={workfolder_id}"
+
+        @staticmethod
+        def by_subject(subject_id: str) -> str:
+            # Same All_Subjects list endpoint as by_workfolder(), filtered the
+            # other direction: every Subjects row for this Subject detail id,
+            # across every case they're on. Each row embeds its own
+            # Subjects_Workfolder$Identity (the case id) and
+            # Subjects_IsPrimarySubject — replaces the old Subject.item() +
+            # workfolder_mappings() + workfolder_mapping_item() 3-call chase
+            # used to discover a subject's prior cases.
+            return f"/entities/Subjects/lists/All_Subjects?Subjects_Subject$Identity.Id={subject_id}"
 
     class AddressList:
         """

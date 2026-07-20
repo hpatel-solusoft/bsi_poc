@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional
 
 from appworks.appworks_auth import fetch
 from appworks.appworks_paths import AppWorksPaths as AW
-from appworks.appworks_utils import extract_id_from_href, get_relationship_items, safe_fetch
+from appworks.appworks_utils import embedded, extract_id_from_href, get_relationship_items, safe_fetch
 from etl import normalizers as N
 from reasoning_layer.neo4j_client import get_session
 
@@ -81,14 +81,12 @@ def _merge_target_case_ids(raw: Any) -> List[str]:
     return [part.strip() for part in text.split(",") if part.strip()]
 
 
-def _fetch_subject_addresses(subject_id: str, detail_links: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _fetch_subject_addresses(subject_id: str) -> List[Dict[str, Any]]:
     addresses: List[Dict[str, Any]] = []
-    href = detail_links.get("relationship:Subject_Address", {}).get("href") or AW.Subject.addresses(subject_id)
-    for item in get_relationship_items(href, "Subject_Address"):
-        self_href = item.get("_links", {}).get("self", {}).get("href", "")
-        props, links = safe_fetch(self_href, "Address") if self_href else (item.get("Properties", {}), {})
-        scz_href = links.get("relationship:Address_StateCityZip_Relation", {}).get("href", "")
-        scz_props, _ = safe_fetch(scz_href, "StateCityZip") if scz_href else ({}, {})
+    href = AW.AddressList.by_subject(subject_id)
+    for item in get_relationship_items(href, "Address_All"):
+        props = item.get("Properties", {})
+        scz_props = embedded(item, "Address_StateCityZip_Relation")
 
         street = N.clean_text(_first(props, "Address_Address", "Address_AddressLine1"))
         city = N.clean_text(scz_props.get("StateCityZip_City") or props.get("Address_City"))
@@ -120,9 +118,9 @@ def _fetch_subject_aliases(subject_id: str, detail_links: Dict[str, Any]) -> Lis
 
 
 def _fetch_subject_employers(subject_id: str) -> List[Dict[str, Any]]:
-    """EMPLOYED_BY source — the Job child entity."""
+    """EMPLOYED_BY source — the Job list endpoint filtered by subject."""
     employers: List[Dict[str, Any]] = []
-    for item in get_relationship_items(AW.Subject.jobs(subject_id), "Subject_Job"):
+    for item in get_relationship_items(AW.Subject.jobs(subject_id), "AllJobs"):
         props = item.get("Properties", item)
         name = N.clean_text(_first(props, "Job_EmployerName", "Job_Employer"))
         fein = N.normalize_fein(_first(props, "Job_FeinNumber", "Job_Fein"))
@@ -347,7 +345,7 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
                     role_props.get("RoleName") or subj_props.get("Subjects_SubjectType")
                 ),
                 "is_primary": N.to_bool(subj_props.get("Subjects_IsPrimarySubject")),
-                "addresses": _fetch_subject_addresses(subject_id, detail_links),
+                "addresses": _fetch_subject_addresses(subject_id),
                 "aliases": _fetch_subject_aliases(subject_id, detail_links),
                 "employers": _fetch_subject_employers(subject_id),
                 "wages": _fetch_subject_wages(subject_id),

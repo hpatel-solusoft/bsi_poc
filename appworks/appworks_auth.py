@@ -109,6 +109,17 @@ def _build_url(endpoint: str) -> str:
     # Detect which namespace the endpoint belongs to
     endpoint_ns = clean.split("/")[0]
 
+    if clean.startswith("entityRestService/api/"):
+        # Endpoint already includes the raw AppWorks REST service prefix.
+        # Rebuild it relative to the app root so we don't duplicate namespaces.
+        app_root = rest_base
+        for suffix in (f"/entityRestService/api/{primary_ns}",
+                       f"/entityRestService/api",
+                       f"/entityRestService"):
+            if app_root.endswith(suffix):
+                app_root = app_root[: -len(suffix)]
+                break
+        return f"{app_root}/{clean}"
     if endpoint_ns == primary_ns:
         # Strip leading namespace, append to REST_URL
         path_after_ns = clean[len(primary_ns):].lstrip("/")
@@ -156,6 +167,15 @@ def _build_list_url(endpoint: str) -> str:
 
     # endpoint may or may not be prefixed with the namespace
     endpoint_ns = clean.split("/")[0]
+    if clean.startswith("entityRestService/api/"):
+        app_root = rest_base
+        for suffix in (f"/entityRestService/api/{primary_ns}",
+                       f"/entityRestService/api",
+                       f"/entityRestService"):
+            if app_root.endswith(suffix):
+                app_root = app_root[: -len(suffix)]
+                break
+        return f"{app_root}/{clean}"
     if endpoint_ns == primary_ns:
         path_after_ns = clean[len(primary_ns):].lstrip("/")
         return f"{list_base}/{path_after_ns}"

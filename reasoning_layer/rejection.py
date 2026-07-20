@@ -153,14 +153,20 @@ MATCH (a:Subject {{subject_id: $subject_id_a}})
       -[r:{rel_type}]-
       (b:Subject {{subject_id: $subject_id_b}})
 WHERE r.source_rule = $rule_id AND r.status = "active"
-SET r.status = "rejected"
+SET r.status = "rejected",
+    r.rejection_reason = $reason,
+    r.rejected_by = $investigator_id,
+    r.rejected_at = $rejected_at
 RETURN elementId(r) AS target_id
 """
 
 _LOCATE_AND_REJECT_SUBJECT_CASE_EDGE = """
 MATCH (a:Subject {{subject_id: $subject_id_a}})-[r:{rel_type}]->(c:Case {{case_id: $case_id}})
 WHERE r.source_rule = $rule_id AND r.status = "active"
-SET r.status = "rejected"
+SET r.status = "rejected",
+    r.rejection_reason = $reason,
+    r.rejected_by = $investigator_id,
+    r.rejected_at = $rejected_at
 RETURN elementId(r) AS target_id
 """
 
@@ -172,9 +178,14 @@ MATCH (a:Subject {subject_id: $subject_id_a})-[ra:MEMBER_OF_FRAUD_NETWORK]->(n:F
 WHERE ra.source_rule = $rule_id AND ra.status = "active"
 OPTIONAL MATCH (b:Subject {subject_id: $subject_id_b})-[rb:MEMBER_OF_FRAUD_NETWORK]->(n)
 WHERE $subject_id_b IS NOT NULL AND rb.source_rule = $rule_id AND rb.status = "active"
-SET ra.status = "rejected"
+SET ra.status = "rejected",
+    ra.rejection_reason = $reason,
+    ra.rejected_by = $investigator_id,
+    ra.rejected_at = $rejected_at
 WITH n, ra, rb
-FOREACH (_ IN CASE WHEN rb IS NOT NULL THEN [1] ELSE [] END | SET rb.status = "rejected")
+FOREACH (_ IN CASE WHEN rb IS NOT NULL THEN [1] ELSE [] END |
+    SET rb.status = "rejected", rb.rejection_reason = $reason,
+        rb.rejected_by = $investigator_id, rb.rejected_at = $rejected_at)
 RETURN elementId(ra) AS target_id, n.network_type AS network_type, n.network_key AS network_key
 """
 
@@ -183,6 +194,7 @@ MATCH (a:Subject {subject_id: $subject_id_a})
 WHERE a.cross_case_source_rule = $rule_id AND a.is_cross_case = true
 SET a.is_cross_case = false,
     a.cross_case_rejected = true,
+    a.cross_case_rejection_reason = $reason,
     a.cross_case_rejected_by = $investigator_id,
     a.cross_case_rejected_at = $rejected_at
 RETURN elementId(a) AS target_id
@@ -199,7 +211,10 @@ _LOCATE_AND_REJECT_CASE_FLAG: Dict[str, str] = {
         WHERE c.risk_escalation_source_rule = $rule_id
           AND c.risk_escalation_status = "active"
           AND c.risk_escalation_subject_id = $subject_id_a
-        SET c.risk_escalation_status = "rejected"
+        SET c.risk_escalation_status = "rejected",
+            c.risk_escalation_rejection_reason = $reason,
+            c.risk_escalation_rejected_by = $investigator_id,
+            c.risk_escalation_rejected_at = $rejected_at
         RETURN elementId(c) AS target_id
     """,
     "Rule_13_FastTrack_Escalation": """
@@ -221,7 +236,10 @@ _LOCATE_AND_REJECT_ALLEGATION_FLAG = """
 MATCH (c:Case {case_id: $case_id})-[:HAS_ALLEGATION]->(al:Allegation)
       -[:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject {subject_id: $subject_id_a})
 WHERE al.wage_corroboration_rule = $rule_id AND al.wage_corroboration_status = "active"
-SET al.wage_corroboration_status = "rejected"
+SET al.wage_corroboration_status = "rejected",
+    al.wage_corroboration_rejection_reason = $reason,
+    al.wage_corroboration_rejected_by = $investigator_id,
+    al.wage_corroboration_rejected_at = $rejected_at
 RETURN elementId(al) AS target_id, al.allegation_id AS allegation_id
 """
 
@@ -242,10 +260,11 @@ RETURN elementId(rej) AS rejection_id, rej.rejected_at AS rejected_at, rej.rejec
 
 
 def _reject_symmetric_edge(session, rule_id: str, spec: _RuleSpec, subject_id_a: str,
-                            subject_id_b: str, **_: Any) -> Optional[Dict[str, str]]:
+                            subject_id_b: str, investigator_id: str, rejected_at: str,
+                            reason: Optional[str] = None, **_: Any) -> Optional[Dict[str, str]]:
     query = _LOCATE_AND_REJECT_SYMMETRIC_EDGE.format(rel_type=spec.relationship_type)
     record = session.run(query, subject_id_a=subject_id_a, subject_id_b=subject_id_b,
-                          rule_id=rule_id).single()
+                          rule_id=rule_id, reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,).single()
     if record is None:
         return None
     from_key, to_key = sorted([subject_id_a, subject_id_b])
@@ -253,19 +272,24 @@ def _reject_symmetric_edge(session, rule_id: str, spec: _RuleSpec, subject_id_a:
 
 
 def _reject_subject_case_edge(session, rule_id: str, spec: _RuleSpec, subject_id_a: str,
-                               case_id: str, **_: Any) -> Optional[Dict[str, str]]:
+                               case_id: str, investigator_id: str, rejected_at: str,
+                               reason: Optional[str] = None, **_: Any) -> Optional[Dict[str, str]]:
     query = _LOCATE_AND_REJECT_SUBJECT_CASE_EDGE.format(rel_type=spec.relationship_type)
-    record = session.run(query, subject_id_a=subject_id_a, case_id=case_id, rule_id=rule_id).single()
+    record = session.run(query, subject_id_a=subject_id_a, case_id=case_id, rule_id=rule_id,
+                          reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,).single()
     if record is None:
         return None
     return {"from_key": subject_id_a, "to_key": case_id}
 
 
 def _reject_network_edge(session, rule_id: str, subject_id_a: str,
-                          subject_id_b: Optional[str], **_: Any) -> Optional[Dict[str, str]]:
+                          subject_id_b: Optional[str], investigator_id: str = "",
+                          rejected_at: str = "", reason: Optional[str] = None,
+                          **_: Any) -> Optional[Dict[str, str]]:
     record = session.run(
         _LOCATE_AND_REJECT_NETWORK_EDGE,
         subject_id_a=subject_id_a, subject_id_b=subject_id_b, rule_id=rule_id,
+        reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
     ).single()
     if record is None:
         return None
@@ -276,11 +300,12 @@ def _reject_network_edge(session, rule_id: str, subject_id_a: str,
 
 
 def _reject_subject_flag(session, rule_id: str, subject_id_a: str, investigator_id: str,
-                          rejected_at: str, **_: Any) -> Optional[Dict[str, str]]:
+                          rejected_at: str, reason: Optional[str] = None,
+                          **_: Any) -> Optional[Dict[str, str]]:
     record = session.run(
         _LOCATE_AND_REJECT_SUBJECT_FLAG,
         subject_id_a=subject_id_a, rule_id=rule_id,
-        investigator_id=investigator_id, rejected_at=rejected_at,
+        investigator_id=investigator_id, rejected_at=rejected_at, reason=reason,
     ).single()
     if record is None:
         return None
@@ -290,9 +315,11 @@ def _reject_subject_flag(session, rule_id: str, subject_id_a: str, investigator_
 
 
 def _reject_case_flag(session, rule_id: str, subject_id_a: str,
-                       case_id: str, **_: Any) -> Optional[Dict[str, str]]:
+                       case_id: str, investigator_id: str, rejected_at: str,
+                       reason: Optional[str] = None, **_: Any) -> Optional[Dict[str, str]]:
     query = _LOCATE_AND_REJECT_CASE_FLAG[rule_id]
-    record = session.run(query, case_id=case_id, rule_id=rule_id, subject_id_a=subject_id_a).single()
+    record = session.run(query, case_id=case_id, rule_id=rule_id, subject_id_a=subject_id_a,
+                          reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,).single()
     if record is None:
         return None
     if rule_id == "Rule_13_FastTrack_Escalation":
@@ -301,17 +328,23 @@ def _reject_case_flag(session, rule_id: str, subject_id_a: str,
         # is trusted from the request here rather than re-verified against
         # a stored value that does not exist to check against.
         session.run(
-            "MATCH (c:Case {case_id: $case_id}) SET c.fasttrack_recommendation_status = 'rejected'",
-            case_id=case_id,
+            "MATCH (c:Case {case_id: $case_id}) "
+            "SET c.fasttrack_recommendation_status = 'rejected', "
+            "    c.fasttrack_recommendation_rejection_reason = $reason, "
+            "    c.fasttrack_recommendation_rejected_by = $investigator_id, "
+            "    c.fasttrack_recommendation_rejected_at = $rejected_at",
+            case_id=case_id, reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
         )
     return {"from_key": subject_id_a, "to_key": case_id}
 
 
 def _reject_allegation_flag(session, rule_id: str, subject_id_a: str,
-                             case_id: str, **_: Any) -> Optional[Dict[str, str]]:
+                             case_id: str, investigator_id: str, rejected_at: str,
+                             reason: Optional[str] = None, **_: Any) -> Optional[Dict[str, str]]:
     record = session.run(
         _LOCATE_AND_REJECT_ALLEGATION_FLAG,
         case_id=case_id, subject_id_a=subject_id_a, rule_id=rule_id,
+        reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
     ).single()
     if record is None:
         return None
@@ -430,6 +463,7 @@ def reject_inference(
             session=session, rule_id=rule_id, spec=spec,
             subject_id_a=subject_id_a, subject_id_b=subject_id_b,
             case_id=case_id, investigator_id=investigator_id, rejected_at=rejected_at,
+            reason=reason,
         )
         if keys is None:
             logger.info(
@@ -468,3 +502,235 @@ def reject_inference(
         "rule_id": rule_id,
     }
     return _envelope(result)
+
+# ---------------------------------------------------------------------------
+# REVERT — undo a rejection (Case Summary "Revert" action)
+# ---------------------------------------------------------------------------
+# The exact inverse of the reject write above, and deliberately built from
+# the same _RULE_SPECS table so the two can never disagree about where a
+# given rule's state lives.
+#
+# Revert CLEARS rather than sets a "reverted" marker: leaving
+# status="reverted" behind would mean every rule file's own
+# NOT EXISTS { MATCH (:Rejection ...) } guard, and every "status = active"
+# filter in rules_fired.py, would still treat the fact as suppressed. The
+# investigator's intent is "let this inference stand again", and only
+# restoring status to "active" — and deleting the :Rejection node — actually
+# does that. The audit record of the rejection lives in the application log
+# and the provenance trail, not in a tombstone that keeps suppressing.
+_REVERT_SYMMETRIC_EDGE = """
+MATCH (a:Subject {{subject_id: $subject_id_a}})
+      -[r:{rel_type}]-
+      (b:Subject {{subject_id: $subject_id_b}})
+WHERE r.source_rule = $rule_id AND r.status = "rejected"
+SET r.status = "active"
+REMOVE r.rejection_reason, r.rejected_by, r.rejected_at
+RETURN elementId(r) AS target_id
+"""
+
+_REVERT_SUBJECT_CASE_EDGE = """
+MATCH (a:Subject {{subject_id: $subject_id_a}})-[r:{rel_type}]->(c:Case {{case_id: $case_id}})
+WHERE r.source_rule = $rule_id AND r.status = "rejected"
+SET r.status = "active"
+REMOVE r.rejection_reason, r.rejected_by, r.rejected_at
+RETURN elementId(r) AS target_id
+"""
+
+_REVERT_NETWORK_EDGE = """
+MATCH (a:Subject {subject_id: $subject_id_a})-[ra:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
+WHERE ra.source_rule = $rule_id AND ra.status = "rejected"
+OPTIONAL MATCH (b:Subject {subject_id: $subject_id_b})-[rb:MEMBER_OF_FRAUD_NETWORK]->(n)
+WHERE $subject_id_b IS NOT NULL AND rb.source_rule = $rule_id AND rb.status = "rejected"
+SET ra.status = "active"
+REMOVE ra.rejection_reason, ra.rejected_by, ra.rejected_at
+WITH n, ra, rb
+FOREACH (_ IN CASE WHEN rb IS NOT NULL THEN [1] ELSE [] END |
+    SET rb.status = "active"
+    REMOVE rb.rejection_reason, rb.rejected_by, rb.rejected_at)
+RETURN elementId(ra) AS target_id, n.network_type AS network_type, n.network_key AS network_key
+"""
+
+_REVERT_SUBJECT_FLAG = """
+MATCH (a:Subject {subject_id: $subject_id_a})
+WHERE a.cross_case_source_rule = $rule_id AND a.cross_case_rejected = true
+SET a.is_cross_case = true
+REMOVE a.cross_case_rejected, a.cross_case_rejection_reason,
+       a.cross_case_rejected_by, a.cross_case_rejected_at
+RETURN elementId(a) AS target_id
+"""
+
+_REVERT_CASE_FLAG: Dict[str, str] = {
+    "Rule_08_Recidivist_Escalation": """
+        MATCH (c:Case {case_id: $case_id})
+        WHERE c.risk_escalation_source_rule = $rule_id
+          AND c.risk_escalation_status = "rejected"
+        SET c.risk_escalation_status = "active"
+        REMOVE c.risk_escalation_rejection_reason, c.risk_escalation_rejected_by,
+               c.risk_escalation_rejected_at
+        RETURN elementId(c) AS target_id
+    """,
+    "Rule_13_FastTrack_Escalation": """
+        MATCH (c:Case {case_id: $case_id})
+        WHERE c.fasttrack_recommendation_rule = $rule_id
+          AND c.fasttrack_recommendation_status = "rejected"
+        SET c.fasttrack_recommendation_status = "active"
+        REMOVE c.fasttrack_recommendation_rejection_reason,
+               c.fasttrack_recommendation_rejected_by,
+               c.fasttrack_recommendation_rejected_at
+        RETURN elementId(c) AS target_id
+    """,
+}
+
+_REVERT_ALLEGATION_FLAG = """
+MATCH (c:Case {case_id: $case_id})-[:HAS_ALLEGATION]->(al:Allegation)
+      -[:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject {subject_id: $subject_id_a})
+WHERE al.wage_corroboration_rule = $rule_id AND al.wage_corroboration_status = "rejected"
+SET al.wage_corroboration_status = "active"
+REMOVE al.wage_corroboration_rejection_reason, al.wage_corroboration_rejected_by,
+       al.wage_corroboration_rejected_at
+RETURN elementId(al) AS target_id, al.allegation_id AS allegation_id
+"""
+
+# Deleting the :Rejection node is what actually lets the rule fire again on
+# the next pipeline run — every rule file guards on its absence.
+_DELETE_REJECTION = """
+MATCH (rej:Rejection {relationship_type: $relationship_type,
+                      from_key: $from_key, to_key: $to_key})
+WHERE rej.rule_id = $rule_id AND rej.case_id = $case_id
+DELETE rej
+RETURN count(*) AS deleted
+"""
+
+
+def revert_rejection(
+    case_id: str,
+    rule_id: str,
+    subject_id_a: str,
+    relationship_type: Optional[str] = None,
+    subject_id_b: Optional[str] = None,
+    investigator_id: str = "",
+) -> dict:
+    """
+    Undo a rejection: restore the suppressed fact to active, clear its
+    rejection reason and audit fields, and delete the :Rejection guard node.
+
+    Mirrors reject_inference's contract exactly, so the UI's Revert button
+    can post back the same identifiers the Reject button sent.
+
+    Raises:
+        ValueError: on missing required identifiers, an unknown rule_id, or
+            a relationship_type that contradicts the rule.
+        InferenceNotFoundError: nothing REJECTED matches — either it was
+            never rejected, or it has already been reverted. Mapped to 404
+            by the route: the request was understood, the fact just is not
+            in the state this operation applies to.
+    """
+    if not case_id or not str(case_id).strip():
+        raise ValueError("revert_rejection requires a non-empty case_id")
+    if not rule_id or not str(rule_id).strip():
+        raise ValueError("revert_rejection requires a non-empty rule_id")
+    if not subject_id_a or not str(subject_id_a).strip():
+        raise ValueError("revert_rejection requires a non-empty subject_id_a")
+
+    case_id, rule_id = str(case_id).strip(), str(rule_id).strip()
+    subject_id_a = str(subject_id_a).strip()
+    subject_id_b = str(subject_id_b).strip() if subject_id_b else None
+
+    spec = _RULE_SPECS.get(rule_id)
+    if spec is None:
+        raise ValueError(f"Unknown rule_id '{rule_id}' — cannot revert its rejection")
+    if relationship_type and relationship_type != spec.relationship_type:
+        raise RelationshipTypeMismatchError(
+            f"relationship_type '{relationship_type}' does not match "
+            f"'{spec.relationship_type}' for {rule_id}"
+        )
+    if spec.requires_subject_b and not subject_id_b:
+        raise ValueError(f"{rule_id} requires subject_id_b to identify the rejected fact")
+
+    with get_session() as session:
+        if spec.family == _FAMILY_SYMMETRIC_EDGE:
+            record = session.run(
+                _REVERT_SYMMETRIC_EDGE.format(rel_type=spec.relationship_type),
+                subject_id_a=subject_id_a, subject_id_b=subject_id_b, rule_id=rule_id,
+            ).single()
+            keys = None if record is None else dict(
+                zip(("from_key", "to_key"), sorted([subject_id_a, subject_id_b]))
+            )
+        elif spec.family == _FAMILY_SUBJECT_CASE_EDGE:
+            record = session.run(
+                _REVERT_SUBJECT_CASE_EDGE.format(rel_type=spec.relationship_type),
+                subject_id_a=subject_id_a, case_id=case_id, rule_id=rule_id,
+            ).single()
+            keys = None if record is None else {"from_key": subject_id_a, "to_key": case_id}
+        elif spec.family == _FAMILY_NETWORK_EDGE:
+            record = session.run(
+                _REVERT_NETWORK_EDGE,
+                subject_id_a=subject_id_a, subject_id_b=subject_id_b, rule_id=rule_id,
+            ).single()
+            keys = None if record is None else {
+                "from_key": subject_id_a,
+                "to_key": f'{record["network_type"]}:{record["network_key"]}',
+            }
+        elif spec.family == _FAMILY_SUBJECT_FLAG:
+            record = session.run(
+                _REVERT_SUBJECT_FLAG, subject_id_a=subject_id_a, rule_id=rule_id,
+            ).single()
+            keys = None if record is None else {"from_key": subject_id_a, "to_key": subject_id_a}
+        elif spec.family == _FAMILY_CASE_FLAG:
+            record = session.run(
+                _REVERT_CASE_FLAG[rule_id], case_id=case_id, rule_id=rule_id,
+            ).single()
+            keys = None if record is None else {"from_key": subject_id_a, "to_key": case_id}
+        elif spec.family == _FAMILY_ALLEGATION_FLAG:
+            record = session.run(
+                _REVERT_ALLEGATION_FLAG,
+                case_id=case_id, subject_id_a=subject_id_a, rule_id=rule_id,
+            ).single()
+            keys = None if record is None else {
+                "from_key": subject_id_a, "to_key": record["allegation_id"],
+            }
+        else:  # pragma: no cover — _RULE_SPECS and the families are edited together
+            raise ValueError(f"Unhandled rule family '{spec.family}' for {rule_id}")
+
+        if keys is None:
+            logger.info(
+                "revert_rejection: NOT FOUND case_id=%s subject_id_a=%s rule_id=%s "
+                "— no rejected fact to revert", case_id, subject_id_a, rule_id,
+            )
+            raise InferenceNotFoundError(
+                f"No rejected {spec.relationship_type} fact found for {rule_id} "
+                f"on case {case_id} — it may have been reverted already"
+            )
+
+        deleted = session.run(
+            _DELETE_REJECTION,
+            relationship_type=spec.relationship_type,
+            from_key=keys["from_key"], to_key=keys["to_key"],
+            rule_id=rule_id, case_id=case_id,
+        ).single()
+
+    logger.info(
+        "revert_rejection: case_id=%s rule_id=%s subject_id_a=%s subject_id_b=%s "
+        "relationship_type=%s rejection_node_deleted=%s by=%s",
+        case_id, rule_id, subject_id_a, subject_id_b, spec.relationship_type,
+        bool(deleted and deleted["deleted"]), investigator_id or "(unattributed)",
+    )
+
+    return {
+        "result": {
+            "reverted": True,
+            "case_id": case_id,
+            "rule_id": rule_id,
+            "subject_id_a": subject_id_a,
+            "subject_id_b": subject_id_b,
+            "relationship_type": spec.relationship_type,
+            "status": "active",
+            "rejection_reason": None,
+            "reverted_by": investigator_id or None,
+            "reverted_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "provenance": graph_provenance(
+            "reasoning_layer.rejection.revert_rejection",
+            ["Neo4j write — rejection cleared"],
+        ),
+    }
