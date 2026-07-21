@@ -66,7 +66,8 @@ def _load_cypher(rule_id: str) -> str:
         path = RULE_FILES[rule_id]
         if not path.exists():
             raise FileNotFoundError(f"Rule file missing for {rule_id}: {path}")
-        _cypher_cache[rule_id] = path.read_text()
+        _cypher_cache[rule_id] = path.read_text(encoding="utf-8")
+        print(_cypher_cache[rule_id])
     return _cypher_cache[rule_id]
 
 
@@ -122,12 +123,15 @@ def execute_rules(rule_ids: List[str], scope: Dict[str, Any],
                 "asserted_at": asserted_at,
                 **entry.get("params", {}),
             }
-
+            print(f"rule_engine: {rule_id} params={params}")
             started = datetime.now(timezone.utc)
             try:
                 record = session.execute_write(
                     lambda tx, q=_load_cypher(rule_id), p=params: tx.run(q, **p).single()
                 )
+                print(lambda tx, q=_load_cypher(rule_id), p=params: tx.run(q, **p).single())
+                print(record)
+                
             except Neo4jError:
                 logger.exception("rule_engine: %s FAILED", rule_id)
                 raise

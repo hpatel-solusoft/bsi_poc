@@ -268,6 +268,71 @@ def subjects_for_case(case_id: str) -> List[str]:
     return [r["subject_id"] for r in rows if r.get("subject_id")]
 
 
+def _reasoning_population_for_case(case_id: str, direct_subject_ids: List[str]) -> List[str]:
+    """
+    The full set of subjects that must each get their own pipeline run so
+    Wave 2's cross-endpoint rules (2, 4, 6, 8, 9) have BOTH sides'
+    ALLEGATION_LIKELY_AGAINST_SUBJECT attribution edges available — not
+    just `direct_subject_ids` (who is literally on this Workfolder).
+
+    subjects_for_case() answers "who APPEARS_IN_CASE here". That is NOT
+    the same question Rules 2/4/6/8/9 ask. Those rules match pairs across
+    SHARES_EMPLOYER_WITH / SHARES_ADDRESS_WITH / SHARES_ALIAS_PATTERN_WITH
+    / IS_CO_SUBJECT_WITH, and scope.py's whole reason for existing is that
+    such a pair is frequently NOT both on the same Workfolder — a
+    co-subject can be pulled in one hop out via a shared employer even
+    though their own allegations sit on a different case entirely.
+
+    Wave 1/Wave 2 rule MATCHes already see that co-subject correctly,
+    because rule_engine.py filters on scope_subject_ids, which scope.py
+    expands one hop out. But the Extraction Stage — the step that writes
+    ALLEGATION_LIKELY_AGAINST_SUBJECT — only ever ran for `direct_subject_ids`
+    up to this point. The out-of-case party's own allegation never got an
+    attribution edge, so any rule requiring BOTH endpoints attributed
+    (Rule 2, 4, 6, 9) silently produced writes=0 forever, no matter how
+    many times /intake ran — and Rule 8, which depends on Rule 2/4/6/9's
+    output, starved right along with it.
+
+    Concretely: an /intake of case 658407433 alone could never make
+    Rule 2 fire for Smith + Nunes, because Nunes's own case (658423814)
+    was never reasoned, so Nunes never got his own attribution edge.
+
+    Fix: resolve one-hop scope for every direct subject (reusing
+    scope.py's own query — no new graph traversal logic here) and union
+    the result into the reasoning population. Deliberately NOT recursive:
+    it takes exactly the one hop scope.py already documents as the line
+    Section 5.2 draws, so this cannot turn into the full-graph scan
+    scope.py itself warns against. A subject pulled in this way is
+    reasoned under the CURRENT case_id (Principle 10's
+    pipeline_execution_state key is (case_id, subject_id), so this does
+    not collide with — or replace — that subject's own run under their
+    real case; both can exist independently), and Rule 13's
+    primary-subject scoping is unaffected since it keys off the subject
+    actually passed to run_pipeline, not off is_primary in this case's
+    Workfolder.
+    """
+    population: List[str] = list(direct_subject_ids)
+    seen = set(direct_subject_ids)
+    for subject_id in direct_subject_ids:
+        # A scope failure must not silently shrink the population back to
+        # "direct subjects only" and then report rules_fired as if it were
+        # complete — surface it exactly like run_pipeline itself would.
+        scope = scope_resolver.resolve_scope(case_id, subject_id)
+        for sid in scope.get("scope_subject_ids", []):
+            if sid and sid not in seen:
+                seen.add(sid)
+                population.append(sid)
+    if len(population) > len(direct_subject_ids):
+        logger.info(
+            "run_pipeline_for_case: case_id=%s expanded reasoning population from "
+            "%d direct subject(s) to %d via one-hop scope (co-subject/employer/"
+            "address/alias) — extra: %s",
+            case_id, len(direct_subject_ids), len(population),
+            sorted(seen - set(direct_subject_ids)),
+        )
+    return population
+
+
 def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """
     Fold per-subject rules_fired blocks into ONE case-level block.
@@ -338,14 +403,21 @@ def run_pipeline_for_case(case_id: str, force: bool = False,
         raise ValueError("run_pipeline_for_case requires a non-empty case_id")
     case_id = str(case_id).strip()
 
-    subject_ids = subjects_for_case(case_id)
-    if not subject_ids:
+    direct_subject_ids = subjects_for_case(case_id)
+    if not direct_subject_ids:
         return _envelope(
             result={"pipeline_status": "no_subjects", "case_id": case_id,
                     "subjects_run": [], "subject_count": 0, "rules_fired": []},
             sources=["Neo4j graph query"],
             computed_by="reasoning_layer.pipeline.run_pipeline_for_case",
         )
+
+    # Reason every subject one hop out (co-subject/employer/address/alias),
+    # not just the subjects literally on this Workfolder — see
+    # _reasoning_population_for_case's docstring. Without this, Rules
+    # 2/4/6/9 (and Rule 8, which depends on them) can never fire for a
+    # co-subject whose own allegations sit on a different case.
+    subject_ids = _reasoning_population_for_case(case_id, direct_subject_ids)
 
     blocks: List[List[Dict[str, Any]]] = []
     ran: List[Dict[str, Any]] = []
@@ -369,13 +441,15 @@ def run_pipeline_for_case(case_id: str, force: bool = False,
     merged = _merge_rules_fired(blocks)
     fired = sum(1 for e in merged if e.get("fired"))
     logger.info(
-        "run_pipeline_for_case: case_id=%s subjects=%d rules_fired=%d/%d",
-        case_id, len(subject_ids), fired, len(merged),
+        "run_pipeline_for_case: case_id=%s direct_subjects=%d reasoned_subjects=%d "
+        "rules_fired=%d/%d",
+        case_id, len(direct_subject_ids), len(subject_ids), fired, len(merged),
     )
     return _envelope(
         result={
             "pipeline_status": "completed",
             "case_id": case_id,
+            "direct_subject_count": len(direct_subject_ids),
             "subjects_run": ran,
             "subject_count": len(subject_ids),
             "rules_fired": merged,

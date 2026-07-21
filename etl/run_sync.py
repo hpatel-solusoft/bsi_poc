@@ -51,7 +51,7 @@ def _case_ids_from_args(args) -> List[str]:
         if not path.exists():
             print(f"File not found: {path}")
             sys.exit(1)
-        case_ids += [line.strip() for line in path.read_text().splitlines()
+        case_ids += [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
                      if line.strip() and not line.startswith("#")]
     # De-duplicate while preserving order: ingesting the same case twice in
     # one batch is harmless (every write is a MERGE) but wastes an entire

@@ -55,7 +55,7 @@ def ensure_table() -> None:
         logger.warning("graph_ingest_state: migration file not found at %s", _MIGRATION_FILE)
         return
     try:
-        ddl = _MIGRATION_FILE.read_text()
+        ddl = _MIGRATION_FILE.read_text(encoding="utf-8")
         with get_cursor(dict_cursor=False) as cur:
             cur.execute(ddl)
         logger.info("graph_ingest_state: table ensured (migration 006 applied if missing)")

@@ -36,7 +36,7 @@ _SCHEMA_FILE = Path(__file__).parent / "schema.cypher"
 def _statements() -> List[str]:
     """Neo4j executes one statement per call — split the file, strip
     comments and blanks, keep the order."""
-    raw = _SCHEMA_FILE.read_text()
+    raw = _SCHEMA_FILE.read_text(encoding="utf-8")
     lines = [line for line in raw.splitlines() if not line.strip().startswith("//")]
     return [stmt.strip() for stmt in "\n".join(lines).split(";") if stmt.strip()]
 

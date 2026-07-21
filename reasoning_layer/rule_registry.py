@@ -15,9 +15,18 @@ Two-layer model, unchanged by the move to YAML:
   3. Rule LIVE   config -> Neo4j, as :InferenceRule nodes.
 
 The YAML defaults SEED the Neo4j nodes ON CREATE only. Once a node exists,
-this module never overwrites its params — an operator's tuning survives
-every deploy. So: edit rules.yaml to change what a fresh environment
-starts with; edit the Neo4j node to change a running one.
+this module never overwrites its params for a rule with no config_version
+in YAML — an operator's tuning on those rules survives every deploy.
+
+A rule that DOES declare a config_version opts into the versioned params
+sync instead: bumping that number in YAML is how a genuine bug fix to a
+rule's default params reaches a running environment without a manual
+Neo4j edit, while still never clobbering a live node that is already
+caught up to that version (see _SYNC_VERSIONED_PARAMS_QUERY below for the
+exact guard). So: edit rules.yaml to change what a fresh environment
+starts with; bump config_version + edit rules.yaml to ship a real fix to
+a running one; edit the Neo4j node directly only for a one-off operator
+tune that should NOT ship to other environments via Git.
 
 Does NOT own: rule execution (rule_engine.py) or rule logic (*.cypher).
 """
@@ -59,7 +68,7 @@ def _load_config() -> Dict[str, Any]:
     silently loses a rule is far worse than a boot error, because the rule
     just stops firing in production with no signal."""
     config_file = _resolve_config_file()
-    config = yaml.safe_load(config_file.read_text())
+    config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     if not isinstance(config, dict) or "waves" not in config or "rules" not in config:
         raise ValueError(f"{config_file} must define top-level 'waves' and 'rules'")
 
@@ -105,6 +114,17 @@ _DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
 _RULE_NAMES: Dict[str, str] = {
     rid: defn.get("name", rid) for rid, defn in _RULE_DEFS.items()
 }
+# Opt-in only: a rule with no config_version key in YAML is not a
+# candidate for the versioned sync below, so its behavior is completely
+# unchanged from before this feature existed (seeded ON CREATE, then left
+# alone forever). Only rules that explicitly declare a config_version
+# participate — see the sync note above Rule_07 in rules.yaml for the
+# reasoning.
+_CONFIG_VERSIONS: Dict[str, int] = {
+    rid: int(defn["config_version"])
+    for rid, defn in _RULE_DEFS.items()
+    if "config_version" in defn
+}
 
 
 def get_rule_names() -> Dict[str, str]:
@@ -143,10 +163,50 @@ MATCH (r:InferenceRule)
 RETURN r.rule_id AS rule_id, r.enabled AS enabled, properties(r) AS props
 """
 
+# Versioned params sync (opt-in via config_version — see rules.yaml).
+#
+# This is the actual fix for the gap the ON-CREATE-only seed query leaves:
+# there was previously no way to ship a genuine bug fix to a rule's default
+# params (as opposed to an operator's live retuning) without a manual
+# Cypher edit against every environment, by hand, forever. That is not
+# something a deploy should depend on.
+#
+# The guard is params_config_version, not a value comparison against the
+# YAML defaults — comparing values would be unable to tell "an operator
+# deliberately tuned this away from default" apart from "this predates the
+# fix and needs it", and those two cases must be handled oppositely. A
+# monotonic version stamp makes that distinction explicit instead of
+# guessed at: r.params_config_version IS NULL catches every node seeded
+# before this feature existed (all of them, right now); r.params_config_version
+# < rule.config_version catches a node already synced to an OLDER fix that
+# needs a NEWER one. Either way, once synced, the node is stamped with the
+# new version, so the same fix is never silently re-applied and an
+# operator's *subsequent* tuning (done after that sync) is not clobbered by
+# a re-run of ensure_registry() with the same YAML.
+#
+# A rule with no config_version in YAML never appears in $versioned_rules
+# (see _CONFIG_VERSIONS above) and this query touches nothing for it — the
+# ON-CREATE-only behavior for every other rule is completely unchanged.
+_SYNC_VERSIONED_PARAMS_QUERY = """
+UNWIND $versioned_rules AS rule
+MATCH (r:InferenceRule {rule_id: rule.rule_id})
+WHERE r.params_config_version IS NULL
+   OR r.params_config_version < rule.config_version
+WITH r, rule, r.params_config_version AS previous_version
+SET r += rule.params,
+    r.params_config_version = rule.config_version,
+    r.params_synced_at      = datetime(),
+    r.params_synced_reason  = "config_version_sync"
+RETURN r.rule_id AS rule_id, previous_version AS previous_version,
+       rule.config_version AS new_version
+"""
+
 
 def ensure_registry() -> int:
-    """Seed any missing :InferenceRule node from the YAML defaults.
-    Idempotent — safe on every startup and every pipeline run."""
+    """Seed any missing :InferenceRule node from the YAML defaults, then
+    apply any pending versioned params sync (see _SYNC_VERSIONED_PARAMS_QUERY
+    above). Idempotent — safe on every startup and every pipeline run.
+    """
     rules = [
         {
             "rule_id": rule_id,
@@ -161,6 +221,27 @@ def ensure_registry() -> int:
         record = session.run(_SEED_QUERY, rules=rules).single()
     count = int(record["n"]) if record else 0
     logger.info("rule_registry: %d :InferenceRule nodes present (seeded from rules config)", count)
+
+    if _CONFIG_VERSIONS:
+        versioned_rules = [
+            {
+                "rule_id": rule_id,
+                "config_version": version,
+                "params": _DEFAULT_PARAMS.get(rule_id, {}),
+            }
+            for rule_id, version in _CONFIG_VERSIONS.items()
+        ]
+        with get_session() as session:
+            synced = session.run(_SYNC_VERSIONED_PARAMS_QUERY, versioned_rules=versioned_rules).data()
+        for row in synced:
+            logger.info(
+                "rule_registry: synced params for %s (params_config_version %s -> %s)",
+                row["rule_id"], row["previous_version"], row["new_version"],
+            )
+        if not synced:
+            logger.debug("rule_registry: versioned params already up to date for %s",
+                         list(_CONFIG_VERSIONS.keys()))
+
     return count
 
 
@@ -193,7 +274,8 @@ def load_registry() -> Dict[str, Dict[str, Any]]:
     registry: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         props = dict(row["props"])
-        for meta in ("rule_id", "rule_name", "wave", "enabled", "created_at"):
+        for meta in ("rule_id", "rule_name", "wave", "enabled", "created_at",
+                     "params_config_version", "params_synced_at", "params_synced_reason"):
             props.pop(meta, None)
         registry[row["rule_id"]] = {
             "enabled": row["enabled"] if row["enabled"] is not None else True,

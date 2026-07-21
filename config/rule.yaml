@@ -159,9 +159,23 @@ rules:
     description: "The subject has a prior case closed with a guilty disposition."
     wave: 2
     enabled: true
+    # Bumped 2025-07-21: added the al.status fallback for case closure and
+    # the "close" vocabulary term (config_version 1 -> 2). A rule with an
+    # explicit config_version opts into the versioned-params sync in
+    # rule_registry.py: on the next ensure_registry() call, any live
+    # InferenceRule node stamped with a lower params_config_version (or
+    # none at all, i.e. every node seeded before this feature existed)
+    # gets its params refreshed to these defaults automatically. Rules
+    # WITHOUT a config_version key keep today's exact behavior: seeded
+    # ON CREATE only, and a running node's params are never touched again
+    # (this is deliberate -- see fasttrack_fraud_threshold on Rule_13,
+    # which is a real live override at 45000 vs this file's 50000 default,
+    # and must never be silently reverted by an unrelated deploy).
+    config_version: 2
     params:
       closed_case_statuses:
         - closed
+        - close
         - completed
         - adjudicated
       guilty_outcome_values:
@@ -177,11 +191,16 @@ rules:
     wave: 2
     enabled: true
     params:
-      active_case_statuses:
-        - open
-        - active
-        - under investigation
-        - pending
+      # Rule 8 derives "active" by EXCLUSION from this list rather than
+      # enumerating active statuses. An allowlist silently suppressed the
+      # rule for any AppWorks status it did not anticipate; excluding
+      # closed statuses means an unrecognised value escalates visibly
+      # instead. Keep in step with Rule_07_Prior_Guilty.closed_case_statuses.
+      closed_case_statuses:
+        - closed
+        - close
+        - completed
+        - adjudicated
 
   Rule_09_PCA_CheckSplit:
     name: "PCA Check-Split Network Detection"
@@ -212,7 +231,7 @@ rules:
       # Reference doc Section 6.1: "Case fraud amount above threshold (default
       # $50,000)". The word "default" is exactly why this is a parameter and
       # not a literal in the Cypher.
-      fasttrack_fraud_threshold: 50000.0
+      fasttrack_fraud_threshold: 45000.0
 
   # ---- Cross-cutting modifier (wave 0 = not a wave member) ----
   Rule_14_Confirmation_Elevation:
