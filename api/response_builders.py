@@ -264,6 +264,33 @@ def resolve_plan_agent_summary(
 
 
 
+def fired_rules_only(rules_fired: Optional[List[dict]]) -> List[dict]:
+    """
+    Drop the rules that did not fire, for the API response only.
+
+    The pipeline deliberately builds and stores the FULL fixed block of 14
+    entries: reasoning_layer.pipeline._merge_rules_fired folds per-subject
+    blocks together BY POSITION, so a filtered block would misalign rule
+    ids across subjects, and a rule that ran and matched nothing is a
+    different audit fact from a rule that never ran at all
+    (skipped_reason). Both of those need the complete block.
+
+    What the investigator reads is a different question. Twelve entries
+    saying fired: false are noise on a screen whose job is to show what the
+    graph actually found, so the trim happens HERE, at the response
+    boundary, and nowhere earlier. CASE_STORE, the merge, rule-aware task
+    generation and the rule audit trail all keep the full block.
+
+    Entries that are not dicts are dropped rather than passed through: a
+    malformed entry cannot be shown to have fired, and forwarding it would
+    push the problem into the UI.
+    """
+    return [
+        entry for entry in (rules_fired or [])
+        if isinstance(entry, dict) and entry.get("fired")
+    ]
+
+
 def build_confidence_summary(rules_fired: Optional[List[dict]]) -> Dict[str, int]:
     """Tally the rules_fired block (Functional Spec A.4 — rule_id, fired,
     confidence, corroborated per entry) into a {high, medium, unresolved}

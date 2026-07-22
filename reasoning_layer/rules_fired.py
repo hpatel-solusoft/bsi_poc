@@ -97,85 +97,130 @@ _REL_RULES: Dict[str, str] = {
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_02_Employer_Fraud_Network" AND r.status = "active"
+        // Collapse to ONE row per network, even when several scope subjects
+        // are members of it (the normal case — Rule 2 always writes BOTH
+        // endpoints). The rendered inference line lists every member by
+        // name and does not vary by which scope subject anchored the
+        // match, so matching per-`a` produced the identical line once per
+        // scope member (e.g. twice when both subjects on the case belong
+        // to the same network) instead of once per network.
+        WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
+        WITH n, head(scope_members) AS a,
+             reduce(best = "Unresolved", rel IN scope_rels |
+                 CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
+                      WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
+                      ELSE best END) AS confidence,
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") = "active"
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, r, n, m, head(collect({complaint_no: mc.complaint_number,
-                                       allegation_type: mal.allegation_type})) AS mctx
-        WITH a, r, n, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, m,
+             head(collect({complaint_no: mc.complaint_number,
+                           allegation_type: mal.allegation_type})) AS mctx
+        WITH a, n, confidence, corroborated, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
-               r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               confidence AS confidence, corroborated AS corroborated,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
-        ORDER BY subject_id, related_network_key
+        ORDER BY related_network_key
 """,
     "Rule_04_Address_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_04_Address_Fraud_Network" AND r.status = "active"
+        // Collapse to ONE row per network — see Rule_02's comment above for
+        // why matching per scope-subject `a` produced duplicate lines.
+        WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
+        WITH n, head(scope_members) AS a,
+             reduce(best = "Unresolved", rel IN scope_rels |
+                 CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
+                      WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
+                      ELSE best END) AS confidence,
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") = "active"
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, r, n, m, head(collect({complaint_no: mc.complaint_number,
-                                       allegation_type: mal.allegation_type})) AS mctx
-        WITH a, r, n, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, m,
+             head(collect({complaint_no: mc.complaint_number,
+                           allegation_type: mal.allegation_type})) AS mctx
+        WITH a, n, confidence, corroborated, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
-               r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               confidence AS confidence, corroborated AS corroborated,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
-        ORDER BY subject_id, related_network_key
+        ORDER BY related_network_key
 """,
     "Rule_06_Identity_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_06_Identity_Fraud_Network" AND r.status = "active"
+        // Collapse to ONE row per network — see Rule_02's comment above for
+        // why matching per scope-subject `a` produced duplicate lines.
+        WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
+        WITH n, head(scope_members) AS a,
+             reduce(best = "Unresolved", rel IN scope_rels |
+                 CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
+                      WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
+                      ELSE best END) AS confidence,
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") = "active"
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, r, n, m, head(collect({complaint_no: mc.complaint_number,
-                                       allegation_type: mal.allegation_type})) AS mctx
-        WITH a, r, n, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, m,
+             head(collect({complaint_no: mc.complaint_number,
+                           allegation_type: mal.allegation_type})) AS mctx
+        WITH a, n, confidence, corroborated, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
-               r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               confidence AS confidence, corroborated AS corroborated,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
-        ORDER BY subject_id, related_network_key
+        ORDER BY related_network_key
 """,
     "Rule_09_PCA_CheckSplit": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.source_rule = "Rule_09_PCA_CheckSplit" AND r.status = "active"
+        // Collapse to ONE row per network — see Rule_02's comment above for
+        // why matching per scope-subject `a` produced duplicate lines.
+        WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
+        WITH n, head(scope_members) AS a,
+             reduce(best = "Unresolved", rel IN scope_rels |
+                 CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
+                      WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
+                      ELSE best END) AS confidence,
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") = "active"
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, r, n, m, head(collect({complaint_no: mc.complaint_number,
-                                       allegation_type: mal.allegation_type})) AS mctx
-        WITH a, r, n, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, m,
+             head(collect({complaint_no: mc.complaint_number,
+                           allegation_type: mal.allegation_type})) AS mctx
+        WITH a, n, confidence, corroborated, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
-               r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               confidence AS confidence, corroborated AS corroborated,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
-        ORDER BY subject_id, related_network_key
+        ORDER BY related_network_key
 """,
     "Rule_07_Prior_Guilty": """
         MATCH (a:Subject)-[r:HAS_PRIOR_GUILTY_CASE]->(c:Case)

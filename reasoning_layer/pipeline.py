@@ -346,6 +346,20 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
     corroborated is true if any instance was corroborated — the same
     optimistic roll-up _summarise applies within a subject, for the same
     reason: the detail survives in `instances`.
+
+    FRAUD-NETWORK INSTANCES (Rule 2/4/6/9) are keyed on `related_network_key`
+    alone, not the full instance. rules_fired.py already collapses each of
+    those rules to one row per network within a single run_pipeline call —
+    but run_pipeline_for_case calls run_pipeline once per subject, and each
+    call independently picks its own arbitrary anchor subject
+    (subject_id/subject_name) for that same network. Two per-subject runs
+    of the identical network therefore differ only in which subject got
+    picked as anchor, which the generic full-instance key does not
+    recognise as a duplicate — subject_id there is incidental, not part of
+    the network's identity, so keying on it produced the same inference
+    line twice. Non-network rules (e.g. Rule 1's directed subject-to-subject
+    pairs) still use the full-instance key, since for those subject_id is
+    the actual identity of a distinct, directional instance.
     """
     if not blocks:
         return []
@@ -357,10 +371,14 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
         seen = set()
         for block in blocks:
             for instance in block[index].get("instances", []):
-                key = tuple(sorted(
-                    (k, str(v)) for k, v in instance.items()
-                    if k not in ("confidence", "corroborated")
-                ))
+                network_key = instance.get("related_network_key")
+                if network_key is not None:
+                    key = ("related_network_key", str(network_key))
+                else:
+                    key = tuple(sorted(
+                        (k, str(v)) for k, v in instance.items()
+                        if k not in ("confidence", "corroborated")
+                    ))
                 if key in seen:
                     continue
                 seen.add(key)

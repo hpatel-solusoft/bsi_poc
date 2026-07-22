@@ -25,6 +25,10 @@ from core.case_store import (
     persist_case_session,
     get_case_ai_summary_cache_updated_at,
     get_cached_investigation_steps,
+    try_resolve_case_data,
+    get_cached_route_summary,
+    merge_agent_summary_cache,
+    AGENT_SUMMARY_CACHE_KEY,
 )
 from core.agent_audit_repository import log_agent_call
 from core.investigation_plan_override_repository import (
@@ -86,6 +90,7 @@ from api.response_builders import (
     render_markdown_html,
     resolve_plan_agent_summary,
     build_confidence_summary,
+    fired_rules_only,
 )
 from api.message_utils import (
     build_ai_summary,
@@ -282,23 +287,30 @@ def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> t
 # -----------------------------------------------------------------------
 # reload_ai_summary
 #
-# This flag governs ONE thing only: whether reasoning_layer/pipeline.py's
-# run_pipeline (invoked via reasoning_layer/context_enrichment.py's
-# enrich_graph_context, called from /intake and /copilot) is allowed to
-# skip re-running when it has already completed for a (case_id,
-# subject_id) — Principle 10 in pipeline.py.
-#   False (default) — the pipeline keeps its own existing skip-if-already-
-#                      run behavior; unchanged either way.
-#   True             — force the pipeline to re-run even though it already
-#                       completed (bypasses the Principle 10 skip for this
-#                       call only).
+# This flag now governs TWO things:
 #
-# It does NOT gate whether a route's agent/tools run. Every ON-DEMAND
-# route (/intake, /similar_cases, /risk_assessment, /plan) always runs
-# its agent/tools and returns a fresh result when called — that behavior
-# is unchanged from before this flag existed, regardless of whether
-# reload_ai_summary is true or false, and regardless of whether the
-# section already ran.
+# 1. Agent-summary caching (core.case_store.AGENT_SUMMARY_CACHE_KEY).
+#    /intake, /similar_cases, /risk_assessment, and /plan each check
+#    core.case_store.get_cached_route_summary(case_id, route) FIRST:
+#      False (default) — on a cache hit, the route returns the persisted
+#                         agent_summary markdown from case_ai_summary_store
+#                         / warm CASE_STORE WITHOUT calling the LLM again.
+#                         On a miss (never run for this case_id, or an
+#                         older cache with no entry for this route), the
+#                         route runs its agent normally and caches the
+#                         result for next time.
+#      True             — skip the cache lookup unconditionally, always
+#                          call the LLM, and overwrite this route's cache
+#                          entry with the fresh result.
+#
+# 2. reasoning_layer/pipeline.py's run_pipeline (invoked via
+#    reasoning_layer/context_enrichment.py's enrich_graph_context, called
+#    from /intake and /copilot) — Principle 10 in pipeline.py.
+#      False (default) — the pipeline keeps its own existing skip-if-
+#                         already-run behavior; unchanged either way.
+#      True             — force the pipeline to re-run even though it
+#                          already completed (bypasses the Principle 10
+#                          skip for this call only).
 # -----------------------------------------------------------------------
 
 
@@ -399,6 +411,52 @@ def intake(req: intakeRequest):
     """
     start = time.time()
     try:
+        # Agent-summary cache (reload_ai_summary=False, default): if
+        # intake has already produced and persisted an agent_summary for
+        # this case_id, answer from case_ai_summary_store / warm CASE_STORE
+        # WITHOUT calling the LLM again. reload_ai_summary=True always
+        # bypasses this lookup and falls through to a fresh agent run below.
+        if not req.reload_ai_summary:
+            cached = get_cached_route_summary(req.case_id, "intake")
+            if cached is not None:
+                cached_case_data, cached_summary = cached
+                CASE_STORE[req.case_id] = cached_case_data
+                duration_seconds = round(time.time() - start, 1)
+                logger.info(
+                    "intake CACHE HIT for case_id=%s — answering from "
+                    "case_ai_summary_store, no LLM call made", req.case_id,
+                )
+                log_agent_call(
+                    case_id=req.case_id,
+                    agent_name="intake",
+                    endpoint="/intake",
+                    latency_ms=int(duration_seconds * 1000),
+                    status="success",
+                )
+                return {
+                    "case_id": req.case_id,
+                    "status": "completed",
+                    "details": {
+                        "agent_summary": render_markdown_html_with_sources(
+                            cached_summary, cached_case_data.get("provenance_trail", []),
+                        ),
+                        "graph_findings": {
+                            "network_match_flag": cached_case_data.get("network_match_flag"),
+                            "graph_context":      cached_case_data.get("graph_context"),
+                            "graph_signals":      cached_case_data.get("graph_signals"),
+                            "rules_fired":        fired_rules_only(cached_case_data.get("rules_fired")),
+                            "confidence_summary": build_confidence_summary(cached_case_data.get("rules_fired")),
+                        },
+                        "meta": {
+                            "tool_calls_made":      0,
+                            "duration_seconds":     duration_seconds,
+                            "pipeline_status":      "cached",
+                            "reload_ai_summary":    req.reload_ai_summary,
+                            "agent_summary_source": "db_cache",
+                        },
+                    },
+                }
+
         if not os.getenv("OPENAI_API_KEY"):
             raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
 
@@ -420,6 +478,15 @@ def intake(req: intakeRequest):
         # complaint_intelligence by extract_tool_results above.
         sections, provenance_trail = run_intake_direct_pipeline(
             req.case_id, req.reload_ai_summary, sections, provenance_trail,
+        )
+
+        # Cache this run's agent_summary markdown (carrying forward any
+        # other route's already-cached entry for this case_id) so the next
+        # /intake call with reload_ai_summary=False can skip the LLM.
+        assistant_text = extract_agent_summary(messages)
+        existing_case_data = try_resolve_case_data(req.case_id) or {}
+        sections[AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
+            existing_case_data, "intake", assistant_text,
         )
 
         # CS-4: populate warm in-memory store with all sections + provenance.
@@ -450,7 +517,7 @@ def intake(req: intakeRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), provenance_trail),
+                "agent_summary": render_markdown_html_with_sources(assistant_text, provenance_trail),
                 # Graph reasoning results (AI-12 network_match_flag, AI-13
                 # graph_context/graph_signals/rules_fired) previously only
                 # reached ai_summary.investigation — computed after the LLM's
@@ -462,14 +529,18 @@ def intake(req: intakeRequest):
                     "network_match_flag": sections.get("network_match_flag"),
                     "graph_context":      sections.get("graph_context"),
                     "graph_signals":      sections.get("graph_signals"),
-                    "rules_fired":        sections.get("rules_fired"),
+                    # Fired rules only. build_confidence_summary still
+                    # receives the FULL block: it counts by confidence and
+                    # already skips non-fired entries itself.
+                    "rules_fired":        fired_rules_only(sections.get("rules_fired")),
                     "confidence_summary": build_confidence_summary(sections.get("rules_fired")),
                 },
                 "meta": {
-                    "tool_calls_made":  len(provenance_trail),
-                    "duration_seconds": duration_seconds,
-                    "pipeline_status": "reloaded" if req.reload_ai_summary else "ran",
-                    "reload_ai_summary": req.reload_ai_summary,
+                    "tool_calls_made":      len(provenance_trail),
+                    "duration_seconds":     duration_seconds,
+                    "pipeline_status":      "reloaded" if req.reload_ai_summary else "ran",
+                    "reload_ai_summary":    req.reload_ai_summary,
+                    "agent_summary_source": "llm",
                 },
             },
         }
@@ -509,6 +580,44 @@ def similar_cases(req: SimilarCasesRequest):
             "case_id=%s data_source=%s key_count=%d",
             req.case_id, data_source, len(list(case_data.keys())),
         )
+
+        # Agent-summary cache (reload_ai_summary=False, default): if
+        # similar_cases has already produced and persisted an
+        # agent_summary for this case_id, answer from it WITHOUT calling
+        # the LLM again. reload_ai_summary=True always bypasses this
+        # lookup and falls through to a fresh agent run below.
+        if not req.reload_ai_summary:
+            cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("similar_cases")
+            if cached_summary is not None and case_data.get("similar_cases") is not None:
+                duration_seconds = round(time.time() - start, 1)
+                logger.info(
+                    "similar_cases CACHE HIT for case_id=%s — answering from "
+                    "case_ai_summary_store, no LLM call made", req.case_id,
+                )
+                log_agent_call(
+                    case_id=req.case_id,
+                    agent_name="similar_cases",
+                    endpoint="/similar_cases",
+                    latency_ms=int(duration_seconds * 1000),
+                    status="success",
+                )
+                return {
+                    "case_id": req.case_id,
+                    "status": "completed",
+                    "details": {
+                        "agent_summary": render_markdown_html_with_sources(
+                            cached_summary, case_data.get("provenance_trail", []),
+                        ),
+                        "graph_findings": {
+                            "similar_cases": case_data.get("similar_cases"),
+                        },
+                        "meta": {
+                            "data_source":          data_source,
+                            "agent_summary_source": "db_cache",
+                        },
+                    },
+                }
+
         runner = _get_runner()
 
         # Direct structural-matching + LLM-explain pipeline work
@@ -530,6 +639,14 @@ def similar_cases(req: SimilarCasesRequest):
             {"similar_cases": similar_cases_data},
             merged_provenance,
         )
+        # Cache this run's agent_summary markdown (carrying forward any
+        # other route's already-cached entry for this case_id) inside
+        # ai_summary["investigation"], the same place every other
+        # investigation field lives, so it round-trips on the next fetch.
+        ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
+            case_data, "similar_cases", agent_summary,
+        )
+        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY]
         persist_case_session(req.case_id, ai_summary)
         log_agent_call(
             case_id=req.case_id,
@@ -556,7 +673,8 @@ def similar_cases(req: SimilarCasesRequest):
                     "similar_cases": similar_cases_data,
                 },
                 "meta": {
-                    "data_source": data_source,
+                    "data_source":          data_source,
+                    "agent_summary_source": "llm",
                 },
             },
         }
@@ -592,6 +710,49 @@ def risk_assessment(req: RiskAssessmentRequest):
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
+
+        # Agent-summary cache (reload_ai_summary=False, default): if
+        # risk_assessment has already produced and persisted an
+        # agent_summary for this case_id, answer from it WITHOUT calling
+        # the LLM again. reload_ai_summary=True always bypasses this
+        # lookup and falls through to a fresh agent run below.
+        if not req.reload_ai_summary:
+            cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("risk_assessment")
+            cached_risk_assessment = case_data.get("risk_assessment")
+            if cached_summary is not None and isinstance(cached_risk_assessment, dict) \
+                    and "risk_score" in cached_risk_assessment:
+                duration_seconds = round(time.time() - start, 1)
+                logger.info(
+                    "risk_assessment CACHE HIT for case_id=%s — answering from "
+                    "case_ai_summary_store, no LLM call made", req.case_id,
+                )
+                log_agent_call(
+                    case_id=req.case_id,
+                    agent_name="risk_assessment",
+                    endpoint="/risk_assessment",
+                    latency_ms=int(duration_seconds * 1000),
+                    status="success",
+                )
+                return {
+                    "case_id": req.case_id,
+                    "status": "completed",
+                    "details": {
+                        "agent_summary": render_markdown_html_with_sources(
+                            cached_summary, case_data.get("provenance_trail", []),
+                        ),
+                        "graph_findings": {
+                            "neo4j_signals":   cached_risk_assessment.get("neo4j_signals"),
+                            "base_risk_score": cached_risk_assessment.get("base_risk_score"),
+                            "base_risk_tier":  cached_risk_assessment.get("base_risk_tier"),
+                            "risk_score":      cached_risk_assessment.get("risk_score"),
+                            "risk_tier":       cached_risk_assessment.get("risk_tier"),
+                        },
+                        "meta": {
+                            "data_source":          data_source,
+                            "agent_summary_source": "db_cache",
+                        },
+                    },
+                }
 
         runner = _get_runner()
         
@@ -630,6 +791,15 @@ def risk_assessment(req: RiskAssessmentRequest):
             {"risk_assessment": risk_assessment},
             merged_provenance,
         )
+        # Cache this run's agent_summary markdown (carrying forward any
+        # other route's already-cached entry for this case_id) inside
+        # ai_summary["investigation"], the same place every other
+        # investigation field lives, so it round-trips on the next fetch.
+        assistant_text = extract_agent_summary(messages)
+        ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
+            case_data, "risk_assessment", assistant_text,
+        )
+        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY]
         persist_case_session(req.case_id, ai_summary)
         log_agent_call(
             case_id=req.case_id,
@@ -643,7 +813,7 @@ def risk_assessment(req: RiskAssessmentRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(extract_agent_summary(messages), merged_provenance),
+                "agent_summary": render_markdown_html_with_sources(assistant_text, merged_provenance),
                 # Neo4j graph risk signals (AI-15 —
                 # reasoning_layer.risk_signals.apply_graph_risk_signals):
                 # the four Section 8.4 signals plus the AppWorks base score
@@ -660,7 +830,8 @@ def risk_assessment(req: RiskAssessmentRequest):
                     "risk_tier":       risk_assessment.get("risk_tier"),
                 },
                 "meta": {
-                    "data_source": data_source,
+                    "data_source":          data_source,
+                    "agent_summary_source": "llm",
                 },
             },
         }
@@ -700,6 +871,60 @@ def plan(req: PlanRequest):
         # which always rewrites updated_at to now() — reading it late would
         # make every override look stale (Section E.5).
         cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
+
+        # Agent-summary cache (reload_ai_summary=False, default): if
+        # /plan has already produced and persisted an agent_summary for
+        # this case_id, answer from it WITHOUT calling the LLM again.
+        # reload_ai_summary=True always bypasses this lookup and falls
+        # through to a fresh agent run below. A human override (Section
+        # D.6) is still re-applied here every time, exactly as the
+        # non-cached path does, so a cache hit never serves a stale
+        # plan_source/modified_by/plan_stale.
+        if not req.reload_ai_summary:
+            cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("plan")
+            cached_plan = case_data.get("investigation_plan")
+            if cached_summary is not None and isinstance(cached_plan, dict):
+                override = get_override(req.case_id)
+                if override is not None:
+                    cached_plan = {**cached_plan, "investigation_steps": override["modified_steps"]}
+                    plan_source, modified_by, modified_on = "human_modified", override["modified_by"], override["modified_on"]
+                    plan_stale = compute_plan_staleness(cache_updated_at_before_call, modified_on)
+                else:
+                    plan_source, modified_by, modified_on, plan_stale = "ai_generated", None, None, False
+
+                duration_seconds = round(time.time() - start, 1)
+                logger.info(
+                    "plan CACHE HIT for case_id=%s — answering from "
+                    "case_ai_summary_store, no LLM call made", req.case_id,
+                )
+                log_agent_call(
+                    case_id=req.case_id,
+                    agent_name="investigation_plan",
+                    endpoint="/plan",
+                    latency_ms=int(duration_seconds * 1000),
+                    status="success",
+                )
+                return {
+                    "case_id": req.case_id,
+                    "status": "completed",
+                    "details": {
+                        "agent_summary": render_markdown_html_with_sources(
+                            cached_summary, case_data.get("provenance_trail", []),
+                        ),
+                        "graph_findings": {
+                            "rule_aware_tasks": cached_plan.get("rule_aware_tasks"),
+                            "rules_fired":      fired_rules_only(case_data.get("rules_fired")),
+                        },
+                        "meta": {
+                            "data_source":          data_source,
+                            "plan_source":          plan_source,
+                            "modified_by":          modified_by,
+                            "modified_on":          modified_on.isoformat() if modified_on else None,
+                            "plan_stale":           plan_stale,
+                            "agent_summary_source": "db_cache",
+                        },
+                    },
+                }
 
         execution_context = {"ai_summary": req.ai_summary}
         runner = _get_runner()
@@ -745,6 +970,19 @@ def plan(req: PlanRequest):
             {"investigation_plan": investigation_plan},
             merged_provenance,
         )
+        # Cache this run's RESOLVED agent_summary markdown (the same text
+        # rendered below — synthesized plan markdown when the plan has
+        # substance, LLM prose otherwise) so a cache hit next time serves
+        # exactly what this call would have returned. Carries forward any
+        # other route's already-cached entry for this case_id.
+        resolved_agent_summary = resolve_plan_agent_summary(
+            assistant_text, investigation_plan, req.case_id,
+            case_data, merged_provenance,
+        )
+        ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
+            case_data, "plan", resolved_agent_summary,
+        )
+        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY]
         persist_case_session(req.case_id, ai_summary)
         log_agent_call(
             case_id=req.case_id,
@@ -759,10 +997,7 @@ def plan(req: PlanRequest):
             "status": "completed",
             "details": {
                 "agent_summary": render_markdown_html_with_sources(
-                    resolve_plan_agent_summary(
-                        assistant_text, investigation_plan, req.case_id,
-                        case_data, merged_provenance,
-                    ),
+                    resolved_agent_summary,
                     merged_provenance,
                 ),
                 # Graph-derived plan output (AI-16 —
@@ -776,14 +1011,15 @@ def plan(req: PlanRequest):
                 # not a graph finding, and it already travels on the plan.
                 "graph_findings": {
                     "rule_aware_tasks": investigation_plan.get("rule_aware_tasks"),
-                    "rules_fired":      case_data.get("rules_fired"),
+                    "rules_fired":      fired_rules_only(case_data.get("rules_fired")),
                 },
                 "meta": {
-                    "data_source": data_source,
-                    "plan_source": plan_source,
-                    "modified_by": modified_by,
-                    "modified_on": modified_on.isoformat() if modified_on else None,
-                    "plan_stale": plan_stale,
+                    "data_source":          data_source,
+                    "plan_source":          plan_source,
+                    "modified_by":          modified_by,
+                    "modified_on":          modified_on.isoformat() if modified_on else None,
+                    "plan_stale":           plan_stale,
+                    "agent_summary_source": "llm",
                 },
             },
         }

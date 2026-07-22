@@ -67,7 +67,14 @@ WITH c1, collect(DISTINCT toLower(a1.allegation_type)) AS c1_types
 WHERE size(c1_types) > 0
 
 MATCH (c2:Case)-[:HAS_ALLEGATION]->(a2:Allegation)
-WHERE c2.case_id <> $case_id
+// toString on both sides: a bare `<>` between $case_id (always a str here —
+// find_structural_matches does str(case_id).strip()) and a c2.case_id
+// property stored as a different type (e.g. int) evaluates to null in
+// Cypher, which WHERE treats as false — so the row is NOT filtered and the
+// current case can leak into its own "similar cases" results. Comparing
+// as strings on both sides keeps the exclusion correct regardless of how
+// case_id is typed in the graph.
+WHERE toString(c2.case_id) <> toString($case_id)
   AND toLower(a2.allegation_type) IN c1_types
 WITH c1, c2, collect(DISTINCT a2.allegation_type) AS shared_types
 

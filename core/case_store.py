@@ -169,6 +169,63 @@ def try_resolve_case_data(case_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# -----------------------------------------------------------------------
+# agent_summary caching
+#
+# Every ON-DEMAND route that calls the LLM (intake, similar_cases,
+# risk_assessment, plan) persists the raw markdown text its agent turn
+# produced under this key, nested inside ai_summary["investigation"] (so
+# it round-trips through _case_data_from_session's flat case_data the
+# same as any other investigation field — it is deliberately NOT added
+# to config.settings.TOP_LEVEL_SECTIONS).
+#
+# reload_ai_summary=False (default): the route looks here FIRST and, on a
+# hit, returns the cached markdown without calling the LLM at all.
+# reload_ai_summary=True: the route skips this lookup and always calls
+# the LLM, then overwrites this route's entry with the fresh result.
+# -----------------------------------------------------------------------
+
+AGENT_SUMMARY_CACHE_KEY = "agent_summary_cache"
+
+
+def get_cached_route_summary(case_id: str, route: str) -> Optional[Tuple[Dict[str, Any], str]]:
+    """
+    Non-LLM cache lookup used by the reload_ai_summary skip check on
+    /intake, /similar_cases, /risk_assessment, and /plan.
+
+    Returns (case_data, cached_markdown) when `route` ("intake",
+    "similar_cases", "risk_assessment", or "plan") already has a
+    persisted agent_summary for case_id — warm CASE_STORE first, then
+    the PostgreSQL case_ai_summary_store fallback (same lookup order as
+    try_resolve_case_data).
+
+    Returns None on a clean miss: case_id has never run at all, or it
+    has run but this particular route's agent_summary was never cached
+    (e.g. it predates this cache, or was never reached) — either way the
+    caller falls through to running the agent normally.
+    """
+    case_data = try_resolve_case_data(case_id)
+    if case_data is None:
+        return None
+    cached_markdown = (case_data.get(AGENT_SUMMARY_CACHE_KEY) or {}).get(route)
+    if not cached_markdown:
+        return None
+    return case_data, cached_markdown
+
+
+def merge_agent_summary_cache(case_data: Dict[str, Any], route: str, markdown_text: str) -> Dict[str, str]:
+    """
+    Fold this route's freshly generated agent_summary markdown into the
+    case's agent_summary_cache dict, carrying forward every other
+    route's already-cached entry from `case_data` (the pre-call
+    resolution for this request) so persisting this route's result never
+    erases what another route already cached for this case_id.
+    """
+    cache = dict(case_data.get(AGENT_SUMMARY_CACHE_KEY) or {})
+    cache[route] = markdown_text
+    return cache
+
+
 def _case_data_from_session(cached_session: Dict[str, Any]) -> Dict[str, Any]:
     """Rebuild the flat CS-4 case_data shape from a persisted case_ai_summary_store row."""
     ai_summary = cached_session.get("ai_summary") or {}
