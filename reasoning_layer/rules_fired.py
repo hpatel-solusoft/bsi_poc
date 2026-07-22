@@ -429,6 +429,15 @@ def build_rules_fired(scope: Dict[str, Any],
                 "skipped_reason": execution.get("skipped_reason"),
             })
 
+    # Second pass: re-render every narrative with the whole block visible.
+    # Rule 8's line cites Rule 7's and Rule 2's findings by name and number,
+    # and Rule 1's closing clause depends on whether Rule 2 formed a network
+    # from that same pair — none of which exists while the block is still
+    # being assembled in rule-number order. rule_inference.render_block does
+    # that entirely in memory over rows already fetched: no extra queries, no
+    # change to any .cypher file, and rewording stays a one-file concern.
+    rule_inference.render_block(block)
+
     fired_count = sum(1 for entry in block if entry["fired"])
     logger.info(
         "rules_fired: case_id=%s subject_id=%s %d/%d rules fired",

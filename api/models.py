@@ -227,59 +227,20 @@ class GraphIngestRequest(BaseModel):
 class RevertRejectionRequest(BaseModel):
     """
     POST /revert_rejection — the Case Summary "Revert" button's HTTP
-    contract. Field names mirror RejectInferenceRequest exactly so the UI
-    can post back the identifiers it already holds on the rejected row,
-    with no translation and no second lookup.
-
-    There is no `reason` here on purpose: reverting restores the rule's
-    own finding, it does not assert a new one, so there is nothing for an
-    investigator to justify. investigator_id is still recorded, in the log
-    and the response, so the action stays attributable.
+    contract. Mirrors RejectInferenceRequest's contract: case_id +
+    rule_id + investigator_id + reason. Reverting is a bulk action, the
+    exact inverse of POST /reject_inference — it restores every
+    currently-rejected fact this rule produced for this case.
+    investigator_id and reason are required for the same audit-trail
+    reason they're required on /reject_inference: this overrules a
+    prior rejection decision, so who did it and why must be recorded.
     """
     case_id: str
-    subject_id_a: str
     rule_id: str
     investigator_id: str
-    relationship_type: Optional[str] = None
-    subject_id_b: Optional[str] = None
+    reason: str
 
-
-class RevertRejectionResponse(BaseModel):
-    """What the UI needs to flip the row back to its un-rejected state."""
-    reverted: bool
-    case_id: str
-    rule_id: str
-    subject_id_a: str
-    subject_id_b: Optional[str] = None
-    relationship_type: str
-    status: str
-    rejection_reason: Optional[str] = None
-    reverted_by: Optional[str] = None
-    reverted_at: Optional[str] = None
-    model_config = {"extra": "allow"}
-
-class RejectInferenceRequest(BaseModel):
-    """
-    POST /reject_inference — the Human-in-the-Loop "Reject" button's
-    HTTP contract (Functional Specification D2 Input Contract). Field
-    names deliberately match what fraud_network.py's edges[] and
-    rule_audit.py's inferred_relationships[] already return, so the UI
-    can build this request directly from whichever screen the
-    investigator clicked Reject on, with no field translation.
-    """
-    case_id: str
-    subject_id_a: str
-    rule_id: str
-    relationship_type: str
-    investigator_id: str
-    # Required for two-subject facts (Rules 1/3/5), optional for network
-    # membership (Rules 2/4/6/9 — omit to reject only subject_id_a's
-    # membership), and must be omitted for every other rule_id.
-    # reasoning_layer.rejection.reject_inference validates this per rule.
-    subject_id_b: Optional[str] = None
-    reason: Optional[str] = None
-
-    @field_validator("case_id", "subject_id_a", "rule_id", "relationship_type", "investigator_id")
+    @field_validator("case_id", "rule_id", "investigator_id", "reason")
     @classmethod
     def must_be_non_blank(cls, value: str) -> str:
         if not value or not value.strip():
@@ -287,14 +248,78 @@ class RejectInferenceRequest(BaseModel):
         return value
 
 
-class RejectInferenceResponse(BaseModel):
-    """Response for POST /reject_inference (D2 Output Contract)."""
-    accepted: bool
-    rejection_id: str
-    rejected_at: str
-    rejected_by: str
-    relationship_type: str
+class RevertedItem(BaseModel):
+    """One instance restored to active by a bulk revert."""
+    subject_id_a: Optional[str] = None
+    subject_id_b: Optional[str] = None
+
+
+class RevertRejectionResponse(BaseModel):
+    """What the UI needs to flip the rule's rows back to un-rejected."""
+    reverted: bool
+    case_id: str
     rule_id: str
+    relationship_type: str
+    investigator_id: str
+    reason: str
+    status: str
+    reverted_count: int
+    reverted_items: List[RevertedItem] = []
+    reverted_at: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+class RejectInferenceRequest(BaseModel):
+    """
+    POST /reject_inference — the Human-in-the-Loop "Reject" button's
+    HTTP contract (Functional Specification D2 Input Contract, v2).
+
+    v2 contract: exactly the four fields the frontend can actually
+    supply for a rule row — case_id, rule_id, reason, investigator_id —
+    all required. There is no subject_id_a/subject_id_b/relationship_type
+    here any more: the frontend has no reliable way to know the internal
+    subject pairing a rule matched on for a given case, so this endpoint
+    now rejects every currently-active fact rule_id produced within
+    case_id's reasoning scope in one bulk operation, rather than one
+    caller-identified edge. See reasoning_layer/rejection.py's module
+    docstring for the full per-rule-family breakdown of what "every
+    fact this rule produced" means.
+
+    reason is required (not optional) precisely because this is now a
+    bulk action — it is the only record of why a rule's entire output
+    for a case was overruled. investigator_id is required so the
+    :Rejection audit trail records who made that call — see
+    reasoning_layer/rejection.py's module docstring ATTRIBUTION NOTE.
+    """
+    case_id: str
+    rule_id: str
+    reason: str
+    investigator_id: str
+
+    @field_validator("case_id", "rule_id", "reason", "investigator_id")
+    @classmethod
+    def must_be_non_blank(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("must be a non-empty string.")
+        return value
+
+
+class RejectedItem(BaseModel):
+    """One instance rejected by a bulk reject_inference call."""
+    subject_id_a: Optional[str] = None
+    subject_id_b: Optional[str] = None
+
+
+class RejectInferenceResponse(BaseModel):
+    """Response for POST /reject_inference (D2 Output Contract, v2)."""
+    accepted: bool
+    case_id: str
+    rule_id: str
+    relationship_type: str
+    reason: str
+    investigator_id: str
+    rejected_count: int
+    rejected_items: List[RejectedItem] = []
+    rejected_at: str
 
 
 # -----------------------------------------------------------------------

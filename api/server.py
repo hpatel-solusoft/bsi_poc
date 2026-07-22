@@ -50,7 +50,6 @@ from reasoning_layer.rejection import (
     reject_inference,
     revert_rejection,
     InferenceNotFoundError,
-    RelationshipTypeMismatchError,
 )
 from reasoning_layer.fraud_network import get_fraud_network
 from reasoning_layer.rule_audit import get_rule_audit
@@ -1383,11 +1382,16 @@ def generate_report(req: ReportGenerationRequest):
 @app.post("/reject_inference", response_model=RejectInferenceResponse)
 def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceResponse:
     """
-    D2 — Inference Rejection Handler. An investigator clicks "Reject" on
-    an inferred fact shown in the Context Enrichment panel, the Fraud
-    Network screen (GET /fraud_network/{case_id}), or the Rule Audit
-    panel (GET /rule_audit/{case_id}), and the UI POSTs here with the
-    fields that entry already carries.
+    D2 — Inference Rejection Handler. An investigator reviews a rule's
+    findings on the Rule Audit panel (GET /rule_audit/{case_id}) or the
+    Fraud Network screen (GET /fraud_network/{case_id}) and clicks
+    "Reject" on that rule for this case; the UI POSTs case_id, rule_id,
+    reason, and investigator_id — the fields it can actually supply,
+    matching the contract in reasoning_layer/rejection.py.
+
+    This rejects every currently-active fact rule_id produced within
+    case_id's reasoning scope (bulk, not a single caller-identified
+    edge — see rejection.py's module docstring for why).
 
     No LLM involvement (D2 Boundaries). Does not touch CASE_STORE or
     investigation_plan_overrides — this is a Neo4j write only, handled
@@ -1397,12 +1401,9 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
     try:
         envelope = reject_inference(
             case_id=req.case_id,
-            subject_id_a=req.subject_id_a,
-            subject_id_b=req.subject_id_b,
             rule_id=req.rule_id,
-            relationship_type=req.relationship_type,
-            investigator_id=req.investigator_id,
             reason=req.reason,
+            investigator_id=req.investigator_id,
         )
         log_agent_call(
             case_id=req.case_id,
@@ -1414,7 +1415,7 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
         return RejectInferenceResponse(**envelope["result"])
     except InferenceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (ValueError, RelationshipTypeMismatchError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (GraphUnavailableError, Neo4jError) as exc:
         logger.exception("reject_inference FAILED for case_id=%s", req.case_id)
@@ -1433,26 +1434,25 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
 @app.post("/revert_rejection", response_model=RevertRejectionResponse)
 def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionResponse:
     """
-    Undo an inference rejection. The Revert button is shown ONLY on rows
-    the Case Summary graph-findings table already reports as rejected, so
-    this endpoint is the exact inverse of POST /reject_inference and takes
-    the same identifiers.
+    Undo an inference rejection. The Revert button is shown ONLY when the
+    Case Summary / Rule Audit view already reports a rule as rejected for
+    this case, so this endpoint is the exact inverse of POST
+    /reject_inference and takes the same fields: case_id, rule_id,
+    investigator_id, and reason.
 
-    Restores the suppressed fact to active, clears its rejection reason and
-    audit fields, and deletes the :Rejection guard node so the rule can
-    fire again on the next pipeline run. No LLM, no AppWorks, no
-    CASE_STORE write — a Neo4j write only, handled entirely by
-    reasoning_layer.rejection.revert_rejection.
+    Restores every fact this rule rejected for this case back to active,
+    clears its rejection reason and audit fields, and deletes the
+    :Rejection guard node so the rule can fire again on the next
+    pipeline run. No LLM, no AppWorks, no CASE_STORE write — a Neo4j
+    write only, handled entirely by reasoning_layer.rejection.revert_rejection.
     """
     start = time.time()
     try:
         envelope = revert_rejection(
             case_id=req.case_id,
-            subject_id_a=req.subject_id_a,
-            subject_id_b=req.subject_id_b,
             rule_id=req.rule_id,
-            relationship_type=req.relationship_type,
             investigator_id=req.investigator_id,
+            reason=req.reason,
         )
         log_agent_call(
             case_id=req.case_id,
@@ -1465,7 +1465,7 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
     except InferenceNotFoundError as exc:
         # Nothing rejected matches — already reverted, or never rejected.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (ValueError, RelationshipTypeMismatchError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (GraphUnavailableError, Neo4jError) as exc:
         logger.exception("revert_rejection FAILED for case_id=%s", req.case_id)
