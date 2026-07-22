@@ -411,11 +411,11 @@ def run_plan_pipeline(
     override = get_override(case_id)
     if override is not None:
         investigation_plan["investigation_steps"] = override["modified_steps"]
-        plan_source = "human_modified"
+        plan_source = "User Modified"
         modified_by = override["modified_by"]
         modified_on = override["modified_on"]
     else:
-        plan_source = "ai_generated"
+        plan_source = "AI Summerized"
         modified_by = None
         modified_on = None
 

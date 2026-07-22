@@ -219,8 +219,15 @@ rules:
     wave: 2
     enabled: true
     params:
+      # "slam" alone never matches: AppWorks spells this allegation type
+      # out in full ("Subject Living Above Means"), not as the acronym.
+      # The literal substring "slam" does not occur anywhere in that
+      # string, so this rule could never fire against real data — kept
+      # the acronym too in case some other AppWorks install (or a future
+      # coded value) does use it.
       slam_allegation_types:
         - slam
+        - living above means
 
   Rule_13_FastTrack_Escalation:
     name: "FastTrack Escalation Recommendation"

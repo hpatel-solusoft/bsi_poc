@@ -1071,7 +1071,7 @@ def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyIn
         return ModifyInvestigationStepsResponse(
             case_id=req.case_id,
             status="saved",
-            plan_source="human_modified",
+            plan_source="User Modified",
             modified_by=req.investigator_id,
             modified_on=modified_on,
         )
@@ -1102,7 +1102,7 @@ def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
     Investigator clicks "Revert to AI Plan" — deletes case_id's saved
     investigation_plan_overrides row. The next /plan or /copilot call
     for this case_id finds no override row and falls back to
-    plan_source: ai_generated.
+    plan_source: AI Summerized.
     """
     start = time.time()
     try:
@@ -1117,7 +1117,7 @@ def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
         return RevertToAiPlanResponse(
             case_id=req.case_id,
             status="reverted" if existed else "no_override_existed",
-            plan_source="ai_generated",
+            plan_source="AI Summerized",
         )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.exception(
@@ -1677,7 +1677,7 @@ def copilot(req: CopilotRequest):
             "conversation_history": conversation_history,
             "conversation_history_source": history_source,
             "reload_ai_summary": req.reload_ai_summary,
-            "plan_source": "human_modified" if override is not None else "ai_generated",
+            "plan_source": "User Modified" if override is not None else "AI Summerized",
             "plan_stale": plan_stale,
         }
     except HTTPException:
