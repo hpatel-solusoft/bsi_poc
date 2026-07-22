@@ -412,7 +412,17 @@ class InferenceContext:
             return
         self.fired_rules.add(rule_id)
         for instance in entry.get("instances") or []:
+            # Names are indexed from rejected instances too — a rejected
+            # finding still has to render the people in it, or the revert
+            # control sits next to an unreadable line.
             self._index_names(instance)
+            # Everything BELOW this point is cross-rule evidence: Rule 8
+            # citing Rule 7's prior-guilty finding, Rule 1 citing the network
+            # Rule 2 formed. A rejected finding must never become another
+            # rule's supporting clause — that would launder it back into a
+            # live narrative through the side door the investigator just shut.
+            if instance.get("status", "active") != "active":
+                continue
             if rule_id == "Rule_07_Prior_Guilty":
                 subject_id = instance.get("subject_id")
                 detail = instance.get("detail") or {}
@@ -857,6 +867,33 @@ def _elevation_narrative(instance: Dict[str, Any],
 # Entry points
 # ======================================================================
 
+def _rejection_clause(instance: Dict[str, Any]) -> Optional[str]:
+    """
+    The closing sentence on a rejected finding.
+
+    The FINDING text is deliberately left intact above it. An investigator
+    deciding whether to revert has to read what was rejected — a line that
+    said only "this was rejected" would make the revert control a blind
+    one. What changes is that the narrative now ends by stating the finding
+    is not in force, who withdrew it and why, and that it can be restored.
+    """
+    if instance.get("status") != "rejected":
+        return None
+    audit = instance.get("rejection") or {}
+    who = audit.get("rejected_by")
+    when = audit.get("rejected_at")
+    reason = audit.get("reason")
+
+    attribution = f" by {who}" if who else ""
+    timing = f" on {str(when)[:10]}" if when else ""
+    because = f' Reason given: "{reason}".' if reason else ""
+    return (
+        f"REJECTED{attribution}{timing} — this inference has been withdrawn by an "
+        f"investigator and is excluded from the case's active findings.{because} "
+        "It can be restored through the revert control."
+    )
+
+
 def build_inference(rule_id: str, instance: Dict[str, Any],
                     context: Optional[InferenceContext] = None) -> Optional[str]:
     """
@@ -885,7 +922,7 @@ def build_inference(rule_id: str, instance: Dict[str, Any],
 
     if not body:
         return None
-    return f"{rule_heading(rule_id)}: {body}"
+    return _join([f"{rule_heading(rule_id)}: {body}", _rejection_clause(instance)])
 
 
 def enrich_instance(rule_id: str, instance: Dict[str, Any],
@@ -949,7 +986,14 @@ def render_block(block: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # expanding the instances. First instance for a single match; a count
         # plus the first for several, so the summary never silently implies
         # there was only one.
-        rendered = [i["inference"] for i in instances if i.get("inference")]
+        # Prefer a LIVE finding for the collapsed summary line. A rule with
+        # one rejected and one active instance should summarise as the active
+        # one; leading with the rejected line would read, at a glance, as if
+        # the whole rule had been withdrawn.
+        rendered = [
+            i["inference"] for i in instances
+            if i.get("inference") and i.get("status", "active") == "active"
+        ] or [i["inference"] for i in instances if i.get("inference")]
         if not rendered:
             entry["inference_summary"] = None
         elif len(rendered) == 1:

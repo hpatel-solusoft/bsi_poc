@@ -46,20 +46,26 @@ _REL_RULES: Dict[str, str] = {
     "Rule_01_Shared_Employer": """
         MATCH (a:Subject)-[r:SHARES_EMPLOYER_WITH]-(b:Subject)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_01_Shared_Employer" AND r.status = "active"
+          AND r.source_rule = "Rule_01_Shared_Employer"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:EMPLOYED_BY]->(e:Employer)<-[:EMPLOYED_BY]-(b)
         WITH a, b, r, head(collect({name: e.name, fein: e.fein})) AS emp
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               coalesce(r.status, "active") AS status,
+               {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
+                reason: r.rejection_reason, reverted_by: r.reverted_by,
+                reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
                {employer_name: emp.name, fein: coalesce(emp.fein, r.fein)} AS detail
         ORDER BY subject_id, related_subject_id
 """,
     "Rule_03_Shared_Address": """
         MATCH (a:Subject)-[r:SHARES_ADDRESS_WITH]-(b:Subject)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_03_Shared_Address" AND r.status = "active"
+          AND r.source_rule = "Rule_03_Shared_Address"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:HAS_ADDRESS]->(addr:Address)<-[:HAS_ADDRESS]-(b)
         WITH a, b, r, head(collect({street: addr.street, city: addr.city,
                                     state: addr.state, zip: addr.zip,
@@ -68,6 +74,10 @@ _REL_RULES: Dict[str, str] = {
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               coalesce(r.status, "active") AS status,
+               {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
+                reason: r.rejection_reason, reverted_by: r.reverted_by,
+                reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
                {street: ad.street, city: ad.city, state: ad.state, zip: ad.zip,
                 address_key: coalesce(ad.address_key, r.address_key)} AS detail
         ORDER BY subject_id, related_subject_id
@@ -75,28 +85,39 @@ _REL_RULES: Dict[str, str] = {
     "Rule_05_Alias_Identity": """
         MATCH (a:Subject)-[r:SHARES_ALIAS_PATTERN_WITH]-(b:Subject)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_05_Alias_Identity" AND r.status = "active"
+          AND r.source_rule = "Rule_05_Alias_Identity"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               coalesce(r.status, "active") AS status,
+               {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
+                reason: r.rejection_reason, reverted_by: r.reverted_by,
+                reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
                {alias_pattern: coalesce(r.alias_pattern, r.match_basis)} AS detail
         ORDER BY subject_id, related_subject_id
 """,
     "Rule_10_Merged_Case_Propagation": """
         MATCH (a:Subject)-[r:APPEARS_IN_CASE]->(c:Case)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_10_Merged_Case_Propagation" AND r.status = "active"
+          AND r.source_rule = "Rule_10_Merged_Case_Propagation"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                c.case_id AS related_case_id,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
-               {complaint_no: c.complaint_number, status: c.status} AS detail
+               coalesce(r.status, "active") AS status,
+               {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
+                reason: r.rejection_reason, reverted_by: r.reverted_by,
+                reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
+               {complaint_no: c.complaint_number, case_status: c.status} AS detail
         ORDER BY subject_id, related_case_id
 """,
     "Rule_02_Employer_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_02_Employer_Fraud_Network" AND r.status = "active"
+          AND r.source_rule = "Rule_02_Employer_Fraud_Network"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network, even when several scope subjects
         // are members of it (the normal case — Rule 2 always writes BOTH
         // endpoints). The rendered inference line lists every member by
@@ -110,20 +131,39 @@ _REL_RULES: Dict[str, str] = {
                  CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
                       WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
                       ELSE best END) AS confidence,
-             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated,
+             // The network is live while ANY in-scope membership edge is
+             // still active. Rejection is a bulk case+rule operation so in
+             // practice they flip together, but deriving it rather than
+             // reading one edge means a partially-reverted network reads as
+             // active — which it is — instead of inheriting whichever edge
+             // the planner happened to put first.
+             CASE WHEN any(rel IN scope_rels
+                           WHERE coalesce(rel.status, "active") = "active")
+                  THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels
+                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                    reason: rel.rejection_reason, reverted_by: rel.reverted_by,
+                    reverted_at: rel.reverted_at, revert_reason: rel.revert_reason}]) AS rejection
+        // Rejected members are kept in the member list, carrying their own
+        // status. Dropping them emptied the list for a rejected network and
+        // left the investigator a revert button with no names next to it.
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
-        WHERE coalesce(mm.status, "active") = "active"
+        WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, m,
+        WITH a, n, confidence, corroborated, status, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
-                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
+                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
+                 status: coalesce(mm.status, "active")
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
+               status AS status, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -132,7 +172,8 @@ _REL_RULES: Dict[str, str] = {
     "Rule_04_Address_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_04_Address_Fraud_Network" AND r.status = "active"
+          AND r.source_rule = "Rule_04_Address_Fraud_Network"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network — see Rule_02's comment above for
         // why matching per scope-subject `a` produced duplicate lines.
         WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
@@ -141,20 +182,39 @@ _REL_RULES: Dict[str, str] = {
                  CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
                       WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
                       ELSE best END) AS confidence,
-             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated,
+             // The network is live while ANY in-scope membership edge is
+             // still active. Rejection is a bulk case+rule operation so in
+             // practice they flip together, but deriving it rather than
+             // reading one edge means a partially-reverted network reads as
+             // active — which it is — instead of inheriting whichever edge
+             // the planner happened to put first.
+             CASE WHEN any(rel IN scope_rels
+                           WHERE coalesce(rel.status, "active") = "active")
+                  THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels
+                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                    reason: rel.rejection_reason, reverted_by: rel.reverted_by,
+                    reverted_at: rel.reverted_at, revert_reason: rel.revert_reason}]) AS rejection
+        // Rejected members are kept in the member list, carrying their own
+        // status. Dropping them emptied the list for a rejected network and
+        // left the investigator a revert button with no names next to it.
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
-        WHERE coalesce(mm.status, "active") = "active"
+        WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, m,
+        WITH a, n, confidence, corroborated, status, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
-                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
+                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
+                 status: coalesce(mm.status, "active")
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
+               status AS status, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -163,7 +223,8 @@ _REL_RULES: Dict[str, str] = {
     "Rule_06_Identity_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_06_Identity_Fraud_Network" AND r.status = "active"
+          AND r.source_rule = "Rule_06_Identity_Fraud_Network"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network — see Rule_02's comment above for
         // why matching per scope-subject `a` produced duplicate lines.
         WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
@@ -172,20 +233,39 @@ _REL_RULES: Dict[str, str] = {
                  CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
                       WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
                       ELSE best END) AS confidence,
-             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated,
+             // The network is live while ANY in-scope membership edge is
+             // still active. Rejection is a bulk case+rule operation so in
+             // practice they flip together, but deriving it rather than
+             // reading one edge means a partially-reverted network reads as
+             // active — which it is — instead of inheriting whichever edge
+             // the planner happened to put first.
+             CASE WHEN any(rel IN scope_rels
+                           WHERE coalesce(rel.status, "active") = "active")
+                  THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels
+                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                    reason: rel.rejection_reason, reverted_by: rel.reverted_by,
+                    reverted_at: rel.reverted_at, revert_reason: rel.revert_reason}]) AS rejection
+        // Rejected members are kept in the member list, carrying their own
+        // status. Dropping them emptied the list for a rejected network and
+        // left the investigator a revert button with no names next to it.
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
-        WHERE coalesce(mm.status, "active") = "active"
+        WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, m,
+        WITH a, n, confidence, corroborated, status, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
-                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
+                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
+                 status: coalesce(mm.status, "active")
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
+               status AS status, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -194,7 +274,8 @@ _REL_RULES: Dict[str, str] = {
     "Rule_09_PCA_CheckSplit": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_09_PCA_CheckSplit" AND r.status = "active"
+          AND r.source_rule = "Rule_09_PCA_CheckSplit"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network — see Rule_02's comment above for
         // why matching per scope-subject `a` produced duplicate lines.
         WITH n, collect(DISTINCT a) AS scope_members, collect(r) AS scope_rels
@@ -203,20 +284,39 @@ _REL_RULES: Dict[str, str] = {
                  CASE WHEN best = "High" OR rel.confidence = "High" THEN "High"
                       WHEN best = "Medium" OR rel.confidence = "Medium" THEN "Medium"
                       ELSE best END) AS confidence,
-             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated
+             any(rel IN scope_rels WHERE rel.corroborated = true) AS corroborated,
+             // The network is live while ANY in-scope membership edge is
+             // still active. Rejection is a bulk case+rule operation so in
+             // practice they flip together, but deriving it rather than
+             // reading one edge means a partially-reverted network reads as
+             // active — which it is — instead of inheriting whichever edge
+             // the planner happened to put first.
+             CASE WHEN any(rel IN scope_rels
+                           WHERE coalesce(rel.status, "active") = "active")
+                  THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels
+                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                    reason: rel.rejection_reason, reverted_by: rel.reverted_by,
+                    reverted_at: rel.reverted_at, revert_reason: rel.revert_reason}]) AS rejection
+        // Rejected members are kept in the member list, carrying their own
+        // status. Dropping them emptied the list for a rejected network and
+        // left the investigator a revert button with no names next to it.
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
-        WHERE coalesce(mm.status, "active") = "active"
+        WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, m,
+        WITH a, n, confidence, corroborated, status, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
-                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type
+                 complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
+                 status: coalesce(mm.status, "active")
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
+               status AS status, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -225,10 +325,15 @@ _REL_RULES: Dict[str, str] = {
     "Rule_07_Prior_Guilty": """
         MATCH (a:Subject)-[r:HAS_PRIOR_GUILTY_CASE]->(c:Case)
         WHERE a.subject_id IN $scope_subject_ids
-          AND r.source_rule = "Rule_07_Prior_Guilty" AND r.status = "active"
+          AND r.source_rule = "Rule_07_Prior_Guilty"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                c.case_id AS related_case_id,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
+               coalesce(r.status, "active") AS status,
+               {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
+                reason: r.rejection_reason, reverted_by: r.reverted_by,
+                reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
                {complaint_no: c.complaint_number, outcome: r.outcome,
                 date_closed: r.date_closed} AS detail
         ORDER BY subject_id, related_case_id
@@ -237,11 +342,15 @@ _REL_RULES: Dict[str, str] = {
         MATCH (a:Subject)-[r]-(other)
         WHERE a.subject_id IN $scope_subject_ids
           AND r.corroborated_by = "Rule_14_Confirmation_Elevation"
-          AND r.status = "active"
+          AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                other.subject_id AS related_subject_id,
                other.first_name AS related_first_name, other.last_name AS related_last_name,
                "High" AS confidence, true AS corroborated,
+               coalesce(r.status, "active") AS status,
+               {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
+                reason: r.rejection_reason, reverted_by: r.reverted_by,
+                reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
                {confirmed_relationship: type(r),
                 related_case_id: other.case_id,
                 related_network_key: other.network_key} AS detail
@@ -258,9 +367,19 @@ _PROP_RULES: Dict[str, str] = {
         MATCH (a:Subject)
         WHERE a.subject_id IN $scope_subject_ids
           AND a.cross_case_source_rule = "Rule_11_Cross_Case_Hub"
-          AND a.is_cross_case = true
+          // Rejection sets is_cross_case=false and cross_case_rejected=true
+          // (rejection.py's _BULK_REJECT_SUBJECT_FLAG), so matching only on
+          // is_cross_case=true is what made a rejected hub disappear from
+          // the block — and with it the row an investigator would revert
+          // from. Both states are matched; the status says which.
+          AND (a.is_cross_case = true OR a.cross_case_rejected = true)
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                a.cross_case_confidence AS confidence, false AS corroborated,
+               CASE WHEN a.cross_case_rejected = true THEN "rejected" ELSE "active" END AS status,
+               {rejected_by: a.cross_case_rejected_by, rejected_at: a.cross_case_rejected_at,
+                reason: a.cross_case_rejection_reason, reverted_by: a.cross_case_reverted_by,
+                reverted_at: a.cross_case_reverted_at,
+                revert_reason: a.cross_case_revert_reason} AS rejection,
                {hub_case_ids: coalesce(a.hub_case_ids, [])} AS detail
         ORDER BY subject_id
 """,
@@ -268,9 +387,16 @@ _PROP_RULES: Dict[str, str] = {
         MATCH (c:Case)
         WHERE c.case_id IN $scope_case_ids
           AND c.risk_escalation_source_rule = "Rule_08_Recidivist_Escalation"
-          AND c.risk_escalation_status = "active"
+          AND coalesce(c.risk_escalation_status, "active") IN ["active", "rejected"]
         RETURN c.case_id AS related_case_id,
                c.risk_escalation_confidence AS confidence, false AS corroborated,
+               coalesce(c.risk_escalation_status, "active") AS status,
+               {rejected_by: c.risk_escalation_rejected_by,
+                rejected_at: c.risk_escalation_rejected_at,
+                reason: c.risk_escalation_rejection_reason,
+                reverted_by: c.risk_escalation_reverted_by,
+                reverted_at: c.risk_escalation_reverted_at,
+                revert_reason: c.risk_escalation_revert_reason} AS rejection,
                {complaint_no: c.complaint_number, fraud_amount: c.fraud_amount} AS detail
         ORDER BY related_case_id
 """,
@@ -278,13 +404,20 @@ _PROP_RULES: Dict[str, str] = {
         MATCH (c:Case)-[:HAS_ALLEGATION]->(al:Allegation)-[att:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject)
         WHERE a.subject_id IN $scope_subject_ids
           AND al.wage_corroboration_rule = "Rule_12_SLAM_Wage_Corroboration"
-          AND al.wage_corroboration_status = "active"
+          AND coalesce(al.wage_corroboration_status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:HAS_WAGE_RECORD_WITH]->(e:Employer)
         WITH a, c, al, head(collect(e.name)) AS employer_name
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                c.case_id AS related_case_id, al.allegation_type AS allegation_type,
                al.wage_corroboration_confidence AS confidence,
                coalesce(al.wage_corroboration_verified, false) AS corroborated,
+               coalesce(al.wage_corroboration_status, "active") AS status,
+               {rejected_by: al.wage_corroboration_rejected_by,
+                rejected_at: al.wage_corroboration_rejected_at,
+                reason: al.wage_corroboration_rejection_reason,
+                reverted_by: al.wage_corroboration_reverted_by,
+                reverted_at: al.wage_corroboration_reverted_at,
+                revert_reason: al.wage_corroboration_revert_reason} AS rejection,
                {complaint_no: c.complaint_number, employer_name: employer_name,
                 allegation_type: al.allegation_type,
                 fraud_start_date: c.fraud_start_date, fraud_end_date: c.fraud_end_date} AS detail
@@ -293,9 +426,16 @@ _PROP_RULES: Dict[str, str] = {
     "Rule_13_FastTrack_Escalation": """
         MATCH (c:Case {case_id: $case_id})
         WHERE c.fasttrack_recommendation_rule = "Rule_13_FastTrack_Escalation"
-          AND c.fasttrack_recommendation_status = "active"
+          AND coalesce(c.fasttrack_recommendation_status, "active") IN ["active", "rejected"]
         RETURN c.case_id AS related_case_id,
                c.fasttrack_recommendation_confidence AS confidence, false AS corroborated,
+               coalesce(c.fasttrack_recommendation_status, "active") AS status,
+               {rejected_by: c.fasttrack_recommendation_rejected_by,
+                rejected_at: c.fasttrack_recommendation_rejected_at,
+                reason: c.fasttrack_recommendation_rejection_reason,
+                reverted_by: c.fasttrack_recommendation_reverted_by,
+                reverted_at: c.fasttrack_recommendation_reverted_at,
+                revert_reason: c.fasttrack_recommendation_revert_reason} AS rejection,
                {complaint_no: c.complaint_number, fraud_amount: c.fraud_amount} AS detail
         ORDER BY related_case_id
 """,
@@ -339,6 +479,26 @@ def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
         instance["detail"] = detail
     instance["confidence"] = row.get("confidence") or "Unresolved"
     instance["corroborated"] = bool(row.get("corroborated", False))
+
+    # --- rejection state (Human-in-the-Loop, Section 5.2) ---
+    # A rejected instance STAYS in the block. It used to be filtered out of
+    # the query entirely, which meant the investigator who rejected it had
+    # nothing left on screen to revert from — the only way back was
+    # /rule_audit, a different endpoint with a different shape. Keeping the
+    # row and flipping a status is what makes reject and revert two
+    # directions of one control rather than a one-way door.
+    status = row.get("status") or "active"
+    instance["status"] = status
+    instance["revertable"] = status == "rejected"
+    audit = {
+        k: v for k, v in (row.get("rejection") or {}).items()
+        if v is not None and v != ""
+    }
+    if audit:
+        # Who rejected it, when, and why — and the same for a previous
+        # revert. An investigator deciding whether to revert someone else's
+        # rejection needs the reason, not just the fact of it.
+        instance["rejection"] = audit
     # Names + the "why it fired" line are a presentation concern, owned by
     # rule_inference so rewording never touches this query module.
     for name_key in ("first_name", "last_name", "related_first_name", "related_last_name"):
@@ -359,20 +519,52 @@ def _summarise(rule_id: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     in `instances` rather than averaged away.
     """
     instances = [_instance(rule_id, row) for row in rows]
-    count = len(instances)
-    confidences = [i["confidence"] for i in instances if i["confidence"]]
+    active = [i for i in instances if i["status"] == "active"]
+    rejected = [i for i in instances if i["status"] == "rejected"]
+    count = len(active)
+
+    # EVERY rolled-up figure below is computed from ACTIVE instances only,
+    # and that is the whole safety property of this change. `instances` now
+    # carries rejected findings so the UI can show and revert them — but
+    # rules_fired also feeds the Copilot's context, Investigation Plan and
+    # Report Generation, and a fact an investigator has explicitly rejected
+    # must never be handed to any of them as live evidence. Visible in the
+    # payload, absent from the counts.
+    confidences = [i["confidence"] for i in active if i["confidence"]]
     confidence = (
         max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
         if confidences else "Unresolved"
     )
+
+    if count and rejected:
+        rule_status = "partially_rejected"
+    elif rejected:
+        rule_status = "rejected"
+    elif count:
+        rule_status = "active"
+    else:
+        rule_status = "not_fired"
+
     return {
+        # Unchanged meaning: is there a LIVE finding here. A rule whose only
+        # findings were rejected reports fired=false, exactly as it did when
+        # those rows were dropped from the query — downstream consumers see
+        # no behaviour change from this work.
         "fired": count > 0,
         # A rule that did not fire has no confidence to report. "Unresolved"
         # is the correct value here (A.4's own enum) — not None, and not a
         # cheerful "High" inherited from a previous run.
         "confidence": confidence if count > 0 else "Unresolved",
-        "corroborated": any(i["corroborated"] for i in instances),
+        "corroborated": any(i["corroborated"] for i in active),
         "evidence_count": count,
+        # `matched` is the flag a UI renders the row on: this rule produced
+        # something, whether or not it is currently accepted. `fired` alone
+        # cannot serve that purpose without either hiding rejected rows or
+        # misreporting rejected facts as live to the LLM consumers.
+        "matched": len(instances) > 0,
+        "status": rule_status,
+        "rejected_count": len(rejected),
+        "revertable": len(rejected) > 0,
         "instances": instances,
     }
 
@@ -415,6 +607,16 @@ def build_rules_fired(scope: Dict[str, Any],
                 "rule_description": rule_inference.rule_description(rule_id),
                 "relationship_type": rule_inference.rule_label(rule_id),
                 "evidence_count": summary["evidence_count"],
+                # --- rejection / revert state (Human-in-the-Loop) ---
+                # `status` is the rule-level roll-up: active, rejected,
+                # partially_rejected, or not_fired. `revertable` tells the UI
+                # whether POST /revert_rejection has anything to act on for
+                # this case_id + rule_id, so it can enable the control without
+                # a second call to /rule_audit.
+                "matched": summary["matched"],
+                "status": summary["status"],
+                "rejected_count": summary["rejected_count"],
+                "revertable": summary["revertable"],
                 # Which concrete subjects/records this rule fired on. Without
                 # it, "Rule 3 fired, evidence_count 2" tells an investigator
                 # something happened but not to whom — and the co-subject
@@ -439,8 +641,11 @@ def build_rules_fired(scope: Dict[str, Any],
     rule_inference.render_block(block)
 
     fired_count = sum(1 for entry in block if entry["fired"])
+    rejected_count = sum(entry["rejected_count"] for entry in block)
     logger.info(
-        "rules_fired: case_id=%s subject_id=%s %d/%d rules fired",
+        "rules_fired: case_id=%s subject_id=%s %d/%d rules fired, "
+        "%d rejected instance(s) retained for revert",
         scope["case_id"], scope["primary_subject_id"], fired_count, len(block),
+        rejected_count,
     )
     return block
