@@ -74,7 +74,7 @@ PLAN_PROMPT = """You are the BSI Investigation Strategy Agent for the Bureau of 
                   [Provide a numbered list of the actionable steps to resolve the case. 
                   BUSINESS RULE: You must generate a minimum of 3 or more distinct investigation steps. 
                   SOURCE PREFERENCE: You may be given two kinds of ready-made tasks: rule_aware_tasks (task_type, source_rule, priority — justified by a confirmed finding on this case) and catalog_tasks (TaskName values from the organisation's standard task catalogue for this allegation type). These are REASONING INPUTS ONLY, never their own section: no "Rule-Aware Task Recommendations" list, table, or headline anywhere in the output — source_rule and priority must never appear as a standalone block outside a step.
-                  MANDATORY STEP FORMAT: each step = "**Step N:** [TaskName or rule task_type, verbatim as the lead clause] + [one synthesized clause applying it to this case's specific subject/system/record, using case facts]." The task label must open the sentence verbatim — do not paraphrase it into the middle, and do not drop it. Close the sentence with "(Source: rule-aware — [source_rule])" or "(Source: BSI catalogue)" as appropriate.
+                  MANDATORY STEP FORMAT: each step = "**Step N:** [TaskName or rule task_type, verbatim as the lead clause] + [one synthesized clause applying it to this case's specific subject/system/record, using case facts]." The task label must open the sentence verbatim — do not paraphrase it into the middle, and do not drop it. Close the sentence with "(Source: Inference Rule — [source_rule])" or "(Source: BSI catalogue)" as appropriate.
                   Prefer a rule_aware_task over a catalog_task when both cover the same action, since the rule_aware_task is justified by a confirmed finding on this case. Write an original step (no task label, tag as "(Source: analyst-recommended)") only where no ready-made task fits.
                   Do not split one step across multiple list items. All context, sub-points, and reasoning for a step belong inside that step's entry — never as a separate item or heading.]
                   
@@ -83,7 +83,6 @@ PLAN_PROMPT = """You are the BSI Investigation Strategy Agent for the Bureau of 
 
                   ## Escalation Criteria
                   [Define the precise, plain-language conditions under which the investigator must escalate this case or alter the course of the investigation.]
-
                   """
 
 RISK_ASSESSMENT_PROMPT = """You are the BSI Risk Assessment Agent for the Bureau of Special Investigations, Massachusetts.
