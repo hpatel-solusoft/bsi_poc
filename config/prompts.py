@@ -266,7 +266,7 @@ CORE UI & RENDERING PRINCIPLES:
 - Never Omit a Decision Log Entry: Every entry in "decision_log" must appear in the Decision & Override Log section. Investigation plan modification entries appear in full detail. Rejected-connection entries in "decision_log" are referenced only briefly — a single summary line pointing back to the Reviewed and Excluded Connections section above — never restate their individual reason, investigator, or date fields a second time.
 - Mandatory Structure: Adhere exactly to the headers below. Do not add introductory or closing paragraphs outside the template.
 - Graceful Degradation: If a section's underlying data is empty, keep its header and explicitly state "No relevant information found in available records." beneath it.
-- Strict List Formatting: Every bullet must begin on its own new line, starting with "* ". Never place two bullets on the same line or run multiple bullets together inside one paragraph — this breaks rendering and is treated as a formatting error.
+- Strict List Formatting: Every bullet must begin on its own new line, starting with "* ". Never place two bullets on the same line or run multiple bullets together inside one paragraph — this breaks rendering and is treated as a formatting error. Always leave one full blank line between any introductory sentence and the first bullet of the list that follows it — a list glued directly to the sentence above it with no blank line is also treated as a formatting error.
  
 REPORT STRUCTURE:
 Generate your response using EXACTLY the following Markdown template.
@@ -280,7 +280,8 @@ Generate your response using EXACTLY the following Markdown template.
 ## Network Inference
  
 ### Rules Fired
-[If "rules_fired" contains one or more entries, list each as its own bullet, each starting on a new line, in this exact form:]
+[If "rules_fired" contains one or more entries, leave a blank line, then list each as its own bullet, each starting on a new line, in this exact form:]
+ 
 * **[rule_name or rule_id]** — Confidence: [confidence]. [One sentence describing what the rule found, grounded only in the fields given for that entry.]
 [If rules_fired is empty, write exactly: "No inference rules fired for this case."]
  
@@ -288,26 +289,30 @@ Generate your response using EXACTLY the following Markdown template.
 [One short paragraph, 2-3 sentences. State the risk tier and risk score exactly as given in "risk_assessment". Then describe any signals given in "graph_signals" (for example temporal acceleration, corroboration ratio, or role distribution) in plain language. Do not interpret or infer anything beyond the values given, and do not mention a signal that is not present in the data.]
  
 ### Similar Cases
-[If "similar_cases" contains one or more matches, list each as its own bullet, each starting on a new line, in this exact form:]
+[If "similar_cases" contains one or more matches, leave a blank line, then list each as its own bullet, each starting on a new line, in this exact form:]
+ 
 * **[case_id]** — Similarity: [similarity_score]. [One sentence stating the match reason, grounded only in the fields given for that entry.]
 [If similar_cases is empty or not provided, write exactly: "No similar cases identified."]
  
 ### Network Connections
-[An opening sentence stating how many active connections were found, using the confidence_summary counts exactly as given. Then, for each related_network entry with status "active", one bullet, each starting on a new line, in this exact form:]
+[An opening sentence stating how many active connections were found, using the confidence_summary counts exactly as given. Leave a blank line after that sentence. Then, for each related_network entry with status "active", one bullet, each starting on a new line, in this exact form:]
+ 
 * **[counterpart_label or counterpart_id]** ([relationship_type, in plain words]) — Confidence: [confidence]. [One sentence explaining what this connection means for the investigation, grounded only in the fields given for that entry.]
 [If related_network contains no active entries, write exactly: "No active inferred connections found in available records."]
  
 ## Reviewed and Excluded Connections
-[An opening sentence noting how many connections were reviewed and excluded, using rejected_count.]
-[For every related_network entry with status "rejected", one bullet in this exact form, with every field shown even when a value is "not recorded":]
+[An opening sentence noting how many connections were reviewed and excluded, using rejected_count. Leave a blank line after that sentence. Then, for every related_network entry with status "rejected", one bullet in this exact form, each starting on a new line, with every field shown even when a value is "not recorded":]
+ 
 * **[counterpart_label or counterpart_id]** ([relationship_type, in plain words]) — Reviewed by: [rejection.investigator_id or "not recorded"] on [rejection.rejected_at or "not recorded"]. Reason: [rejection.reason or "not recorded"].
 [If rejected_count is 0, write "No connections have been reviewed and excluded." instead of a list.]
  
 ## Decision & Override Log
-[Check "decision_log" for entries of type "plan_modification". If one or more exist, list each as its own bullet, each starting on a new line, in this exact form:]
+[Check "decision_log" for entries of type "plan_modification". If one or more exist, leave a blank line, then list each as its own bullet, each starting on a new line, in this exact form:]
+ 
 * Modified by: [actor or "not recorded"] on [timestamp or "not recorded"] — [one sentence stating what changed, grounded only in the fields given for that entry].
 [If no entries of type "plan_modification" exist, write exactly: "No modifications have been made to the investigation plan."]
-[Separately, check "decision_log" for entries of type "rejected_connection". If one or more exist, add exactly one additional bullet, on its own new line, in this exact form:]
+[Separately, check "decision_log" for entries of type "rejected_connection". If one or more exist, leave a blank line, then add exactly one additional bullet, on its own new line, in this exact form:]
+ 
 * [N] connection(s) reviewed and excluded by an investigator — see Reviewed and Excluded Connections above for detail.
 [If no entries of type "rejected_connection" exist, do not add this bullet at all.]
  
