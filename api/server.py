@@ -88,6 +88,7 @@ from api.response_builders import (
     render_markdown_html_with_sources,
     render_markdown_html,
     resolve_plan_agent_summary,
+    apply_step_override_to_summary,
     build_confidence_summary,
     fired_rules_only,
 )
@@ -871,25 +872,39 @@ def plan(req: PlanRequest):
         # make every override look stale (Section E.5).
         cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
 
-        # Agent-summary cache (reload_ai_summary=False, default): if
-        # /plan has already produced and persisted an agent_summary for
-        # this case_id, answer from it WITHOUT calling the LLM again.
-        # reload_ai_summary=True always bypasses this lookup and falls
-        # through to a fresh agent run below. A human override (Section
-        # D.6) is still re-applied here every time, exactly as the
-        # non-cached path does, so a cache hit never serves a stale
-        # plan_source/modified_by/plan_stale.
-        if not req.reload_ai_summary:
+        # Agent-summary cache: if /plan has already produced and persisted
+        # an agent_summary for this case_id, answer from it WITHOUT calling
+        # the LLM again.
+        #
+        # The investigation_plan_override (Section D.6) is checked FIRST,
+        # regardless of reload_ai_summary: once an investigator has
+        # modified the plan, that modification is authoritative, so a
+        # cache hit is served even when the caller asked to reload — a
+        # fresh LLM run would only be discarded in favour of
+        # override["modified_steps"] anyway (see run_plan_pipeline below),
+        # so skipping straight to it here saves the wasted LLM call.
+        # reload_ai_summary=True only bypasses the cache when NO override
+        # exists; it still falls through to a fresh agent run below in
+        # that case, same as before.
+        override = get_override(req.case_id)
+        if not req.reload_ai_summary or override is not None:
             cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("plan")
             cached_plan = case_data.get("investigation_plan")
             if cached_summary is not None and isinstance(cached_plan, dict):
-                override = get_override(req.case_id)
                 if override is not None:
                     cached_plan = {**cached_plan, "investigation_steps": override["modified_steps"]}
-                    plan_source, modified_by, modified_on = "human_modified", override["modified_by"], override["modified_on"]
+                    plan_source, modified_by, modified_on = "User Modified", override["modified_by"], override["modified_on"]
                     plan_stale = compute_plan_staleness(cache_updated_at_before_call, modified_on)
+                    # The structured investigation_plan above now carries the
+                    # override, but cached_summary is still the pre-override
+                    # LLM markdown pulled straight from case_ai_summary_store —
+                    # without this, the investigator reads AI-generated steps
+                    # while graph_findings/meta already say User Modified.
+                    cached_summary = apply_step_override_to_summary(
+                        cached_summary, override["modified_steps"],
+                    )
                 else:
-                    plan_source, modified_by, modified_on, plan_stale = "ai_generated", None, None, False
+                    plan_source, modified_by, modified_on, plan_stale = "AI Summerized", None, None, False
 
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
@@ -969,15 +984,24 @@ def plan(req: PlanRequest):
             {"investigation_plan": investigation_plan},
             merged_provenance,
         )
-        # Cache this run's RESOLVED agent_summary markdown (the same text
-        # rendered below — synthesized plan markdown when the plan has
-        # substance, LLM prose otherwise) so a cache hit next time serves
-        # exactly what this call would have returned. Carries forward any
-        # other route's already-cached entry for this case_id.
+        # Cache this run's RESOLVED agent_summary markdown (the LLM's own
+        # markdown, verbatim, with the override's steps spliced in when one
+        # exists — see resolve_plan_agent_summary / apply_step_override_to_summary)
+        # so a cache hit next time serves exactly what this call would have
+        # returned. Carries forward any other route's already-cached entry
+        # for this case_id.
         resolved_agent_summary = resolve_plan_agent_summary(
             assistant_text, investigation_plan, req.case_id,
             case_data, merged_provenance,
         )
+        if plan_source == "User Modified":
+            # run_plan_pipeline already swapped investigation_plan["investigation_steps"]
+            # for the override above, but assistant_text/resolved_agent_summary
+            # is still the fresh LLM turn's own steps — same gap as the
+            # cache-hit path, fixed the same way.
+            resolved_agent_summary = apply_step_override_to_summary(
+                resolved_agent_summary, investigation_plan.get("investigation_steps"),
+            )
         ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
             case_data, "plan", resolved_agent_summary,
         )

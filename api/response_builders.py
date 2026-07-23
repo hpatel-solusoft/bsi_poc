@@ -1,7 +1,10 @@
 from utils import html_converter
 from typing import Dict, Any, Optional, List
 from fastapi import HTTPException
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 def render_markdown_html(markdown_text: str) -> str:
@@ -246,6 +249,80 @@ def build_plan_summary(
     return "\n".join(lines)
 
 
+def render_investigation_steps_markdown(steps: List[Dict[str, Any]]) -> str:
+    """
+    Render a list of investigation-step dicts as the Investigation Steps
+    section body, using format_plan_markdown_item — the same per-step
+    formatter the (fallback-only) synthesized summary uses.
+
+    Callers pass this a saved investigation_plan_override's steps, which
+    share the exact {step, action, owner?, deadline_days?, source?,
+    source_rule?, priority?} shape as the AI-generated plan
+    (api/models.ModifyInvestigationStepsRequest reuses
+    semantic_layer.entity_contracts.InvestigationStep), so `action` here
+    is always clean step text — never markdown already containing its own
+    "**Step N:**"/"(Source: ...)" — so there is no double-tagging risk.
+    """
+    if not steps:
+        return "- No investigation steps were returned."
+    lines = [
+        formatted for idx, step in enumerate(steps, start=1)
+        if (formatted := format_plan_markdown_item(step, idx))
+    ]
+    return "\n".join(lines) if lines else "- No investigation steps were returned."
+
+
+def replace_markdown_section(markdown_text: str, header_name: str, new_body: str) -> str:
+    """
+    Replace one header's section body in an existing markdown document,
+    leaving every other section byte-for-byte as it was. Used to splice a
+    human override into an already-final agent_summary without
+    re-rendering (and risking re-formatting) any part of it the override
+    doesn't touch.
+
+    Returns markdown_text unchanged if the header can't be found — this
+    never fabricates a new section in text that doesn't already have one.
+    """
+    pattern = re.compile(
+        rf"((?:^|\n)#{{1,6}}\s*{re.escape(header_name)}[^\n]*\n)(.*?)(?=\n#{{1,6}}\s|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    )
+    match = pattern.search(markdown_text or "")
+    if not match:
+        logger.warning(
+            "replace_markdown_section: header %r not found — agent_summary "
+            "left unmodified, override not reflected in rendered text",
+            header_name,
+        )
+        return markdown_text
+    return f"{markdown_text[:match.start(2)]}{new_body}\n{markdown_text[match.end(2):]}"
+
+
+def apply_step_override_to_summary(
+    markdown_text: str,
+    override_steps: Optional[List[Dict[str, Any]]],
+) -> str:
+    """
+    Substitute a saved investigation_plan_override's steps into the
+    Investigation Steps section of an already-rendered agent_summary.
+
+    Section D.6 scopes an override to investigation_steps only —
+    evidence_checklist, escalation_criteria, and the narrative summary
+    stay AI-generated — so this is the one section a human edit is ever
+    allowed to change, and the only one this function touches. Without
+    this, a saved override updates the structured investigation_plan JSON
+    (graph_findings, meta.plan_source) but the investigator keeps reading
+    the pre-override AI text, which is indistinguishable from the override
+    never having been applied.
+    """
+    if not override_steps:
+        return markdown_text
+    return replace_markdown_section(
+        markdown_text, "Investigation Steps",
+        render_investigation_steps_markdown(override_steps),
+    )
+
+
 def resolve_plan_agent_summary(
     assistant_text: str,
     plan: dict,
@@ -254,13 +331,32 @@ def resolve_plan_agent_summary(
     provenance_trail: List[dict],
 ) -> str:
     """
-    Prefer markdown synthesized from parsed investigation_plan so agent_summary
-    cannot contradict ai_summary.investigation_plan. Fall back to LLM prose only
-    when no plan sections were parsed.
+    The LLM's own markdown IS the final agent_summary, full stop.
+
+    PLAN_PROMPT's MANDATORY STEP FORMAT (config/prompts.py) makes the LLM
+    own every header, the "**Step N:**" lead, the TaskName-verbatim clause,
+    and the "(Source: ...)" attribution directly in its output — and
+    utils/html_converter._style_step_labels renders that exact structure.
+    Nothing between the LLM's turn and the response may re-render, re-tag,
+    or re-inject any of that: doing so risks (and previously produced)
+    duplicated Step/Source markup, and can only ever disagree with what
+    the LLM itself said.
+
+    build_plan_summary is a fallback for the genuinely degenerate case
+    only — an empty or missing LLM turn — where the alternative is
+    shipping a blank tab to an investigator. It is never invoked when the
+    LLM produced usable text, regardless of how many plan sections were
+    parsed out of that text.
     """
-    if plan_has_substance(plan):
-        return build_plan_summary(case_id, plan, case_data, provenance_trail)
-    return assistant_text or build_plan_summary(case_id, plan, case_data, provenance_trail)
+    if isinstance(assistant_text, str) and assistant_text.strip():
+        return assistant_text
+
+    logger.warning(
+        "plan agent_summary: LLM returned no usable text for case_id=%s — "
+        "falling back to synthesized summary from parsed plan sections",
+        case_id,
+    )
+    return build_plan_summary(case_id, plan, case_data, provenance_trail)
 
 
 

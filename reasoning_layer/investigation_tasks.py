@@ -36,6 +36,7 @@ the plan prompt, or the LLM's selection between the two sources.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -213,43 +214,95 @@ def build_rule_aware_tasks(
 
 # --- step source attribution -------------------------------------------------
 # Section 8.5 / AI-16 require every investigation step to declare where it
-# came from. The LLM selects steps from two candidate pools (catalogue tasks
-# and rule-aware tasks) and may also synthesise its own, but it writes prose
-# — it does not return a machine-readable source tag. So the source is
-# recovered here by matching the step text back to the candidate pools.
+# came from. PLAN_PROMPT's MANDATORY STEP FORMAT (config/prompts.py) already
+# makes the LLM write this itself, inline, on every step:
+#   "**Step N:** <TaskName verbatim> <synthesized clause> (Source: ...)"
+# with the tag being exactly one of "Inference Rule — <rule_id>",
+# "BSI catalogue", or "analyst-recommended".
 #
-# Matching is deterministic and conservative: a step is only attributed to a
-# source when its wording substantially overlaps a candidate task. Anything
-# else is honestly labelled llm_generated rather than being credited to a
-# rule or the catalogue it did not actually come from — a false attribution
-# would put BSI's name behind a task BSI never defined.
+# That means the LLM's own text is the single source of truth for
+# attribution. This module's job is narrow: recover the SAME fact as a
+# machine-readable field (for the API contract / override UI / analytics)
+# by reading the tag the LLM already wrote — never by independently
+# re-guessing it from wording similarity. A second, fuzzier guess at a fact
+# already stated in the text can only ever disagree with what the
+# investigator is reading on screen, which is strictly worse than not
+# having the structured field at all.
 
 _SOURCE_RULE_AWARE = "rule_aware"
 _SOURCE_CATALOG = "catalog"
 _SOURCE_LLM = "llm_generated"
 
-# Fraction of a candidate task's significant words that must appear in the
-# step for it to count as the same task. High enough to avoid crediting a
-# step that merely shares common verbs ("request", "review").
-_MATCH_THRESHOLD = 0.6
+# Strips the "**Step N:**" lead the prompt mandates, so the structured
+# `action` field holds clean step text rather than a re-embedded copy of
+# the markdown formatting.
+_STEP_PREFIX_RE = re.compile(r"^\*\*\s*Step\s*\d+\s*:\s*\*\*\s*")
 
-_STOPWORDS = {
-    "the", "a", "an", "of", "for", "to", "and", "or", "per", "all", "any",
-    "with", "from", "on", "in", "by", "case", "cases",
-}
+# Matches the trailing "(Source: ...)" tag PLAN_PROMPT requires on every
+# step, and captures its inner content for classification.
+_SOURCE_TAG_RE = re.compile(r"\s*\(Source:\s*(.*?)\)\s*$", re.IGNORECASE)
 
-
-def _significant_words(text: str) -> set:
-    words = {w.strip(".,;:()[]").lower() for w in str(text or "").split()}
-    return {w for w in words if w and w not in _STOPWORDS and len(w) > 2}
+# "(Source: Inference Rule — Rule_09)" / "Inference Rule - Rule_09" (either
+# dash style survives an LLM turn) -> captures the rule id.
+_RULE_TAG_RE = re.compile(r"^Inference Rule\s*[—\-–]\s*(.+)$", re.IGNORECASE)
 
 
-def _overlap(step_text: str, task_text: str) -> float:
-    task_words = _significant_words(task_text)
-    if not task_words:
-        return 0.0
-    step_words = _significant_words(step_text)
-    return len(task_words & step_words) / len(task_words)
+def parse_declared_step_source(
+    raw_text: str,
+    rule_aware_tasks: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Split one LLM-authored step line into its clean action text plus the
+    source attribution the LLM already declared inline.
+
+    priority is looked up from rule_aware_tasks by source_rule — an exact
+    key match against data this same request already computed
+    (reasoning_layer.investigation_tasks.build_rule_aware_tasks), not a
+    second heuristic — so a rule-aware step's priority can never drift
+    from the priority BSI's own rule map assigns that rule.
+
+    Returns {"action", "source", "source_rule", "priority"}. Falls back to
+    llm_generated with no rule/priority when the turn is missing the
+    mandated tag entirely (a malformed LLM turn, not the expected path) —
+    logged, never raised, so one malformed step never fails the whole plan.
+    """
+    text = _STEP_PREFIX_RE.sub("", str(raw_text or "").strip())
+
+    source = _SOURCE_LLM
+    source_rule = None
+    priority = None
+
+    tag_match = _SOURCE_TAG_RE.search(text)
+    if tag_match:
+        tag = tag_match.group(1).strip()
+        text = _SOURCE_TAG_RE.sub("", text).strip()
+
+        rule_match = _RULE_TAG_RE.match(tag)
+        if rule_match:
+            source = _SOURCE_RULE_AWARE
+            source_rule = rule_match.group(1).strip()
+        elif tag.lower().startswith("bsi catalogue"):
+            source = _SOURCE_CATALOG
+        # else: "analyst-recommended" (or anything unrecognized) stays
+        # llm_generated — an honest label rather than a forced match.
+    else:
+        logger.warning(
+            "parse_declared_step_source: step text missing the mandated "
+            "(Source: ...) tag — labelling llm_generated: %r", text[:120],
+        )
+
+    if source == _SOURCE_RULE_AWARE and source_rule:
+        for task in rule_aware_tasks or []:
+            if task.get("source_rule") == source_rule:
+                priority = task.get("priority")
+                break
+
+    return {
+        "action": text,
+        "source": source,
+        "source_rule": source_rule,
+        "priority": priority,
+    }
 
 
 def tag_step_sources(
@@ -258,47 +311,36 @@ def tag_step_sources(
     catalog_tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Annotate each investigation step with a `source` (AI-16).
+    Annotate each investigation step with its source (AI-16), by parsing
+    the (Source: ...) tag the LLM's own step text already carries under
+    PLAN_PROMPT's MANDATORY STEP FORMAT.
 
-    Rule-aware tasks are checked FIRST: when a step matches both pools, the
-    rule-derived attribution is the more specific and more useful one for an
-    investigator, because it also carries the source_rule that justifies it.
+    catalog_tasks is accepted for call-site compatibility but is not
+    consulted: the LLM already writes "(Source: BSI catalogue)" verbatim
+    when it selects a catalogue task, so there is nothing left to infer.
 
-    Returns a new list; the input steps are not mutated.
+    Returns a new list; the input steps are not mutated. `action` on the
+    returned steps is the clean step text with the markdown Step-N prefix
+    and Source tag both stripped into their own fields — callers that
+    render a step (e.g. a fallback markdown rebuild) must re-add at most
+    ONE of each, never assume the raw LLM formatting is still embedded.
     """
-    rule_aware_tasks = rule_aware_tasks or []
-    catalog_tasks = catalog_tasks or []
     tagged: List[Dict[str, Any]] = []
 
     for step in steps or []:
+        parsed = parse_declared_step_source(step.get("action", ""), rule_aware_tasks)
         annotated = dict(step)
-        action = annotated.get("action", "")
-
-        best_rule, best_rule_score = None, 0.0
-        for task in rule_aware_tasks:
-            score = _overlap(action, task.get("task_type", ""))
-            if score > best_rule_score:
-                best_rule, best_rule_score = task, score
-
-        best_cat, best_cat_score = None, 0.0
-        for task in catalog_tasks:
-            score = _overlap(action, task.get("task_type", ""))
-            if score > best_cat_score:
-                best_cat, best_cat_score = task, score
-
-        if best_rule is not None and best_rule_score >= _MATCH_THRESHOLD:
-            annotated["source"] = _SOURCE_RULE_AWARE
-            annotated["source_rule"] = best_rule.get("source_rule")
-            annotated["priority"] = best_rule.get("priority")
-        elif best_cat is not None and best_cat_score >= _MATCH_THRESHOLD:
-            annotated["source"] = _SOURCE_CATALOG
-        else:
-            annotated["source"] = _SOURCE_LLM
-
+        annotated["action"] = parsed["action"]
+        annotated["source"] = parsed["source"]
+        if parsed["source_rule"]:
+            annotated["source_rule"] = parsed["source_rule"]
+        if parsed["priority"]:
+            annotated["priority"] = parsed["priority"]
         tagged.append(annotated)
 
     logger.info(
-        "tag_step_sources: %d step(s) tagged (rule_aware=%d catalog=%d llm=%d)",
+        "tag_step_sources: %d step(s) tagged from declared source "
+        "(rule_aware=%d catalog=%d llm=%d)",
         len(tagged),
         sum(1 for s in tagged if s["source"] == _SOURCE_RULE_AWARE),
         sum(1 for s in tagged if s["source"] == _SOURCE_CATALOG),
