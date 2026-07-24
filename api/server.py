@@ -90,6 +90,7 @@ from api.response_builders import (
     render_markdown_html,
     resolve_plan_agent_summary,
     apply_step_override_to_summary,
+    replace_markdown_section,
     build_confidence_summary,
     fired_rules_only,
 )
@@ -1246,11 +1247,16 @@ def generate_report(req: ReportGenerationRequest):
     (Section 8.7). The result is persisted to report_artifacts (D.5) as
     a new draft.
 
-    reload_ai_summary=False (default): if a report already exists for
-    this case_id in report_artifacts, answer from the latest persisted
-    draft — no Related Network re-assembly, no Decision Log rebuild, no
-    LLM call. reload_ai_summary=True always bypasses that cache, re-runs
-    the full pipeline below, and persists a fresh draft row.
+    reload_ai_summary=False (default): the Related Network is always
+    re-read fresh from Neo4j and the plan override always re-read fresh
+    from Postgres (both cheap, non-LLM reads) — if a report already
+    exists for this case_id in report_artifacts AND that fresh read is
+    identical to what was cached, answer from the latest persisted draft
+    with only the Decision & Override Log re-derived, no LLM call. If
+    the Related Network has changed since (a rejection, a revert, a
+    newly-active connection), the cache is treated as stale regardless
+    of reload_ai_summary and a fresh report is generated. reload_ai_summary=True
+    always skips the cache lookup outright and persists a fresh draft row.
     """
     start = time.time()
     try:
@@ -1260,59 +1266,6 @@ def generate_report(req: ReportGenerationRequest):
             "case_id=%s data_source=%s key_count=%d",
             req.case_id, data_source, len(list(case_data.keys())),
         )
-
-        # Report cache (reload_ai_summary=False, default): if a report has
-        # already been generated and persisted for this case_id, answer
-        # from the latest report_artifacts row WITHOUT re-running the
-        # Related Network assembly, Decision Log build, or the LLM
-        # narration again. reload_ai_summary=True always bypasses this
-        # lookup and falls through to a fresh report run below, which
-        # persists a new draft row exactly as before.
-        if not req.reload_ai_summary:
-            cached_report = get_latest_report(req.case_id)
-            if cached_report is not None:
-                cached_content = cached_report.get("content") or {}
-                cached_related_network = cached_content.get("related_network", [])
-                cached_rejected_count = sum(
-                    1 for entry in cached_related_network if entry.get("status") == "rejected"
-                )
-                duration_seconds = round(time.time() - start, 1)
-                logger.info(
-                    "generate_report CACHE HIT for case_id=%s — answering from "
-                    "report_artifacts, no LLM call or Related Network re-assembly made",
-                    req.case_id,
-                )
-                log_agent_call(
-                    case_id=req.case_id,
-                    agent_name="report_generation",
-                    endpoint="/generate_report",
-                    latency_ms=int(duration_seconds * 1000),
-                    status="success",
-                )
-                return {
-                    "case_id": req.case_id,
-                    "status": "completed",
-                    "report_id": cached_content.get("report_id"),
-                    "generated_at": cached_content.get("generated_at"),
-                    "details": {
-                        "agent_summary": render_markdown_html_with_sources(
-                            (cached_content.get("standard_sections") or {}).get("report_markdown", ""),
-                            case_data.get("provenance_trail", []),
-                        ),
-                        "related_network": cached_related_network,
-                        "confidence_summary": cached_content.get(
-                            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
-                        ),
-                        "rejected_count": cached_rejected_count,
-                        "decision_log": cached_content.get("decision_log", []),
-                        "meta": {
-                            "data_source": data_source,
-                            "report_status": cached_content.get("status", "draft"),
-                            "agent_summary_source": "db_cache",
-                            "persisted_to_postgres": True,
-                        },
-                    },
-                }
 
         runner = _get_runner()
 
@@ -1334,6 +1287,13 @@ def generate_report(req: ReportGenerationRequest):
         # The LLM's role is to EXPLAIN this section, never to decide its
         # contents. Non-blocking: a graph outage degrades to an empty,
         # clearly-unavailable section rather than failing the route.
+        #
+        # Run BEFORE the report cache check below (not just in the fresh-
+        # generation path) so a cache hit can compare against the CURRENT
+        # graph state — a Neo4j read is cheap relative to the LLM call the
+        # cache exists to avoid, so there is no reason to trust a stale
+        # snapshot here just because /generate_report has been called
+        # before for this case_id.
         try:
             related_envelope = assemble_related_network(req.case_id, subject_id)
             related = related_envelope["result"]
@@ -1353,15 +1313,15 @@ def generate_report(req: ReportGenerationRequest):
                                "computed_by": "reasoning_layer.report_generation.assemble_related_network"},
             }
 
-        # --- Decision & Override Log assembly (Report Design ACTIONS #3) ---
-        # Deterministic, non-LLM formatting over two inputs /generate_report
-        # already has in hand: the case's investigation-plan override (same
-        # Postgres lookup /plan uses) and the rejected entries out of the
-        # Related Network read just above. No graph or DB call of its own —
-        # see reasoning_layer/decision_log.py. A lookup failure degrades the
-        # same way the related-network read does above: an empty section
-        # rather than a failed report, since a report with no decision log
-        # is still a usable report.
+        # investigation_plan_overrides (Section D.6) must be reflected
+        # "regardless of which endpoint is queried" (see core/
+        # investigation_plan_override_repository.py) — /plan and /copilot
+        # already re-check it fresh on every call rather than trusting
+        # whatever was true at generation time. Same reasoning as the
+        # Related Network read above: fetch it fresh here, before the
+        # cache check, so a cache hit can be judged against the current
+        # override state instead of the one that was true when the
+        # cached report was generated.
         try:
             plan_override = get_override(req.case_id)
         except Exception as exc:
@@ -1372,6 +1332,109 @@ def generate_report(req: ReportGenerationRequest):
             )
             plan_override = None
 
+        # Report cache (reload_ai_summary=False, default): if a report has
+        # already been generated and persisted for this case_id AND the
+        # live Related Network read above is identical to what was cached
+        # (no rejection, revert, or newly-active connection since), answer
+        # from the latest report_artifacts row WITHOUT calling the LLM
+        # again. Any actual difference means the cached narrative prose
+        # (Reviewed and Excluded Connections, Network Connections) can no
+        # longer be trusted — that text was written by the LLM once, at
+        # generation time, and there is no safe way to splice a per-
+        # connection narrative sentence the way the deterministic Decision
+        # & Override Log block below can be — so a real change falls
+        # through to the full regeneration path and gets a fresh LLM
+        # narrative, exactly as if reload_ai_summary=True had been passed.
+        # reload_ai_summary=True always skips this cache lookup entirely.
+        if not req.reload_ai_summary:
+            cached_report = get_latest_report(req.case_id)
+            if cached_report is not None:
+                cached_content = cached_report.get("content") or {}
+                cached_related_network = cached_content.get("related_network", [])
+                live_related_network = related.get("related_network", [])
+
+                if live_related_network == cached_related_network:
+                    cached_rejected_count = sum(
+                        1 for entry in cached_related_network if entry.get("status") == "rejected"
+                    )
+
+                    # The Related Network itself is unchanged, but the plan
+                    # override could still have moved (a plan modification
+                    # or revert doesn't touch related_network at all) — so
+                    # the Decision & Override Log is still re-derived fresh
+                    # here and spliced into the cached narrative rather
+                    # than trusted from cached_content["decision_log"].
+                    cached_rejected_connections = [
+                        entry for entry in cached_related_network if entry.get("status") == "rejected"
+                    ]
+                    decision_log_envelope = build_decision_log(cached_rejected_connections, plan_override)
+                    decision_log_result = decision_log_envelope["result"]
+
+                    # Splice the freshly-rendered section into the cached
+                    # narrative markdown without re-invoking the LLM — same
+                    # technique apply_step_override_to_summary already uses
+                    # to overlay a live override onto /plan's cached prose.
+                    cached_report_markdown = (cached_content.get("standard_sections") or {}).get(
+                        "report_markdown", ""
+                    )
+                    resolved_report_markdown = replace_markdown_section(
+                        cached_report_markdown,
+                        "Decision & Override Log",
+                        decision_log_result["decision_log_markdown"],
+                    )
+
+                    duration_seconds = round(time.time() - start, 1)
+                    logger.info(
+                        "generate_report CACHE HIT for case_id=%s — Related Network "
+                        "unchanged since last draft, answering from report_artifacts "
+                        "with a freshly-derived Decision & Override Log, no LLM call made",
+                        req.case_id,
+                    )
+                    log_agent_call(
+                        case_id=req.case_id,
+                        agent_name="report_generation",
+                        endpoint="/generate_report",
+                        latency_ms=int(duration_seconds * 1000),
+                        status="success",
+                    )
+                    return {
+                        "case_id": req.case_id,
+                        "status": "completed",
+                        "report_id": cached_content.get("report_id"),
+                        "generated_at": cached_content.get("generated_at"),
+                        "details": {
+                            "agent_summary": render_markdown_html_with_sources(
+                                resolved_report_markdown,
+                                case_data.get("provenance_trail", []),
+                            ),
+                            "related_network": cached_related_network,
+                            "confidence_summary": cached_content.get(
+                                "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
+                            ),
+                            "rejected_count": cached_rejected_count,
+                            "decision_log": decision_log_result.get("decision_log", []),
+                            "meta": {
+                                "data_source": data_source,
+                                "report_status": cached_content.get("status", "draft"),
+                                "agent_summary_source": "db_cache",
+                                "persisted_to_postgres": True,
+                            },
+                        },
+                    }
+
+                logger.info(
+                    "generate_report CACHE STALE for case_id=%s — Related Network has "
+                    "changed since the last draft (rejection, revert, or new connection); "
+                    "regenerating a fresh report instead of serving report_artifacts",
+                    req.case_id,
+                )
+
+        # --- Decision & Override Log assembly (Report Design ACTIONS #3) ---
+        # Deterministic, non-LLM formatting over two inputs /generate_report
+        # already has in hand: the case's investigation-plan override
+        # (fetched fresh above, before the cache check) and the rejected
+        # entries out of the Related Network read just above. No graph or
+        # DB call of its own — see reasoning_layer/decision_log.py.
         rejected_connections = [
             entry for entry in related.get("related_network", [])
             if entry.get("status") == "rejected"
@@ -1384,8 +1447,18 @@ def generate_report(req: ReportGenerationRequest):
         # (never adds, removes, or reorders them — REPORT_GENERATION scope
         # carries no tools, so the LLM cannot re-query the graph or
         # Postgres itself either).
+        #
+        # rules_fired is also trimmed here to fired-only entries — the same
+        # response-boundary filter /intake and /plan already apply via
+        # fired_rules_only() (see api/response_builders.py: CASE_STORE and
+        # the merge keep the full fixed 14-entry block; every reader that
+        # displays it to an investigator trims to fired:true first). This
+        # route was the one place still serialising the unfiltered block,
+        # which is why "Rules Fired" narrated all 14 rules — including the
+        # ones that never fired — instead of only the ones that did.
         case_data_for_prompt = {
             **case_data,
+            "rules_fired": fired_rules_only(case_data.get("rules_fired")),
             "related_network": related.get("related_network", []),
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
