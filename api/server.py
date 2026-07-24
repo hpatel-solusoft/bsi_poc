@@ -106,6 +106,7 @@ from api.pipeline_execution import (
     run_risk_assessment_pipeline,
     run_plan_pipeline,
     prepare_plan_context,
+    refresh_case_graph_state_after_hitl_decision,
 ) 
 _runner: Optional[BSIAgentRunner] = None
 
@@ -1501,6 +1502,44 @@ def generate_report(req: ReportGenerationRequest):
         logger.info("POST /generate_report completed for case_id=%s", req.case_id)
 
 
+def _refresh_case_cache_after_hitl_decision(case_id: str, action: str) -> None:
+    """
+    Best-effort cache refresh called by reject_inference_route and
+    revert_rejection_route right after their Neo4j write already
+    succeeded (see api.pipeline_execution.refresh_case_graph_state_after_hitl_decision
+    for why this is needed: those two routes are Neo4j write only by
+    design, so nothing else re-syncs case_ai_summary_store's cached
+    rules_fired for a reload_ai_summary=False read).
+
+    Deliberately swallows and logs any failure rather than raising: the
+    investigator's reject/revert already committed successfully by the
+    time this runs, and a cache-refresh problem must never be reported
+    back as if the decision itself failed. Worst case on a failure here,
+    the cached snapshot stays stale until the next reload_ai_summary=True
+    call — annoying, not incorrect (the graph itself, the system of
+    record, already has the decision).
+    """
+    try:
+        refreshed_case_data = refresh_case_graph_state_after_hitl_decision(case_id)
+        if refreshed_case_data is None:
+            return
+        CASE_STORE[case_id] = refreshed_case_data
+        ai_summary = build_ai_summary(
+            refreshed_case_data, {}, refreshed_case_data.get("provenance_trail", []),
+        )
+        persist_case_session(case_id, ai_summary)
+        logger.info(
+            "%s: refreshed cached rules_fired/graph_context for case_id=%s",
+            action, case_id,
+        )
+    except Exception:
+        logger.exception(
+            "%s: cache refresh FAILED for case_id=%s — Neo4j write already "
+            "committed; cached snapshot will stay stale until "
+            "reload_ai_summary=True is next called for this case", action, case_id,
+        )
+
+
 @app.post("/reject_inference", response_model=RejectInferenceResponse)
 def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceResponse:
     """
@@ -1515,9 +1554,16 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
     case_id's reasoning scope (bulk, not a single caller-identified
     edge — see rejection.py's module docstring for why).
 
-    No LLM involvement (D2 Boundaries). Does not touch CASE_STORE or
-    investigation_plan_overrides — this is a Neo4j write only, handled
-    entirely by reasoning_layer.rejection.reject_inference.
+    No LLM involvement (D2 Boundaries), and does not touch
+    investigation_plan_overrides. The decision itself is a Neo4j write
+    only, handled entirely by reasoning_layer.rejection.reject_inference.
+    Afterwards, _refresh_case_cache_after_hitl_decision does a best-effort,
+    read-only re-sync of case_id's cached rules_fired/graph_context in
+    CASE_STORE / case_ai_summary_store, so a subsequent
+    reload_ai_summary=False read doesn't keep serving the pre-rejection
+    snapshot — see that function's docstring for the full rationale. A
+    failure in that refresh never fails this request; the Neo4j write
+    above already committed.
     """
     start = time.time()
     try:
@@ -1527,6 +1573,7 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
             reason=req.reason,
             investigator_id=req.investigator_id,
         )
+        _refresh_case_cache_after_hitl_decision(req.case_id, "reject_inference")
         log_agent_call(
             case_id=req.case_id,
             agent_name="inference_rejection",
@@ -1565,8 +1612,14 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
     Restores every fact this rule rejected for this case back to active,
     clears its rejection reason and audit fields, and deletes the
     :Rejection guard node so the rule can fire again on the next
-    pipeline run. No LLM, no AppWorks, no CASE_STORE write — a Neo4j
+    pipeline run. No LLM, no AppWorks. The decision itself is a Neo4j
     write only, handled entirely by reasoning_layer.rejection.revert_rejection.
+    Afterwards, _refresh_case_cache_after_hitl_decision does a best-effort,
+    read-only re-sync of case_id's cached rules_fired/graph_context in
+    CASE_STORE / case_ai_summary_store, so a subsequent
+    reload_ai_summary=False read doesn't keep serving the pre-revert
+    snapshot. A failure in that refresh never fails this request; the
+    Neo4j write above already committed.
     """
     start = time.time()
     try:
@@ -1576,6 +1629,7 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
             investigator_id=req.investigator_id,
             reason=req.reason,
         )
+        _refresh_case_cache_after_hitl_decision(req.case_id, "revert_rejection")
         log_agent_call(
             case_id=req.case_id,
             agent_name="inference_rejection_revert",
