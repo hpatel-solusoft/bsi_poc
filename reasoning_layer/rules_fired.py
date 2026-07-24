@@ -45,7 +45,7 @@ _CONFIDENCE_ORDER = {"Unresolved": 0, "Medium": 1, "High": 2}
 _REL_RULES: Dict[str, str] = {
     "Rule_01_Shared_Employer": """
         MATCH (a:Subject)-[r:SHARES_EMPLOYER_WITH]-(b:Subject)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id IN $scope_subject_ids AND a.subject_id < b.subject_id
           AND r.source_rule = "Rule_01_Shared_Employer"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:EMPLOYED_BY]->(e:Employer)<-[:EMPLOYED_BY]-(b)

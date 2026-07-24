@@ -485,6 +485,21 @@ class ConfidenceSummary(BaseModel):
     model_config = {"extra": "allow"}
 
 
+# Report Design "Decision & Override Log" section — reasoning_layer/
+# decision_log.py.build_decision_log's two entry shapes share one model
+# rather than a discriminated union: "type" is the only field every
+# entry has in common ("plan_modification" carries actor/timestamp/
+# comment/modified_step_count/modified_steps; the single aggregate
+# "rejected_connection" entry carries count/timestamp only), and
+# extra="allow" lets either shape through without the contract having
+# to enumerate both explicitly. REPORT_GENERATION_PROMPT is the
+# authoritative source for what "type" values exist and how each is
+# rendered — keep the two in sync if either changes.
+class DecisionLogEntry(BaseModel):
+    type: str   # "plan_modification" | "rejected_connection"
+    model_config = {"extra": "allow"}
+
+
 class GeneratedReport(BaseModel):
     report_id:         str
     case_id:            str
@@ -493,6 +508,10 @@ class GeneratedReport(BaseModel):
     standard_sections:   dict         # unchanged Phase 1 sections (narrative)
     related_network:     list[RelatedNetworkFact]
     confidence_summary:  ConfidenceSummary
+    # Optional + defaulted: older persisted report_artifacts rows (saved
+    # before this section existed) still deserialise cleanly with an
+    # empty log rather than failing validation.
+    decision_log:        list[DecisionLogEntry] = []
     model_config = {"extra": "forbid"}
 
 

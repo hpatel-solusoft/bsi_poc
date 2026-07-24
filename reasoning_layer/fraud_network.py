@@ -36,6 +36,8 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
+from reasoning_layer.rule_inference import display_name as _subject_display_name
+from reasoning_layer.rule_inference import format_address
 from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,30 @@ _CONFIDENCE_ORDER = {"Unresolved": 0, "Medium": 1, "High": 2}
 # BETWEEN SUBJECTS"; a subject's membership is instead what groups nodes
 # into one network block, matching the output contract's nodes[]/edges[]
 # shape (network membership is structure, not a rendered edge).
-_STRUCTURAL_EDGE_TYPES = "SHARES_EMPLOYER_WITH|SHARES_ADDRESS_WITH|SHARES_ALIAS_PATTERN_WITH"
+#
+# IS_CO_SUBJECT_WITH is included alongside the three SHARES_* types: it is
+# the structural edge Rule 9 (CheckSplit) networks are built on
+# (graph_sync._Q_CO_SUBJECTS / rule_09's own MATCH), exactly the same way
+# SHARES_EMPLOYER_WITH underlies Rule 2. Leaving it out meant a CheckSplit
+# network rendered two nodes with no line between them — the investigator
+# sees a "network" that visually isn't one. It carries no r.status
+# property (it is an asserted fact from the Workfolder's Subject Role
+# field, never an inference an investigator rejects), so the query below
+# coalesces to "active" rather than requiring the property to exist.
+_STRUCTURAL_EDGE_TYPES = (
+    "SHARES_EMPLOYER_WITH|SHARES_ADDRESS_WITH|SHARES_ALIAS_PATTERN_WITH|IS_CO_SUBJECT_WITH"
+)
+
+# Friendly, investigator-facing text for each structural edge type — same
+# spirit as rule_inference._RULE_LABELS/_RULE_DISPLAY_NAMES (machine key
+# kept on the contract for the reject flow, human label added alongside
+# it rather than replacing it).
+_EDGE_RELATIONSHIP_LABELS: Dict[str, str] = {
+    "SHARES_EMPLOYER_WITH": "Shares employer with",
+    "SHARES_ADDRESS_WITH": "Shares address with",
+    "SHARES_ALIAS_PATTERN_WITH": "Shares alias pattern with",
+    "IS_CO_SUBJECT_WITH": "Co-subject on this case with",
+}
 
 _CASE_NETWORKS_QUERY = """
 MATCH (cs:Subject)-[:APPEARS_IN_CASE]->(:Case {case_id: $case_id})
@@ -66,12 +91,34 @@ RETURN elementId(n) AS network_ref,
        n.network_type AS network_type,
        n.network_key AS network_key,
        n.formed_by_rule AS formed_by_rule,
+       // Type-specific descriptive properties each network-forming rule
+       // (02/04/06/09) writes onto its :FraudNetwork node — the raw
+       // material for a human-readable network label/reason, since
+       // network_key alone (a FEIN, an address_key, ...) is exactly the
+       // kind of internal identifier an investigator should not have to
+       // read. network_key itself is left untouched: /reject_inference
+       // builds its to_key from "<network_type>:<network_key>" verbatim.
+       n.employer_name AS employer_name,
+       n.employer_fein AS employer_fein,
+       n.address_street AS address_street,
+       n.address_city AS address_city,
+       n.alias_value AS alias_value,
+       n.case_id AS network_case_id,
+       n.wage_link_verified AS wage_link_verified,
+       n.evidence_basis AS evidence_basis,
        collect({
            subject_id: member.subject_id,
-           display_name: coalesce(member.full_name, member.name, member.subject_id),
+           first_name: member.first_name,
+           last_name: member.last_name,
            confidence: mm.confidence,
            status: mm.status,
            source_rule: mm.source_rule,
+           // Rule 2 records WHICH shared allegation type put this pair
+           // together (matched_allegation_type); Rule 9 records whether
+           // the wage-record leg was confirmed. Both are null for the
+           // rules that don't set them — surfaced only when present.
+           allegation_type: mm.allegation_type,
+           wage_link_verified: mm.wage_link_verified,
            is_primary: member.subject_id IN case_subject_ids
        }) AS members
 """
@@ -80,10 +127,10 @@ _STRUCTURAL_EDGES_QUERY = f"""
 MATCH (a:Subject)-[r:{_STRUCTURAL_EDGE_TYPES}]-(b:Subject)
 WHERE a.subject_id IN $member_ids AND b.subject_id IN $member_ids
   AND a.subject_id < b.subject_id
-  AND r.status IN ["active", "rejected"]
+  AND coalesce(r.status, "active") IN ["active", "rejected"]
 RETURN a.subject_id AS source, b.subject_id AS target,
        type(r) AS relationship_type, r.confidence AS confidence,
-       r.status AS status, r.source_rule AS source_rule
+       coalesce(r.status, "active") AS status, r.source_rule AS source_rule
 """
 
 
@@ -107,6 +154,73 @@ def _network_confidence(members: List[Dict[str, Any]]) -> str:
     return max(pool, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
 
 
+def _network_label(row: Dict[str, Any]) -> str:
+    """The name an investigator should actually read at the top of the
+    graph — an employer's name, an address, the alias in question, or
+    the originating case — never the raw network_key (a FEIN, an
+    address_key, ...) that key exists purely for /reject_inference."""
+    network_type = row.get("network_type")
+    network_key = row.get("network_key")
+    if network_type == "Employer":
+        return row.get("employer_name") or (network_key and f"Employer {network_key}") or "Employer network"
+    if network_type == "Address":
+        addr = format_address({"street": row.get("address_street"), "city": row.get("address_city")})
+        return addr or (network_key and f"Address {network_key}") or "Address network"
+    if network_type == "Identity":
+        alias = row.get("alias_value") or network_key
+        return f'Alias "{alias}"' if alias else "Identity network"
+    if network_type == "CheckSplit":
+        case_ref = row.get("network_case_id") or network_key
+        return f"Check-Split network (Case {case_ref})" if case_ref else "Check-Split network"
+    return network_key or network_type or "Fraud network"
+
+
+def _network_reason(row: Dict[str, Any], members: List[Dict[str, Any]]) -> Optional[str]:
+    """One plain-English line explaining WHY this group of subjects was
+    flagged — the fact that formed the network, not just the network's
+    name. Section 6.2's rules each pair a structural fact (shared
+    employer/address/alias) with a second, corroborating condition
+    (matching allegation type, cross-case, wage records); the network
+    name alone shows the first half. Investigators need the second half
+    too, or the graph reads as "these people share an employer" — true,
+    but not itself suspicious, and not what actually put them here."""
+    network_type = row.get("network_type")
+    if network_type == "Employer":
+        employer = row.get("employer_name") or "the same employer"
+        shared_type = next((m.get("allegation_type") for m in members if m.get("allegation_type")), None)
+        if shared_type:
+            return (
+                f"Both subjects are linked to {employer} and each carries an active "
+                f'"{shared_type}" allegation.'
+            )
+        return f"Both subjects are linked to {employer}."
+    if network_type == "Address":
+        return (
+            "Both subjects share this address and each has an active allegation "
+            "on a separate case."
+        )
+    if network_type == "Identity":
+        return (
+            "These subjects share a matching alias pattern, and at least one carries "
+            "an active false-identity allegation."
+        )
+    if network_type == "CheckSplit":
+        verified = row.get("wage_link_verified")
+        if verified is True:
+            return (
+                "Co-subjects on this case with a check-splitting allegation, and "
+                "confirmed to share the same employer's wage records."
+            )
+        if verified is False:
+            return (
+                "Co-subjects on this case with a check-splitting allegation; shared "
+                "wage records could not be verified, so this network is capped at "
+                "Medium confidence."
+            )
+        return "Co-subjects on this case with a check-splitting allegation."
+    return None
+
+
 def get_fraud_network(case_id: str) -> dict:
     """
     Assemble the Fraud Network Graph for one case (D3 / Section 8.1).
@@ -120,17 +234,32 @@ def get_fraud_network(case_id: str) -> dict:
           "networks": [
             {
               "network_type": "Employer" | "Address" | "Identity" | "CheckSplit",
-              "network_key": ...,
+              "network_key": ...,        # internal key — reject flow only, never render this
+              "network_label": ...,      # investigator-facing name, e.g. "Sunrise Staffing LLC"
+              "network_reason": ...,     # one line on WHY this group was flagged
               "formed_by_rule": ...,
               "confidence": "High" | "Medium" | "Unresolved",
-              "nodes": [{"id": subject_id, "display_name": ..., "is_primary": bool}],
+              "nodes": [{"id": subject_id,        # internal — reject flow only, never render this
+                         "display_name": ...,     # "Maria Williams" — this is what the UI shows
+                         "allegation_type": ...,   # present only when the membership recorded one
+                         "is_primary": bool}],
               "edges": [{"source": ..., "target": ..., "relationship_type": ...,
+                         "relationship_label": ...,  # "Shares employer with" — render this, not the enum
                          "confidence": ..., "status": "active" | "rejected",
                          "source_rule": ...}],
             }
           ],
           "network_count": int,
         }
+
+    display_name/network_label/relationship_label are additive — every
+    field the previous contract exposed is still present, unchanged, so
+    an existing caller keying off network_key or relationship_type does
+    not break. They exist because subject_id and network_key are internal
+    identifiers /reject_inference needs, not what an investigator should
+    be shown; a UI built against this contract should render the *_label/
+    *_name/display_name fields and treat id/network_key/relationship_type
+    as opaque keys carried only for the per-edge Reject action.
 
     A case with no fraud-network membership at all (the common case —
     most cases never trip Rules 2/4/6/9) is not an error: networks is
@@ -166,8 +295,11 @@ def get_fraud_network(case_id: str) -> dict:
         nodes = [
             {
                 "id": m["subject_id"],
-                "display_name": m["display_name"],
+                "display_name": _subject_display_name(
+                    m.get("first_name"), m.get("last_name"), m["subject_id"]
+                ),
                 "is_primary": bool(m["is_primary"]),
+                **({"allegation_type": m["allegation_type"]} if m.get("allegation_type") else {}),
             }
             for m in members
         ]
@@ -176,6 +308,9 @@ def get_fraud_network(case_id: str) -> dict:
                 "source": e["source"],
                 "target": e["target"],
                 "relationship_type": e["relationship_type"],
+                "relationship_label": _EDGE_RELATIONSHIP_LABELS.get(
+                    e["relationship_type"], e["relationship_type"]
+                ),
                 "confidence": e["confidence"],
                 "status": e["status"],
                 "source_rule": e["source_rule"],
@@ -186,6 +321,8 @@ def get_fraud_network(case_id: str) -> dict:
         networks.append({
             "network_type": row["network_type"],
             "network_key": row["network_key"],
+            "network_label": _network_label(row),
+            "network_reason": _network_reason(row, members),
             "formed_by_rule": row["formed_by_rule"],
             "confidence": _network_confidence(members),
             "nodes": nodes,

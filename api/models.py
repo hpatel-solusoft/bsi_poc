@@ -139,12 +139,12 @@ class ReportGenerationRequest(BaseModel):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
-    # No reload_ai_summary field, deliberately: unlike similar_cases/plan/
-    # risk_assessment, a generated report is never cached-and-skipped —
-    # Data Persistence Spec D.5 exists specifically so a report "can be
-    # regenerated, compared across drafts". Every /generate_report call
-    # assembles a fresh Related Network read and writes a new draft row;
-    # there is no stale-result case to guard against.
+    # Optional. Default False: if a report has already been generated and
+    # persisted for this case_id (report_artifacts, D.5), skip re-running
+    # the Related Network assembly, Decision Log build, and the LLM
+    # narration, and return the latest persisted draft instead. True:
+    # always re-run the full pipeline and persist a fresh draft row.
+    reload_ai_summary: bool = False
 
 
 class CopilotRequest(BaseModel):

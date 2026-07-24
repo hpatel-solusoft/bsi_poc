@@ -35,6 +35,18 @@
 // fields: c.status when AppWorks gives it, al.status when it does not.
 // A case is a prior-guilty-case candidate if either its own status or its
 // (sole, in the demo data) allegation's status says closed.
+//
+// SAME NULL-SOURCE GAP APPLIES TO THE CLOSURE DATE, NOT JUST THE STATUS:
+// on those same older cases, c.closed_date (WorkfolderCloseDate) is null
+// too. r.date_closed is the sole input to prior-guilt RECENCY weighting
+// in reasoning_layer/risk_signals.py, so a null there left every
+// historical prior undated - detected, but unweighable. The allegation
+// carries its own closure date (Allegations_DateClosed) in exactly those
+// records, so date_closed now coalesces case -> allegation, mirroring the
+// case-then-allegation fallback the status and outcome checks above
+// already use. Still nullable by design: when NEITHER source has a date,
+// r.date_closed stays null and risk_signals applies its documented
+// undated-prior weight rather than this rule inventing a date.
 
 MATCH (a:Subject)-[:APPEARS_IN_CASE]->(c:Case)-[:HAS_ALLEGATION]->(al:Allegation)
 MATCH (al)-[att:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a)
@@ -61,7 +73,7 @@ SET r.confidence     = CASE WHEN att.confidence = "Unresolved" THEN "Unresolved"
                             ELSE "Medium" END,
     r.allegation_id  = al.allegation_id,
     r.outcome        = coalesce(al.outcome, al.status, c.disposition),
-    r.date_closed    = c.closed_date,
+    r.date_closed    = coalesce(c.closed_date, al.date_closed),
     r.source_rule    = "Rule_07_Prior_Guilty",
     r.asserted_at    = $asserted_at,
     r.status         = coalesce(r.status, "active"),

@@ -102,9 +102,37 @@ def _recency_weight(years: Optional[float]) -> float:
 
 
 # --- Neo4j reads. Plain, scalar-returning, single statements each. ---
+#
+# Two DISTINCT FastTrack facts, deliberately read separately — they mean
+# different things and must never be collapsed into one:
+#
+#   is_fasttrack               — AppWorks' asserted fact. A human, in
+#                                AppWorks, set this. Neo4j is not its
+#                                system of record (Principle 11), and
+#                                rule_13_fasttrack_escalation.cypher is
+#                                explicit that it never writes this field.
+#   fasttrack_recommendation_* — Rule 13's own output. The rule fired and
+#                                recommended escalation. Written by the
+#                                rule, owned by the graph.
+#
+# The "FastTrack override" signal is a RULE-FIRED signal: it reports
+# whether Rule 13 fired, not whether a human has since acted on it.
+# Reading only is_fasttrack (the previous behaviour) made the tile
+# display "No" on every case where Rule 13 had fired correctly but no
+# human had yet flipped the AppWorks field — reporting a rule outcome
+# through a field the rule is forbidden from writing. The rule's firing
+# is the fact the tile is asking about, so that is what it now reads.
+#
+# status = "active" is required so an investigator's rejection of Rule 13
+# (reasoning_layer.rejection, _FAMILY_CASE_FLAG) correctly clears the
+# signal rather than leaving a rejected recommendation still counted.
 _FASTTRACK_QUERY = """
 MATCH (c:Case {case_id: $case_id})
-RETURN coalesce(c.is_fasttrack, false) AS is_fasttrack
+RETURN coalesce(c.is_fasttrack, false) AS is_fasttrack,
+       (coalesce(c.fasttrack_recommended, false)
+        AND coalesce(c.fasttrack_recommendation_status, "") = "active")
+           AS fasttrack_recommended,
+       c.fasttrack_reason AS fasttrack_reason
 """
 
 # Rule 8 inputs + prior-guilt recency inputs.
@@ -121,6 +149,21 @@ RETURN prior_guilty_count,
        closed_dates,
        count(DISTINCT mem) AS network_membership_count
 """
+
+# Recency-weight applied when Rule 7 fired but no usable closed_date
+# exists to date it from. Rule 7 writes r.date_closed = c.closed_date,
+# and on older AppWorks cases that source field is simply never
+# populated (the same null-source gap rule_07_prior_guilty.cypher
+# documents for c.status). A null date is missing METADATA about a
+# prior guilty case, not evidence that the prior guilty case is old or
+# absent — so scoring it 0.0, as an unknown-years value previously did
+# via _recency_weight(None), silently deleted a fired rule's entire
+# contribution to the risk score.
+#
+# 0.7 is the 2-5yr weight: the middle band, chosen deliberately as the
+# neutral assumption for an undated prior. It neither rewards the data
+# gap with the full <2yr weight nor penalises it with the >5yr weight.
+_UNDATED_PRIOR_GUILT_RECENCY_WEIGHT = 0.7
 
 # Largest active FraudNetwork the subject belongs to (member count includes
 # the subject).
@@ -200,6 +243,8 @@ def apply_graph_risk_signals(
         ns_rec = session.run(_NETWORK_SIZE_QUERY, subject_id=subject_id).single()
 
     is_fasttrack = bool(ft_rec["is_fasttrack"]) if ft_rec else False
+    fasttrack_recommended = bool(ft_rec["fasttrack_recommended"]) if ft_rec else False
+    fasttrack_reason = ft_rec["fasttrack_reason"] if ft_rec else None
     prior_guilty_count = int(r8_rec["prior_guilty_count"]) if r8_rec else 0
     network_membership_count = int(r8_rec["network_membership_count"]) if r8_rec else 0
     closed_dates = list(r8_rec["closed_dates"]) if r8_rec else []
@@ -209,9 +254,22 @@ def apply_graph_risk_signals(
     rule_8_signal = prior_guilty_count > 0 and network_membership_count > 0
 
     # --- signal 3: prior-guilt recency (most recent prior guilty case) ---
+    # prior_guilt_fired is the SIGNAL; recency_years is optional detail
+    # ABOUT that signal. Rule 7 having fired is a fact in its own right,
+    # independent of whether the source data happened to carry a usable
+    # closed_date to date it with — so the two are reported separately
+    # and the score no longer collapses to zero when only the date is
+    # missing (see _UNDATED_PRIOR_GUILT_RECENCY_WEIGHT).
+    prior_guilt_fired = prior_guilty_count > 0
     recency_candidates = [y for y in (_years_since(d) for d in closed_dates) if y is not None]
     prior_guilt_recency_years = round(min(recency_candidates), 2) if recency_candidates else None
-    recency_weight = _recency_weight(prior_guilt_recency_years) if prior_guilty_count > 0 else 0.0
+
+    if not prior_guilt_fired:
+        recency_weight = 0.0
+    elif prior_guilt_recency_years is None:
+        recency_weight = _UNDATED_PRIOR_GUILT_RECENCY_WEIGHT
+    else:
+        recency_weight = _recency_weight(prior_guilt_recency_years)
 
     # --- signal 2: network size multiplier (graph component only) ---
     network_size_multiplier = _network_size_multiplier(network_size)
@@ -221,7 +279,7 @@ def apply_graph_risk_signals(
 
     # --- assemble the graph score component ---
     rule_8_component = _RULE_8_SIGNAL_WEIGHT if rule_8_signal else 0.0
-    prior_guilt_component = (_PRIOR_GUILT_BASE_WEIGHT * recency_weight) if prior_guilty_count > 0 else 0.0
+    prior_guilt_component = (_PRIOR_GUILT_BASE_WEIGHT * recency_weight) if prior_guilt_fired else 0.0
     graph_component = round((rule_8_component + prior_guilt_component) * network_size_multiplier, 4)
 
     base_score = float(base_result.get("risk_score", 0.0) or 0.0)
@@ -231,7 +289,13 @@ def apply_graph_risk_signals(
     final_tier = _tier_for_score(final_score)
 
     # --- signal 4: FastTrack override — floor the tier at HIGH ---
-    if is_fasttrack:
+    # Fires on EITHER the human-asserted AppWorks flag or Rule 13's own
+    # active recommendation. A case Rule 13 has recommended for
+    # escalation carries the same risk whether or not a human has yet
+    # clicked the button in AppWorks; gating the floor on the human
+    # action alone meant the rule could fire and change nothing.
+    fasttrack_override = is_fasttrack or fasttrack_recommended
+    if fasttrack_override:
         final_tier = _at_least(final_tier, "HIGH")
 
     # Build the augmented result (copy so the base result is never mutated).
@@ -244,18 +308,41 @@ def apply_graph_risk_signals(
         "rule_8_signal": rule_8_signal,
         "network_size": network_size,
         "network_size_multiplier": network_size_multiplier,
+        # Rule 7 fired or not — the signal the "Prior guilt recency" tile
+        # reports. True here means a prior guilty case is on file for this
+        # subject, and stays true whether or not the source data carried a
+        # closed_date. Previously the tile inferred this from
+        # prior_guilt_recency_years alone, so a null date rendered as
+        # "N/A" and a genuinely-fired rule looked like it had not fired.
+        "prior_guilt_signal": prior_guilt_fired,
+        "prior_guilty_count": prior_guilty_count,
+        # Detail ABOUT the signal above, not the signal itself. None means
+        # "fired, but the prior case's closed_date is absent in the source
+        # data" — NOT "no prior guilt". Callers rendering the tile should
+        # branch on prior_guilt_signal and treat this as an optional
+        # qualifier ("Yes" / "Yes — 3.4 yrs"), never as the presence test.
         "prior_guilt_recency_years": prior_guilt_recency_years,
-        "fasttrack_override": is_fasttrack,
+        "prior_guilt_recency_weight": recency_weight,
+        # True when Rule 13 fired OR a human set is_fasttrack in AppWorks.
+        # The two sources are kept separately below so the distinction
+        # stays auditable and Principle 11 is not blurred — the graph
+        # still never claims AppWorks asserted something it did not.
+        "fasttrack_override": fasttrack_override,
+        "fasttrack_recommended": fasttrack_recommended,
+        "fasttrack_reason": fasttrack_reason,
+        "fasttrack_asserted_in_appworks": is_fasttrack,
         "compound_escalation": compound_escalation,
         "graph_score_component": graph_component,
     }
 
     logger.info(
         "apply_graph_risk_signals: case_id=%s subject_id=%s base=%.4f/%s -> final=%.4f/%s "
-        "rule8=%s net_size=%d mult=%.1f recency_yrs=%s fasttrack=%s compound=%s",
+        "rule8=%s net_size=%d mult=%.1f prior_guilt=%s (count=%d recency_yrs=%s weight=%.2f) "
+        "fasttrack=%s (recommended=%s appworks=%s) compound=%s",
         case_id, subject_id, base_score, base_tier, final_score, final_tier,
         rule_8_signal, network_size, network_size_multiplier,
-        prior_guilt_recency_years, is_fasttrack, compound_escalation,
+        prior_guilt_fired, prior_guilty_count, prior_guilt_recency_years, recency_weight,
+        fasttrack_override, fasttrack_recommended, is_fasttrack, compound_escalation,
     )
 
     return {

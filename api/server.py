@@ -46,6 +46,7 @@ from reasoning_layer.neo4j_client import (
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.similar_cases import find_structural_matches
 from reasoning_layer.report_generation import assemble_related_network
+from reasoning_layer.decision_log import build_decision_log
 from reasoning_layer.rejection import (
     reject_inference,
     revert_rejection,
@@ -53,7 +54,7 @@ from reasoning_layer.rejection import (
 )
 from reasoning_layer.fraud_network import get_fraud_network
 from reasoning_layer.rule_audit import get_rule_audit
-from core.report_artifacts_repository import save_report
+from core.report_artifacts_repository import save_report, get_latest_report
 from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.rule_engine import verify_rule_files
@@ -1244,6 +1245,12 @@ def generate_report(req: ReportGenerationRequest):
     is never asked to decide which connections belong in the report
     (Section 8.7). The result is persisted to report_artifacts (D.5) as
     a new draft.
+
+    reload_ai_summary=False (default): if a report already exists for
+    this case_id in report_artifacts, answer from the latest persisted
+    draft — no Related Network re-assembly, no Decision Log rebuild, no
+    LLM call. reload_ai_summary=True always bypasses that cache, re-runs
+    the full pipeline below, and persists a fresh draft row.
     """
     start = time.time()
     try:
@@ -1253,6 +1260,60 @@ def generate_report(req: ReportGenerationRequest):
             "case_id=%s data_source=%s key_count=%d",
             req.case_id, data_source, len(list(case_data.keys())),
         )
+
+        # Report cache (reload_ai_summary=False, default): if a report has
+        # already been generated and persisted for this case_id, answer
+        # from the latest report_artifacts row WITHOUT re-running the
+        # Related Network assembly, Decision Log build, or the LLM
+        # narration again. reload_ai_summary=True always bypasses this
+        # lookup and falls through to a fresh report run below, which
+        # persists a new draft row exactly as before.
+        if not req.reload_ai_summary:
+            cached_report = get_latest_report(req.case_id)
+            if cached_report is not None:
+                cached_content = cached_report.get("content") or {}
+                cached_related_network = cached_content.get("related_network", [])
+                cached_rejected_count = sum(
+                    1 for entry in cached_related_network if entry.get("status") == "rejected"
+                )
+                duration_seconds = round(time.time() - start, 1)
+                logger.info(
+                    "generate_report CACHE HIT for case_id=%s — answering from "
+                    "report_artifacts, no LLM call or Related Network re-assembly made",
+                    req.case_id,
+                )
+                log_agent_call(
+                    case_id=req.case_id,
+                    agent_name="report_generation",
+                    endpoint="/generate_report",
+                    latency_ms=int(duration_seconds * 1000),
+                    status="success",
+                )
+                return {
+                    "case_id": req.case_id,
+                    "status": "completed",
+                    "report_id": cached_content.get("report_id"),
+                    "generated_at": cached_content.get("generated_at"),
+                    "details": {
+                        "agent_summary": render_markdown_html_with_sources(
+                            (cached_content.get("standard_sections") or {}).get("report_markdown", ""),
+                            case_data.get("provenance_trail", []),
+                        ),
+                        "related_network": cached_related_network,
+                        "confidence_summary": cached_content.get(
+                            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
+                        ),
+                        "rejected_count": cached_rejected_count,
+                        "decision_log": cached_content.get("decision_log", []),
+                        "meta": {
+                            "data_source": data_source,
+                            "report_status": cached_content.get("status", "draft"),
+                            "agent_summary_source": "db_cache",
+                            "persisted_to_postgres": True,
+                        },
+                    },
+                }
+
         runner = _get_runner()
 
         subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
@@ -1292,15 +1353,43 @@ def generate_report(req: ReportGenerationRequest):
                                "computed_by": "reasoning_layer.report_generation.assemble_related_network"},
             }
 
-        # Inject the computed network into the case context the prompt
-        # serialises, so the LLM narrates THESE facts (never adds,
-        # removes, or reorders them — REPORT_GENERATION scope carries no
-        # tools, so the LLM cannot re-query the graph itself either).
+        # --- Decision & Override Log assembly (Report Design ACTIONS #3) ---
+        # Deterministic, non-LLM formatting over two inputs /generate_report
+        # already has in hand: the case's investigation-plan override (same
+        # Postgres lookup /plan uses) and the rejected entries out of the
+        # Related Network read just above. No graph or DB call of its own —
+        # see reasoning_layer/decision_log.py. A lookup failure degrades the
+        # same way the related-network read does above: an empty section
+        # rather than a failed report, since a report with no decision log
+        # is still a usable report.
+        try:
+            plan_override = get_override(req.case_id)
+        except Exception as exc:
+            logger.warning(
+                "investigation_plan_overrides lookup failed for case_id=%s "
+                "during report generation — treating as no override: %s",
+                req.case_id, exc,
+            )
+            plan_override = None
+
+        rejected_connections = [
+            entry for entry in related.get("related_network", [])
+            if entry.get("status") == "rejected"
+        ]
+        decision_log_envelope = build_decision_log(rejected_connections, plan_override)
+        decision_log_result = decision_log_envelope["result"]
+
+        # Inject the computed network and decision log into the case
+        # context the prompt serialises, so the LLM narrates THESE facts
+        # (never adds, removes, or reorders them — REPORT_GENERATION scope
+        # carries no tools, so the LLM cannot re-query the graph or
+        # Postgres itself either).
         case_data_for_prompt = {
             **case_data,
             "related_network": related.get("related_network", []),
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
+            "decision_log": decision_log_result.get("decision_log", []),
         }
 
         messages, new_provenance, _ = runner.run_scoped(
@@ -1321,6 +1410,12 @@ def generate_report(req: ReportGenerationRequest):
         sections: dict = {}
         new_provenance = merge_direct_result(
             sections, new_provenance, "related_network", related_envelope,
+        )
+        # Same treatment for the Decision & Override Log — deterministic
+        # Python output, never anything the LLM decided (mirrors the
+        # related_network merge immediately above).
+        new_provenance = merge_direct_result(
+            sections, new_provenance, "decision_log", decision_log_envelope,
         )
 
         assistant_text = extract_agent_summary(messages)
@@ -1343,6 +1438,7 @@ def generate_report(req: ReportGenerationRequest):
             "standard_sections": {"report_markdown": assistant_text},
             "related_network": related.get("related_network", []),
             "confidence_summary": confidence_summary,
+            "decision_log": decision_log_result.get("decision_log", []),
         }
 
         try:
@@ -1380,9 +1476,11 @@ def generate_report(req: ReportGenerationRequest):
                 "related_network": related.get("related_network", []),
                 "confidence_summary": confidence_summary,
                 "rejected_count": related.get("rejected_count", 0),
+                "decision_log": decision_log_result.get("decision_log", []),
                 "meta": {
                     "data_source": data_source,
                     "report_status": "draft",
+                    "agent_summary_source": "llm",
                     "persisted_to_postgres": persisted is not None,
                 },
             },

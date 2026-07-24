@@ -258,6 +258,18 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
                 "record_status": N.clean_text(props.get("Allegations_Status")),
                 "norris_code": N.clean_text(props.get("Allegations_DispositionNorrisCode")),
                 "outcome": N.clean_text(_first(props, "Allegations_Outcome", "Allegations_Disposition")),
+                # Closure date of the allegation itself. Synced because it
+                # is the ONLY closure date present on older AppWorks cases
+                # (e.g. 658423812), where the workfolder-level
+                # WorkfolderCloseDate is never populated. Rule 7 falls back
+                # to this when :Case.closed_date is null, so that a prior
+                # guilty case can still be DATED rather than only detected
+                # — without it, prior-guilt recency scoring in
+                # reasoning_layer/risk_signals.py has no input at all on
+                # exactly the historical cases it most needs to weigh.
+                "date_closed": N.to_iso_date(_first(
+                    props, "Allegations_DateClosed", "Allegations_ClosedDate",
+                )),
                 "comment_text": comment_text,
                 "source_table": "Allegations",
                 "retrieved_at": retrieved_at,
@@ -429,6 +441,7 @@ SET al.allegation_type = a.allegation_type,
     al.record_status   = a.record_status,
     al.norris_code     = a.norris_code,
     al.outcome         = a.outcome,
+    al.date_closed     = a.date_closed,
     al.comment_text    = a.comment_text,
     al.source_system   = $source_system,
     al.source_table    = a.source_table,
