@@ -289,11 +289,8 @@ Generate your response using EXACTLY the following Markdown template.
 [One short paragraph, 2-3 sentences. State the risk tier and risk score exactly as given in "risk_assessment". Then describe any signals given in "graph_signals" (for example temporal acceleration, corroboration ratio, or role distribution) in plain language. Do not interpret or infer anything beyond the values given, and do not mention a signal that is not present in the data.]
  
 ### Similar Cases
-[If "similar_cases" contains one or more matches, leave a blank line, then list each as its own bullet, each starting on a new line, in this exact form:]
- 
-* **[case_id]** — Similarity: [similarity_score]. [One sentence stating the match reason, grounded only in the fields given for that entry.]
-[If similar_cases is empty or not provided, write exactly: "No similar cases identified."]
- 
+[One sentence only. State how many similar cases were identified and the highest similarity score among them, using the values already given in "similar_cases". Do not list individual cases or match reasons here — full detail belongs on the Similar Cases tab. If similar_cases is empty or not provided, write exactly: "No similar cases identified."]
+
 ### Network Connections
 [An opening sentence stating how many active connections were found, using the confidence_summary counts exactly as given. Leave a blank line after that sentence. Then, for each related_network entry with status "active", one bullet, each starting on a new line, in this exact form:]
  
