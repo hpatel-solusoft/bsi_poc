@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
@@ -136,17 +136,56 @@ RETURN coalesce(c.is_fasttrack, false) AS is_fasttrack,
 """
 
 # Rule 8 inputs + prior-guilt recency inputs.
+#
+# WHY THIS RETURNS FIVE DATE FIELDS PER PRIOR CASE, NOT ONE:
+# recency used to read pg.date_closed alone. Rule 7 already coalesces
+# case.closed_date -> allegation.date_closed when it writes that
+# property, but on older AppWorks cases BOTH of those source fields are
+# null (rule_07_prior_guilty.cypher documents this exact null-source
+# gap), so pg.date_closed comes back null and the subject ends up
+# "detected but unweighable" — prior_guilty_count=1 with
+# prior_guilt_recency_years=null, which is what the risk tile was
+# showing.
+#
+# Those same cases DO carry other dates. graph_sync.py populates
+# opened_date from WorkfolderOpenDate OR S_CREATEDDATE, and
+# S_CREATEDDATE is present on essentially every AppWorks record. So the
+# case can almost always be dated — just not from its closure field.
+#
+# All five candidates are returned and the ranking is done in Python
+# (_resolve_prior_recency) rather than with a Cypher coalesce, because
+# the caller needs to know WHICH field answered: a recency derived from
+# opened_date is an estimate and must be labelled as one on a screen
+# that feeds a risk score. A coalesce would collapse that distinction.
 _RULE8_RECENCY_QUERY = """
 MATCH (s:Subject {subject_id: $subject_id})
-OPTIONAL MATCH (s)-[pg:HAS_PRIOR_GUILTY_CASE]->(:Case)
+OPTIONAL MATCH (s)-[pg:HAS_PRIOR_GUILTY_CASE]->(pc:Case)
     WHERE pg.status = "active"
+
+// The specific allegation Rule 7 attributed, when it recorded one.
+// Matched on pg.allegation_id rather than taking any allegation on the
+// case: on a multi-allegation case the others may be unrelated to the
+// guilty finding and their dates would misdate the prior.
+OPTIONAL MATCH (pc)-[:HAS_ALLEGATION]->(pa:Allegation)
+    WHERE pg.allegation_id IS NOT NULL
+      AND pa.allegation_id = pg.allegation_id
+WITH s, pg, pc, collect(DISTINCT pa.date_closed) AS allegation_dates
+
 WITH s,
      count(DISTINCT pg) AS prior_guilty_count,
-     [d IN collect(pg.date_closed) WHERE d IS NOT NULL] AS closed_dates
+     collect({
+         case_id:                pc.case_id,
+         rel_date_closed:        pg.date_closed,
+         case_closed_date:       pc.closed_date,
+         allegation_date_closed: head([d IN allegation_dates WHERE d IS NOT NULL]),
+         case_fraud_end_date:    pc.fraud_end_date,
+         case_opened_date:       pc.opened_date
+     }) AS prior_case_dates
+
 OPTIONAL MATCH (s)-[mem:MEMBER_OF_FRAUD_NETWORK]->(:FraudNetwork)
     WHERE mem.status = "active"
 RETURN prior_guilty_count,
-       closed_dates,
+       prior_case_dates,
        count(DISTINCT mem) AS network_membership_count
 """
 
@@ -179,12 +218,157 @@ RETURN coalesce(max(members), 0) AS max_network_size
 _COMPOUND_RULE_PREFIXES = ("Rule_07", "Rule_08", "Rule_09", "Rule_11")
 
 
-def _years_since(date_str: str) -> Optional[float]:
-    try:
-        d = datetime.fromisoformat(str(date_str)[:10])
-    except (ValueError, TypeError):
+# The date fields consulted, in priority order, to age a prior guilty
+# case. Each entry is (field returned by the query, label reported to
+# the caller, is_estimate).
+#
+# The first three are genuine closure dates and answer the question
+# "how long ago was this subject found guilty?" directly. The last two
+# are NOT closure dates — fraud_end_date is when the alleged conduct
+# stopped and opened_date is when the case was filed, both of which
+# necessarily PRE-date the finding of guilt. Using them therefore
+# OVERSTATES the elapsed years, which is the conservative direction for
+# a risk score: it can only weaken the prior-guilt weight, never
+# inflate it. They are flagged is_estimate=True so the UI can render
+# "~4.2 yrs (est. from case open date)" rather than asserting a
+# precision the data does not support.
+_RECENCY_DATE_SOURCES = (
+    ("rel_date_closed",        "prior_guilty_case.date_closed", False),
+    ("case_closed_date",       "case.closed_date",              False),
+    ("allegation_date_closed", "allegation.date_closed",        False),
+    ("case_fraud_end_date",    "case.fraud_end_date",           True),
+    ("case_opened_date",       "case.opened_date",              True),
+)
+
+# Anything from this year or earlier is treated as an unparsed sentinel
+# rather than a date. AppWorks exports use 1900-01-01 and 0001-01-01 as
+# "empty", and a 2000-year-old prior would silently pin the weight to
+# the >5yr floor while looking like real data. The comparison is
+# inclusive — 1900 IS the sentinel, so excluding only years strictly
+# below it would let the most common one straight through.
+_MIN_PLAUSIBLE_YEAR = 1900
+
+_DATE_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
+    "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d",
+    "%d-%b-%Y", "%b %d, %Y", "%d %b %Y",
+)
+
+
+def _coerce_date(value: Any) -> Optional[datetime]:
+    """
+    Turn whatever the graph holds into a naive datetime, or None.
+
+    The previous implementation was `datetime.fromisoformat(str(v)[:10])`
+    inside a try/except, which is correct ONLY for a plain ISO string.
+    etl/normalizers.to_iso_date does normally produce exactly that, but
+    it returns None whenever it fails to parse, and any property written
+    by something other than that normaliser (a rule, a manual Neo4j fix,
+    a re-import) can hold a native temporal type or a locale format
+    instead. Every one of those cases silently became "no date", which
+    is indistinguishable from "no prior guilt" by the time it reaches
+    the tile.
+    """
+    if value is None or value == "":
         return None
-    return (datetime.now(timezone.utc).replace(tzinfo=None) - d).days / 365.25
+
+    # neo4j.time.Date / DateTime expose to_native(); datetime.date and
+    # datetime.datetime do not.
+    to_native = getattr(value, "to_native", None)
+    if callable(to_native):
+        try:
+            value = to_native()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    # datetime BEFORE date: datetime is a subclass of date, so the
+    # reverse order would truncate every timestamp's time component.
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Epoch seconds/milliseconds, and the .NET "/Date(...)/" wrapper
+    # some AppWorks endpoints emit.
+    digits = text
+    if digits.startswith("/Date(") and digits.endswith(")/"):
+        digits = digits[6:-2].split("+")[0].split("-")[0]
+    if digits.lstrip("-").isdigit() and len(digits.lstrip("-")) in (10, 13):
+        try:
+            seconds = int(digits) / (1000.0 if len(digits.lstrip("-")) == 13 else 1.0)
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(tzinfo=None)
+        except (ValueError, OverflowError, OSError):
+            pass
+
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        pass
+
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text[:len(fmt) + 6].strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _years_since(value: Any) -> Optional[float]:
+    """Years elapsed from `value` until now, or None if it is not a
+    usable date. Never negative: a future date reads as 0.0 years,
+    which is the honest answer to "how long ago" and keeps the <2yr
+    weight rather than producing a nonsensical negative age."""
+    parsed = _coerce_date(value)
+    if parsed is None or parsed.year <= _MIN_PLAUSIBLE_YEAR:
+        return None
+    delta = datetime.now(timezone.utc).replace(tzinfo=None) - parsed
+    return max(delta.days / 365.25, 0.0)
+
+
+def _resolve_prior_recency(prior_case_dates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Age every prior guilty case using the first usable date in
+    _RECENCY_DATE_SOURCES, then report the MOST RECENT one.
+
+    Most recent, not oldest: recency weighting asks "how long since this
+    subject was last found guilty?", so a subject with priors from 2019
+    and 2024 is a 2024-recency risk. min() over years is that.
+
+    Returns a dict that is always fully populated in shape — years/date/
+    source are None together when nothing could be dated, so a caller
+    never has to guess whether a missing key means undated or unset.
+    """
+    best: Optional[Dict[str, Any]] = None
+
+    for entry in prior_case_dates or []:
+        # The Cypher collect() emits one all-null map when the subject
+        # has no priors at all; case_id is the discriminator.
+        if not entry or not entry.get("case_id"):
+            continue
+        for field, label, is_estimate in _RECENCY_DATE_SOURCES:
+            raw = entry.get(field)
+            years = _years_since(raw)
+            if years is None:
+                continue
+            candidate = {
+                "years": round(years, 2),
+                "date": _coerce_date(raw).date().isoformat(),
+                "source": label,
+                "estimated": is_estimate,
+                "case_id": entry.get("case_id"),
+            }
+            if best is None or candidate["years"] < best["years"]:
+                best = candidate
+            break  # first usable field wins for THIS prior case
+
+    if best is None:
+        return {"years": None, "date": None, "source": None,
+                "estimated": False, "case_id": None}
+    return best
 
 
 def _compound_escalation(rules_fired: List[Dict[str, Any]]) -> bool:
@@ -220,7 +404,9 @@ def apply_graph_risk_signals(
         * risk_score / risk_tier            — the final values after signals
         * neo4j_signals: {
               rule_8_signal, network_size, network_size_multiplier,
-              prior_guilt_recency_years, fasttrack_override,
+              prior_guilt_recency_years, prior_guilt_recency_date,
+              prior_guilt_recency_source, prior_guilt_recency_estimated,
+              prior_guilt_recency_case_id, fasttrack_override,
               compound_escalation, graph_score_component
           }
     and a provenance block for the Neo4j graph signals. Together with the
@@ -247,7 +433,7 @@ def apply_graph_risk_signals(
     fasttrack_reason = ft_rec["fasttrack_reason"] if ft_rec else None
     prior_guilty_count = int(r8_rec["prior_guilty_count"]) if r8_rec else 0
     network_membership_count = int(r8_rec["network_membership_count"]) if r8_rec else 0
-    closed_dates = list(r8_rec["closed_dates"]) if r8_rec else []
+    prior_case_dates = list(r8_rec["prior_case_dates"]) if r8_rec else []
     network_size = int(ns_rec["max_network_size"]) if ns_rec else 0
 
     # --- signal 1: Rule 8 — recidivist in an active network ---
@@ -261,12 +447,15 @@ def apply_graph_risk_signals(
     # and the score no longer collapses to zero when only the date is
     # missing (see _UNDATED_PRIOR_GUILT_RECENCY_WEIGHT).
     prior_guilt_fired = prior_guilty_count > 0
-    recency_candidates = [y for y in (_years_since(d) for d in closed_dates) if y is not None]
-    prior_guilt_recency_years = round(min(recency_candidates), 2) if recency_candidates else None
+    recency = _resolve_prior_recency(prior_case_dates)
+    prior_guilt_recency_years = recency["years"]
 
     if not prior_guilt_fired:
         recency_weight = 0.0
     elif prior_guilt_recency_years is None:
+        # Genuinely undated: not one of the five candidate fields held a
+        # usable value. Falls back to the documented neutral weight
+        # rather than deleting the fired rule's contribution.
         recency_weight = _UNDATED_PRIOR_GUILT_RECENCY_WEIGHT
     else:
         recency_weight = _recency_weight(prior_guilt_recency_years)
@@ -322,6 +511,17 @@ def apply_graph_risk_signals(
         # branch on prior_guilt_signal and treat this as an optional
         # qualifier ("Yes" / "Yes — 3.4 yrs"), never as the presence test.
         "prior_guilt_recency_years": prior_guilt_recency_years,
+        # Which field the age was read from, the date itself, and
+        # whether it is an estimate. Reported because a recency derived
+        # from a case OPEN date is weaker evidence than one derived from
+        # its closure date, and a number feeding a risk tier should not
+        # hide which of the two it is. estimated=True means the date
+        # necessarily pre-dates the finding of guilt, so the years are
+        # an upper bound and the weight is conservative.
+        "prior_guilt_recency_date": recency["date"],
+        "prior_guilt_recency_source": recency["source"],
+        "prior_guilt_recency_estimated": recency["estimated"],
+        "prior_guilt_recency_case_id": recency["case_id"],
         "prior_guilt_recency_weight": recency_weight,
         # True when Rule 13 fired OR a human set is_fasttrack in AppWorks.
         # The two sources are kept separately below so the distinction
@@ -337,11 +537,12 @@ def apply_graph_risk_signals(
 
     logger.info(
         "apply_graph_risk_signals: case_id=%s subject_id=%s base=%.4f/%s -> final=%.4f/%s "
-        "rule8=%s net_size=%d mult=%.1f prior_guilt=%s (count=%d recency_yrs=%s weight=%.2f) "
+        "rule8=%s net_size=%d mult=%.1f prior_guilt=%s (count=%d recency_yrs=%s via=%s est=%s weight=%.2f) "
         "fasttrack=%s (recommended=%s appworks=%s) compound=%s",
         case_id, subject_id, base_score, base_tier, final_score, final_tier,
         rule_8_signal, network_size, network_size_multiplier,
-        prior_guilt_fired, prior_guilty_count, prior_guilt_recency_years, recency_weight,
+        prior_guilt_fired, prior_guilty_count, prior_guilt_recency_years,
+        recency["source"], recency["estimated"], recency_weight,
         fasttrack_override, fasttrack_recommended, is_fasttrack, compound_escalation,
     )
 

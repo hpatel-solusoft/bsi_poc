@@ -351,9 +351,69 @@ class FraudNetworkBlock(BaseModel):
     edges: List[FraudNetworkEdge]
 
 
+class GraphNode(BaseModel):
+    """One node of the full case subgraph.
+
+    `id` is label-prefixed ("Subject:658636801") because case_id and
+    subject_id are drawn from the same numeric space in this data — a
+    bare id would collide between a :Case and a :Subject. `key` carries
+    the bare business key for callers that need it (the reject flow).
+    """
+    id: str
+    ref: Optional[str] = None
+    label: str
+    labels: List[str] = []
+    key: Optional[str] = None
+    display_name: Optional[str] = None
+    is_case_subject: bool = False
+    stable_id: bool = True
+    properties: Dict[str, Any] = {}
+
+
+class GraphEdge(BaseModel):
+    """One relationship of the full case subgraph.
+
+    subject_id_a / subject_id_b / rule_id are populated on
+    subject-to-subject edges only; together with relationship_type they
+    are exactly the POST /reject_inference parameters, pre-resolved so
+    the UI reads them off the clicked edge.
+    """
+    id: Optional[str] = None
+    source: str
+    target: str
+    relationship_type: str
+    confidence: Optional[str] = None
+    status: str = "active"
+    source_rule: Optional[str] = None
+    inferred: bool = False
+    rejectable: bool = False
+    subject_id_a: Optional[str] = None
+    subject_id_b: Optional[str] = None
+    rule_id: Optional[str] = None
+    properties: Dict[str, Any] = {}
+
+
+class CaseGraph(BaseModel):
+    """Everything related to the case: all nodes, all relationships."""
+    nodes: List[GraphNode] = []
+    edges: List[GraphEdge] = []
+    node_count: int = 0
+    edge_count: int = 0
+    node_counts_by_label: Dict[str, int] = {}
+    edge_counts_by_type: Dict[str, int] = {}
+    truncated: bool = False
+
+
 class FraudNetworkResponse(BaseModel):
-    """Response for GET /fraud_network/{case_id} (D3 Output Contract)."""
+    """Response for GET /fraud_network/{case_id} (D3 Output Contract).
+
+    `graph` is the full case subgraph. `networks`/`network_count` are
+    the original FraudNetwork-only groupings, retained unchanged so the
+    current screen keeps working while the frontend migrates.
+    """
     case_id: str
+    case_found: bool = True
+    graph: CaseGraph = CaseGraph()
     networks: List[FraudNetworkBlock]
     network_count: int
 
