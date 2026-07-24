@@ -373,10 +373,13 @@ def _display_name(label: str, props: Dict[str, Any], key: str) -> str:
         network_key = props.get("network_key")
         return f"{network_type}: {network_key}" if network_key else network_type
     if label == "Commentary":
+        comment_type = str(props.get("comment_type") or "").strip()
+        if comment_type:
+            return comment_type
         text = str(props.get("comment_text") or "").strip()
         if text:
             return text[:117] + "..." if len(text) > 120 else text
-        return props.get("comment_type") or key
+        return key
     return key
 
 
@@ -410,11 +413,13 @@ def _build_nodes(raw_nodes: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, An
             key = f"ref/{ref}"
         node_id = f"{label}:{key}"
 
+        display_label = label
+
         ref_to_id[ref] = node_id
         nodes.append({
             "id": node_id,
             "ref": ref,
-            "label": label,
+            "label": display_label,
             "labels": labels,
             "key": key,
             "display_name": _display_name(label, props, key),

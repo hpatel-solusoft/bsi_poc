@@ -1,9 +1,9 @@
 from fastapi import HTTPException
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Callable, Dict, Any, Optional, List, Tuple
 
-from config.settings import CONVERSATION_HISTORY_MAX_TURNS
+from config.settings import CONVERSATION_HISTORY_MAX_TURNS, TOP_LEVEL_SECTIONS
 from core import case_session_repository, conversation_repository
 
 logger = logging.getLogger(__name__)
@@ -295,6 +295,195 @@ def persist_case_session(case_id: str, ai_summary: Dict[str, Any]) -> None:
         provenance_trail=ai_summary.get("provenance_trail", []),
         source="appworks_fetch",
     )
+
+
+def _slice_ai_summary_for_persist(case_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Rebuild the ai_summary contract object from a flat CS-4 case_data dict —
+    the exact inverse of _case_data_from_session above, and the same
+    investigation/top-level split api/message_utils.build_ai_summary uses.
+    Duplicated here (rather than imported) because core/ must not depend
+    on api/ (see resolve_case_data's docstring) — this is a few lines of
+    dict slicing, not business logic, so the duplication is cheap.
+    """
+    investigation_data = {k: v for k, v in case_data.items() if k not in TOP_LEVEL_SECTIONS}
+    ai_summary: Dict[str, Any] = {"investigation": investigation_data}
+    for key in ("similar_cases", "risk_assessment", "investigation_plan"):
+        existing = case_data.get(key)
+        if existing is not None:
+            ai_summary[key] = existing
+    ai_summary["provenance_trail"] = case_data.get("provenance_trail", [])
+    return ai_summary
+
+
+_RULES_FIRED_CONFIDENCE_ORDER = {"Unresolved": 0, "Medium": 1, "High": 2}
+
+
+def _recompute_rule_rollup(entry: Dict[str, Any]) -> None:
+    """
+    Recompute the rule-level roll-up fields on `entry` (rules_fired[i]) from
+    its own `instances` list, mirroring reasoning_layer/rules_fired.py's
+    _summarise so the cached snapshot's rule-level status/confidence/
+    rejected_count never drifts out of sync with the instance-level edits
+    update_rules_fired_instance_status just applied. Mutates `entry` in place.
+    """
+    instances = entry.get("instances") or []
+    active = [i for i in instances if i.get("status") == "active"]
+    rejected = [i for i in instances if i.get("status") == "rejected"]
+
+    confidences = [i.get("confidence") for i in active if i.get("confidence")]
+    entry["confidence"] = (
+        max(confidences, key=lambda c: _RULES_FIRED_CONFIDENCE_ORDER.get(c, 0))
+        if confidences else "Unresolved"
+    )
+    entry["fired"] = len(active) > 0
+    entry["corroborated"] = any(i.get("corroborated") for i in active)
+    entry["evidence_count"] = len(active)
+    entry["matched"] = len(instances) > 0
+    entry["rejected_count"] = len(rejected)
+    entry["revertable"] = len(rejected) > 0
+    if active and rejected:
+        entry["status"] = "partially_rejected"
+    elif rejected:
+        entry["status"] = "rejected"
+    elif active:
+        entry["status"] = "active"
+    else:
+        entry["status"] = "not_fired"
+
+
+def update_rules_fired_instance_status(
+    case_id: str,
+    rule_id: str,
+    action: str,
+    investigator_id: str,
+    reason: str,
+    timestamp: str,
+    matches: Callable[[Dict[str, Any]], bool],
+) -> bool:
+    """
+    Sync a POST /reject_inference or /revert_rejection decision into the
+    cached rules_fired snapshot — CS-4's warm CASE_STORE and its PostgreSQL
+    fallback (case_ai_summary_store), the same "investigation.rules_fired"
+    JSON /intake and /generate_report persist. Neo4j remains the system of
+    record for the underlying fact (reasoning_layer/rejection.py owns that
+    write); this only keeps the already-cached snapshot from going stale
+    until the next full pipeline re-run.
+
+    Only ever UPDATES an instance already present under rule_id's
+    "instances" list — matched via `matches`, a per-rule-family predicate
+    built by the caller (reasoning_layer.rejection knows how each rule
+    family's subject_id_a/subject_id_b map onto an instance's fields, this
+    module only knows how to read/write the cached case snapshot). No
+    instance is ever removed: its "status" flips, its "inference" line is
+    replaced outright by the reason the investigator typed for THIS
+    decision (the prior finding text or a prior reject/revert's reason is
+    discarded, not appended to), and rejected_by/rejected_at/reason (or
+    reverted_by/reverted_at/revert_reason) are stamped the same way the
+    Neo4j write stamps them.
+
+    action: "reject" or "revert".
+
+    Best-effort, matching persist_case_session's failure policy: returns
+    False (never raises) if there is no cached snapshot yet for case_id,
+    rule_id isn't present in it, nothing matched, or the Postgres
+    write-through fails. A False return is expected and harmless whenever
+    this is the first reject/revert before /intake has ever cached
+    anything — the next /generate_report or /intake run will assemble the
+    correct state from Neo4j regardless.
+    """
+    if action not in ("reject", "revert"):
+        raise ValueError(f"update_rules_fired_instance_status: unknown action {action!r}")
+
+    try:
+        case_data = try_resolve_case_data(case_id)
+        if not case_data:
+            logger.info(
+                "update_rules_fired_instance_status: no cached snapshot yet for "
+                "case_id=%s — nothing to sync (Neo4j write already applied)", case_id,
+            )
+            return False
+
+        rules_fired = case_data.get("rules_fired")
+        if not isinstance(rules_fired, list):
+            logger.info(
+                "update_rules_fired_instance_status: no rules_fired block cached "
+                "for case_id=%s — nothing to sync", case_id,
+            )
+            return False
+
+        entry = next((e for e in rules_fired if e.get("rule_id") == rule_id), None)
+        if entry is None:
+            logger.info(
+                "update_rules_fired_instance_status: rule_id=%s not present in "
+                "cached rules_fired for case_id=%s — nothing to sync",
+                rule_id, case_id,
+            )
+            return False
+
+        instances = entry.get("instances") or []
+        new_status = "rejected" if action == "reject" else "active"
+        updated = 0
+        for instance in instances:
+            if not matches(instance):
+                continue
+            instance["status"] = new_status
+            instance["revertable"] = new_status == "rejected"
+
+            audit = dict(instance.get("rejection") or {})
+            if action == "reject":
+                audit.pop("reverted_by", None)
+                audit.pop("reverted_at", None)
+                audit.pop("revert_reason", None)
+                audit["rejected_by"] = investigator_id
+                audit["rejected_at"] = timestamp
+                audit["reason"] = reason
+            else:
+                audit.pop("rejected_by", None)
+                audit.pop("rejected_at", None)
+                audit.pop("reason", None)
+                audit["reverted_by"] = investigator_id
+                audit["reverted_at"] = timestamp
+                audit["revert_reason"] = reason
+            instance["rejection"] = audit
+
+            # Replace "inference" entirely with the reason the investigator
+            # entered — the old finding text (or a prior reject/revert's
+            # reason) is removed, not appended to. This is a full
+            # replacement each time, so there is nothing to strip or track
+            # between cycles: whatever reason is given for THIS decision is
+            # the whole of what "inference" holds afterward.
+            instance["inference"] = reason
+
+            updated += 1
+
+        if not updated:
+            logger.info(
+                "update_rules_fired_instance_status: no matching instance found "
+                "for case_id=%s rule_id=%s action=%s — nothing to sync",
+                case_id, rule_id, action,
+            )
+            return False
+
+        _recompute_rule_rollup(entry)
+        case_data["rules_fired"] = rules_fired
+        CASE_STORE[case_id] = case_data
+
+        ai_summary = _slice_ai_summary_for_persist(case_data)
+        persist_case_session(case_id, ai_summary)
+
+        logger.info(
+            "update_rules_fired_instance_status: synced case_id=%s rule_id=%s "
+            "action=%s instances_updated=%d", case_id, rule_id, action, updated,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "update_rules_fired_instance_status: FAILED (non-fatal) for "
+            "case_id=%s rule_id=%s action=%s — cached snapshot may be stale "
+            "until the next pipeline run", case_id, rule_id, action,
+        )
+        return False
 
 
 def validate_conversation_history(

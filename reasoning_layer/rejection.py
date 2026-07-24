@@ -94,6 +94,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from core.case_store import update_rules_fired_instance_status
 from reasoning_layer.neo4j_client import get_session
 from reasoning_layer.scope import resolve_scope
 from utils.provenance import graph_provenance
@@ -154,6 +155,69 @@ _RULE_SPECS: Dict[str, _RuleSpec] = {
 }
 
 RULE_IDS_REJECTABLE: List[str] = sorted(_RULE_SPECS)
+
+
+def _build_cached_instance_matcher(spec: _RuleSpec, items: List[Dict[str, Optional[str]]]):
+    """
+    Build the predicate core.case_store.update_rules_fired_instance_status
+    uses to find, in the CACHED rules_fired snapshot's "instances" list,
+    the same instances `items` (this call's subject_id_a/subject_id_b rows,
+    straight from _locate_and_reject / _locate_and_revert) just changed in
+    Neo4j. This is the one place that translates the per-family encoding in
+    _RULE_SPECS/subject_id_a/subject_id_b onto the field names
+    reasoning_layer/rules_fired.py's _instance() puts on a cached instance
+    (subject_id, related_subject_id, related_case_id, related_network_key)
+    — mirroring the module docstring's per-family knowledge, just aimed at
+    the cache instead of Neo4j.
+
+    Matches against the whole `items` list at once (not one item at a
+    time) because reject/revert are bulk operations — one rule_id click
+    can affect several instances in a single call.
+    """
+    if spec.family == _FAMILY_SYMMETRIC_EDGE:
+        pairs = {frozenset((it["subject_id_a"], it["subject_id_b"])) for it in items}
+        return lambda inst: frozenset(
+            (inst.get("subject_id"), inst.get("related_subject_id"))
+        ) in pairs
+
+    if spec.family == _FAMILY_SUBJECT_CASE_EDGE:
+        pairs = {(it["subject_id_a"], it["subject_id_b"]) for it in items}
+        return lambda inst: (inst.get("subject_id"), inst.get("related_case_id")) in pairs
+
+    if spec.family == _FAMILY_NETWORK_EDGE:
+        # subject_id_b is "<network_type>:<network_key>"; the cached instance
+        # only carries the bare network_key (related_network_key), and the
+        # row is collapsed to ONE representative subject per network (see
+        # rules_fired.py's Rule_02/04/06/09 queries), so network_key alone
+        # is the reliable match key — not subject_id.
+        network_keys = {
+            (it["subject_id_b"].split(":", 1)[1] if it["subject_id_b"] and ":" in it["subject_id_b"]
+             else it["subject_id_b"])
+            for it in items
+        }
+        return lambda inst: inst.get("related_network_key") in network_keys
+
+    if spec.family == _FAMILY_SUBJECT_FLAG:
+        subject_ids = {it["subject_id_a"] for it in items}
+        return lambda inst: inst.get("subject_id") in subject_ids
+
+    if spec.family == _FAMILY_CASE_FLAG:
+        # At most one active instance per case (module docstring) — the
+        # cached instance for these rules carries related_case_id but no
+        # subject_id, so case_id is already the full disambiguator.
+        case_ids = {it["subject_id_b"] for it in items}
+        return lambda inst: inst.get("related_case_id") in case_ids
+
+    if spec.family == _FAMILY_ALLEGATION_FLAG:
+        # The cached instance has no allegation_id field to match against
+        # (rules_fired.py's Rule_12 row never surfaces one — see
+        # _INSTANCE_KEYS), so this matches every cached instance for the
+        # rejected/reverted subject(s) within this rule_id — the same
+        # bulk-by-subject scope _BULK_REJECT_ALLEGATION_FLAG itself uses.
+        subject_ids = {it["subject_id_a"] for it in items}
+        return lambda inst: inst.get("subject_id") in subject_ids
+
+    return lambda inst: False  # pragma: no cover
 
 
 # --- Cypher: one bulk locate-and-reject statement per family. Every SET
@@ -509,6 +573,21 @@ def reject_inference(case_id: str, rule_id: str, reason: str, investigator_id: s
         case_id, rule_id, spec.relationship_type, investigator_id, len(rejected_items),
     )
 
+    # Sync the cached rules_fired snapshot (CS-4 + case_ai_summary_store) so
+    # the stored JSON reflects this rejection's status + reason right away.
+    # Best-effort and non-blocking (see update_rules_fired_instance_status'
+    # docstring) — Neo4j above is already the authoritative write; a miss or
+    # failure here never fails this request.
+    update_rules_fired_instance_status(
+        case_id=case_id,
+        rule_id=rule_id,
+        action="reject",
+        investigator_id=investigator_id,
+        reason=reason,
+        timestamp=rejected_at,
+        matches=_build_cached_instance_matcher(spec, rejected_items),
+    )
+
     result = {
         "accepted": True,
         "case_id": case_id,
@@ -796,6 +875,20 @@ def revert_rejection(case_id: str, rule_id: str, investigator_id: str, reason: s
         "revert_rejection: case_id=%s rule_id=%s relationship_type=%s "
         "investigator_id=%s reason=%s count=%d",
         case_id, rule_id, spec.relationship_type, investigator_id, reason, len(reverted_items),
+    )
+
+    # Sync the cached rules_fired snapshot (CS-4 + case_ai_summary_store) so
+    # the stored JSON reflects this revert's status + reason right away.
+    # Best-effort and non-blocking, same as reject_inference above — Neo4j
+    # is already the authoritative write.
+    update_rules_fired_instance_status(
+        case_id=case_id,
+        rule_id=rule_id,
+        action="revert",
+        investigator_id=investigator_id,
+        reason=reason,
+        timestamp=reverted_at,
+        matches=_build_cached_instance_matcher(spec, instances),
     )
 
     return {
