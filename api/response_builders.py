@@ -383,7 +383,7 @@ def fired_rules_only(rules_fired: Optional[List[dict]]) -> List[dict]:
     """
     return [
         entry for entry in (rules_fired or [])
-        if isinstance(entry, dict) and entry.get("fired")
+        if isinstance(entry, dict) and entry.get("matched")
     ]
 
 
