@@ -47,6 +47,35 @@
 // load, verified pairs upgrade themselves on the next run with no code
 // change — this is not a permanent loosening of the rule.
 
+// ALLEGATION-TYPE NARROWNESS, EXPLICIT AND FLAGGED (added — the reason
+// this rule was not firing on real AppWorks cases).
+//
+// al.allegation_type is a controlled-vocabulary STRING (see
+// etl/graph_sync.py's own comment at the allegation_type mapping):
+// AppWorks' AllegationType lookup gives broad program categories —
+// "Personal Care Attendant", "Benefits Fraud", etc. — never a fraud-
+// MECHANISM sub-type like "check-splitting". The original CONTAINS check
+// below against al.allegation_type only ever matched the POC seed data
+// (reasoning_layer/seed_data/poc_seed_data.cypher literally sets
+// al1.allegation_type = "Check-Splitting" for its demo allegation), which
+// is not what real cases look like — every allegation loaded from AppWorks
+// carries a program-category type, so the rule could never fire on
+// production data even when the case narrative plainly describes
+// check-splitting.
+//
+// The check-split language investigators actually write lives in the
+// Allegation's (or the Case's) narrative commentary — Allegations_Comment
+// / WorkfolderCommentary, loaded by etl/graph_sync.py as
+// (:Allegation|:Case)-[:HAS_COMMENTARY]->(:Commentary {comment_text}).
+// The allegation_type check is kept (a controlled-vocabulary hit is the
+// stronger, structured signal when it exists) and OR'd with a commentary
+// text match on the same keyword list, checked on both the allegation's
+// own commentary and the case-level commentary — mirroring exactly the
+// narrative-vs-structural pattern Rule 14 already uses elsewhere in this
+// pipeline (comm.comment_text / HAS_COMMENTARY), just read directly here
+// instead of via a separate corroboration edge, since this is the
+// signal that makes the rule fire at all, not a confidence elevation on
+// top of an existing relationship.
 MATCH (a:Subject)-[co:IS_CO_SUBJECT_WITH]-(b:Subject)
 WHERE a.subject_id < b.subject_id
   AND (a.subject_id IN $scope_subject_ids OR b.subject_id IN $scope_subject_ids)
@@ -54,6 +83,16 @@ MATCH (a)-[:APPEARS_IN_CASE]->(c:Case)<-[:APPEARS_IN_CASE]-(b)
 MATCH (c)-[:HAS_ALLEGATION]->(al:Allegation)
 WHERE any(t IN $checksplit_allegation_types
           WHERE toLower(coalesce(al.allegation_type, "")) CONTAINS t)
+   OR EXISTS {
+        MATCH (al)-[:HAS_COMMENTARY]->(comm:Commentary)
+        WHERE any(t IN $checksplit_allegation_types
+                  WHERE toLower(coalesce(comm.comment_text, "")) CONTAINS t)
+      }
+   OR EXISTS {
+        MATCH (c)-[:HAS_COMMENTARY]->(comm:Commentary)
+        WHERE any(t IN $checksplit_allegation_types
+                  WHERE toLower(coalesce(comm.comment_text, "")) CONTAINS t)
+      }
 MATCH (al)-[att:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(attributed:Subject)
 WHERE att.status = "active"
   AND attributed.subject_id IN [a.subject_id, b.subject_id]

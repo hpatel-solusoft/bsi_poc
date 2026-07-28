@@ -149,7 +149,7 @@ RETURN rej.relationship_type AS relationship_type,
        rej.rejected_by AS investigator_id, rej.rejected_at AS rejected_at,
        rej.reason AS reason, rej.rule_id AS rule_id
 """
-print("_REJECTIONS_QUERY",_REJECTIONS_QUERY)
+# print("_REJECTIONS_QUERY",_REJECTIONS_QUERY)
 
 def _envelope(result: Dict[str, Any]) -> dict:
     """Standard {result, provenance} envelope (Principle 8) — identical in
