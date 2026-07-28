@@ -245,5 +245,5 @@ rules:
     name: "Extraction-Confirmed Relationship Elevation"
     description: "An inferred relationship was independently confirmed by narrative evidence, elevating its confidence."
     wave: 0
-    enabled: true
+    enabled: false
     params: {}

@@ -385,7 +385,7 @@ _PROP_RULES: Dict[str, str] = {
 """,
     "Rule_08_Recidivist_Escalation": """
         MATCH (c:Case)
-        WHERE c.case_id IN $scope_case_ids
+        WHERE c.case_id = $case_id
           AND c.risk_escalation_source_rule = "Rule_08_Recidivist_Escalation"
           AND coalesce(c.risk_escalation_status, "active") IN ["active", "rejected"]
         RETURN c.case_id AS related_case_id,

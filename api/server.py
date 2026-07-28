@@ -1464,6 +1464,9 @@ def generate_report(req: ReportGenerationRequest):
             "rejected_count": related.get("rejected_count", 0),
             "decision_log": decision_log_result.get("decision_log", []),
         }
+        print("=================================================================================================================================")
+        print(case_data_for_prompt)
+        print("=================================================================================================================================")
 
         messages, new_provenance, _ = runner.run_scoped(
             system_prompt=build_report_generation_prompt(case_data_for_prompt),

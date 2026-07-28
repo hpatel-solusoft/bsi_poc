@@ -364,21 +364,28 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
     if not blocks:
         return []
 
+    # for rule #13, replace highlighted code with below:
+    _CASE_LEVEL_RULE_IDS = {"Rule_08_Recidivist_Escalation", "Rule_13_FastTrack_Escalation"}
+    
     merged: List[Dict[str, Any]] = []
     for index, template in enumerate(blocks[0]):
         entry = dict(template)
+        rule_id = entry.get("rule_id")
         instances: List[Dict[str, Any]] = []
         seen = set()
         for block in blocks:
             for instance in block[index].get("instances", []):
-                network_key = instance.get("related_network_key")
-                if network_key is not None:
-                    key = ("related_network_key", str(network_key))
+                if rule_id in _CASE_LEVEL_RULE_IDS:
+                    key = ("case_level", rule_id)
                 else:
-                    key = tuple(sorted(
-                        (k, str(v)) for k, v in instance.items()
-                        if k not in ("confidence", "corroborated")
-                    ))
+                    network_key = instance.get("related_network_key")
+                    if network_key is not None:
+                        key = ("related_network_key", str(network_key))
+                    else:
+                        key = tuple(sorted(
+                            (k, str(v)) for k, v in instance.items()
+                            if k not in ("confidence", "corroborated")
+                        ))
                 if key in seen:
                     continue
                 seen.add(key)
