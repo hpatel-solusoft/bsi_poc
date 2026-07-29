@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from core.case_store import (
     CASE_STORE,
     fetch_copilot_history,
@@ -46,6 +47,7 @@ from reasoning_layer.neo4j_client import (
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.similar_cases import find_structural_matches
 from reasoning_layer.report_generation import assemble_related_network
+from reasoning_layer.report_llm_context import build_report_llm_context
 from reasoning_layer.decision_log import build_decision_log
 from reasoning_layer.rejection import (
     reject_inference,
@@ -55,6 +57,7 @@ from reasoning_layer.rejection import (
 from reasoning_layer.fraud_network import get_fraud_network
 from reasoning_layer.rule_audit import get_rule_audit
 from core.report_artifacts_repository import save_report, get_latest_report
+from utils.report_pdf_renderer import render_report_pdf, report_pdf_filename
 from neo4j.exceptions import Neo4jError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.rule_engine import verify_rule_files
@@ -1464,12 +1467,21 @@ def generate_report(req: ReportGenerationRequest):
             "rejected_count": related.get("rejected_count", 0),
             "decision_log": decision_log_result.get("decision_log", []),
         }
-        # print("=================================================================================================================================")
-        # print(case_data_for_prompt)
-        # print("=================================================================================================================================")
+        # case_data_for_prompt above is the FULL context (superset of what
+        # the report needs — kept as-is; nothing downstream that reads
+        # case_data_for_prompt itself changes). build_report_llm_context
+        # derives a MINIMIZED copy of it for the LLM prompt ONLY: drops
+        # agent_summary_cache / provenance_trail / network_match_flag,
+        # keeps only the Primary Subject, strips rejection-audit
+        # attribution (who/when) from rules_fired instances, trims
+        # risk_assessment down to scores, similar_cases down to count +
+        # similarity signal, investigation_plan down to steps, and
+        # collapses prior-guilty case lists to a count. See
+        # reasoning_layer/report_llm_context.py for the full rationale.
+        llm_prompt_context = build_report_llm_context(case_data_for_prompt, case_id=req.case_id)
 
         messages, new_provenance, _ = runner.run_scoped(
-            system_prompt=build_report_generation_prompt(case_data_for_prompt),
+            system_prompt=build_report_generation_prompt(llm_prompt_context),
             user_message=(
                 f"Compose the investigation report narrative for case {req.case_id} "
                 "from the case record already provided. The Related Network and "
@@ -1575,6 +1587,278 @@ def generate_report(req: ReportGenerationRequest):
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
     finally:
         logger.info("POST /generate_report completed for case_id=%s", req.case_id)
+
+
+@app.post("/generate_report/pdf")
+def generate_report_pdf(req: ReportGenerationRequest):
+    """
+    ON-DEMAND — Report PDF Export Route (New_REPORT_Design_1.md,
+    ACTIONS #6-#7 / TASKS #5-#6). Same request contract as POST
+    /generate_report (ReportGenerationRequest: case_id, optional
+    ai_summary, optional reload_ai_summary) and the exact same
+    case-resolution, Related Network assembly, plan-override read,
+    report cache, and Decision & Override Log pipeline — this route is
+    a deliberate DUPLICATE of that pipeline, not a wrapper around it, so
+    a future change to one route is never silently and implicitly
+    inherited by the other. See POST /generate_report above for the
+    full rationale behind every step below (cache semantics, the
+    fresh-read-before-cache-check ordering, why the Decision & Override
+    Log is re-derived even on a cache hit, etc.) — none of that changes
+    here.
+
+    The only difference is the last step: instead of returning the
+    generated report as JSON, the finished report markdown (the same
+    `report_markdown` body /generate_report returns inside
+    details.agent_summary, pre-HTML-conversion) is rendered to a
+    paginated PDF via utils/report_pdf_renderer.py — a NEW, static,
+    non-interactive renderer (NOT utils/html_converter.py, whose
+    <details>/<summary> collapsible sections are built for on-screen
+    clicking and can end up hidden entirely in a headless print render;
+    see New_REPORT_Design_1.md TASKS #5) — and streamed back as a
+    downloadable application/pdf response.
+
+    Every draft this route produces or reuses is persisted to
+    report_artifacts (D.5) exactly as /generate_report persists it —
+    the two routes read and write the same drafts, so calling one after
+    the other never triggers a redundant LLM call.
+    """
+    start = time.time()
+    try:
+        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
+        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        logger.info(
+            "case_id=%s data_source=%s key_count=%d",
+            req.case_id, data_source, len(list(case_data.keys())),
+        )
+
+        runner = _get_runner()
+
+        subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+        if not subject_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Report generation requires a resolved primary subject for "
+                    f"case_id={req.case_id}. Run /intake first."
+                ),
+            )
+
+        # --- AI-18: deterministic Related Network assembly (Section 8.7) ---
+        # Identical to /generate_report — see that route for the full
+        # rationale on why this runs BEFORE the cache check below.
+        try:
+            related_envelope = assemble_related_network(req.case_id, subject_id)
+            related = related_envelope["result"]
+        except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+            logger.warning(
+                "related-network assembly unavailable for case_id=%s subject_id=%s — %s",
+                req.case_id, subject_id, exc,
+            )
+            related = {
+                "subject_id": subject_id, "related_network": [],
+                "confidence_summary": {"high": 0, "medium": 0, "unresolved": 0},
+                "rejected_count": 0, "unavailable_reason": str(exc),
+            }
+            related_envelope = {
+                "result": related,
+                "provenance": {"sources": [], "retrieved_at": "",
+                               "computed_by": "reasoning_layer.report_generation.assemble_related_network"},
+            }
+
+        # investigation_plan_overrides (Section D.6) — fetched fresh here,
+        # before the cache check, same as /generate_report.
+        try:
+            plan_override = get_override(req.case_id)
+        except Exception as exc:
+            logger.warning(
+                "investigation_plan_overrides lookup failed for case_id=%s "
+                "during report generation — treating as no override: %s",
+                req.case_id, exc,
+            )
+            plan_override = None
+
+        # Report cache (reload_ai_summary=False, default) — identical
+        # semantics to /generate_report's cache check. On a hit, splice a
+        # freshly-derived Decision & Override Log into the cached
+        # narrative markdown (no LLM call), then render THAT markdown to
+        # PDF instead of returning it as JSON.
+        if not req.reload_ai_summary:
+            cached_report = get_latest_report(req.case_id)
+            if cached_report is not None:
+                cached_content = cached_report.get("content") or {}
+                cached_related_network = cached_content.get("related_network", [])
+                live_related_network = related.get("related_network", [])
+
+                if live_related_network == cached_related_network:
+                    cached_rejected_connections = [
+                        entry for entry in cached_related_network if entry.get("status") == "rejected"
+                    ]
+                    decision_log_envelope = build_decision_log(cached_rejected_connections, plan_override)
+                    decision_log_result = decision_log_envelope["result"]
+
+                    cached_report_markdown = (cached_content.get("standard_sections") or {}).get(
+                        "report_markdown", ""
+                    )
+                    resolved_report_markdown = replace_markdown_section(
+                        cached_report_markdown,
+                        "Decision & Override Log",
+                        decision_log_result["decision_log_markdown"],
+                    )
+
+                    duration_seconds = round(time.time() - start, 1)
+                    logger.info(
+                        "generate_report/pdf CACHE HIT for case_id=%s — Related Network "
+                        "unchanged since last draft, rendering PDF from report_artifacts "
+                        "with a freshly-derived Decision & Override Log, no LLM call made",
+                        req.case_id,
+                    )
+                    log_agent_call(
+                        case_id=req.case_id,
+                        agent_name="report_generation",
+                        endpoint="/generate_report/pdf",
+                        latency_ms=int(duration_seconds * 1000),
+                        status="success",
+                    )
+
+                    cached_report_id = cached_content.get("report_id", "")
+                    cached_generated_at = cached_content.get("generated_at", "")
+                    pdf_bytes = render_report_pdf(
+                        resolved_report_markdown,
+                        case_id=req.case_id,
+                        report_id=cached_report_id,
+                        generated_at=cached_generated_at,
+                    )
+                    filename = report_pdf_filename(req.case_id, cached_report_id)
+                    return Response(
+                        content=pdf_bytes,
+                        media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                    )
+
+                logger.info(
+                    "generate_report/pdf CACHE STALE for case_id=%s — Related Network has "
+                    "changed since the last draft (rejection, revert, or new connection); "
+                    "regenerating a fresh report instead of serving report_artifacts",
+                    req.case_id,
+                )
+
+        # --- Decision & Override Log assembly (Report Design ACTIONS #3) ---
+        # Identical to /generate_report.
+        rejected_connections = [
+            entry for entry in related.get("related_network", [])
+            if entry.get("status") == "rejected"
+        ]
+        decision_log_envelope = build_decision_log(rejected_connections, plan_override)
+        decision_log_result = decision_log_envelope["result"]
+
+        # Same context assembly and prompt as /generate_report — the LLM
+        # narrates the Related Network, Reviewed and Excluded Connections,
+        # and Decision & Override Log sections; it never decides their
+        # contents.
+        case_data_for_prompt = {
+            **case_data,
+            "rules_fired": fired_rules_only(case_data.get("rules_fired")),
+            "related_network": related.get("related_network", []),
+            "confidence_summary": related.get("confidence_summary", {}),
+            "rejected_count": related.get("rejected_count", 0),
+            "decision_log": decision_log_result.get("decision_log", []),
+        }
+        llm_prompt_context = build_report_llm_context(case_data_for_prompt, case_id=req.case_id)
+
+        messages, new_provenance, _ = runner.run_scoped(
+            system_prompt=build_report_generation_prompt(llm_prompt_context),
+            user_message=(
+                f"Compose the investigation report narrative for case {req.case_id} "
+                "from the case record already provided. The Related Network and "
+                "Reviewed and Excluded Connections sections are already finalized "
+                "in related_network — narrate every entry given, in full, without "
+                "adding, removing, or reordering any of them."
+            ),
+            scope="REPORT_GENERATION",
+        )
+
+        # The authoritative related_network section is the DETERMINISTIC
+        # graph result, not anything the LLM produced.
+        sections: dict = {}
+        new_provenance = merge_direct_result(
+            sections, new_provenance, "related_network", related_envelope,
+        )
+        new_provenance = merge_direct_result(
+            sections, new_provenance, "decision_log", decision_log_envelope,
+        )
+
+        assistant_text = extract_agent_summary(messages)
+
+        merged_provenance = merge_provenance(
+            case_data.get("provenance_trail", []),
+            new_provenance,
+        )
+
+        report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        generated_at = datetime.now(timezone.utc).isoformat()
+        confidence_summary = related.get(
+            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
+        )
+        report_content = {
+            "report_id": report_id,
+            "case_id": req.case_id,
+            "generated_at": generated_at,
+            "status": "draft",
+            "standard_sections": {"report_markdown": assistant_text},
+            "related_network": related.get("related_network", []),
+            "confidence_summary": confidence_summary,
+            "decision_log": decision_log_result.get("decision_log", []),
+        }
+
+        try:
+            validated_report = GeneratedReportContract(**report_content)
+            report_content = validated_report.model_dump(exclude_none=True)
+        except Exception as e:
+            logger.warning(
+                f"Generated report schema validation failed for case_id={req.case_id} "
+                f"— storing unvalidated: {e}"
+            )
+
+        # D.5: report_artifacts is a working/draft copy only — same
+        # persistence as /generate_report, so both routes share the same
+        # draft history for a given case_id. A write failure here must
+        # not fail this investigator-facing PDF download.
+        persisted = save_report(req.case_id, report_content, status="draft")
+
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="report_generation",
+            endpoint="/generate_report/pdf",
+            latency_ms=int((time.time() - start) * 1000),
+            status="success",
+        )
+
+        pdf_bytes = render_report_pdf(
+            assistant_text,
+            case_id=req.case_id,
+            report_id=report_id,
+            generated_at=generated_at,
+        )
+        filename = report_pdf_filename(req.case_id, report_id)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Report PDF generation route failed for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="report_generation",
+            endpoint="/generate_report/pdf",
+            latency_ms=int((time.time() - start) * 1000),
+            status="error",
+        )
+        raise HTTPException(status_code=500, detail=f"Report PDF generation failed: {exc}") from exc
+    finally:
+        logger.info("POST /generate_report/pdf completed for case_id=%s", req.case_id)
 
 
 @app.post("/reject_inference", response_model=RejectInferenceResponse)

@@ -709,6 +709,7 @@ def render_agent_summary(
             "tables",
             "fenced-code-blocks",
             "strike",
+            "cuddled-lists",
         ],
     )
 
