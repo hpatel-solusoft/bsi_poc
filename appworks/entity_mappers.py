@@ -341,8 +341,16 @@ def fetch_subject_rows(workfolder_id: str, tracker: ProvenanceTracker) -> List[D
             logger.warning("⚠️ Subject row with no resolvable Subjects_Subject id skipped")
             continue
 
+        # subject_row_id identifies the Subjects bridge row (the
+        # Workfolder<->Subject join for THIS case) — a different AppWorks
+        # record from the Subject itself. Citing it as "Subject" duplicated
+        # the SubjectDetail citation below with a second, unrelated id and
+        # attributed the case-link record's id to what looked like the
+        # Subject record. Subject_SubjectWorkfolderMapping is the
+        # allowlisted type for exactly this bridge row (see
+        # config/settings.ALLOWED_ENTITIES) — use it, not "Subject".
         subject_row_id = item.get("Identity", {}).get("Id")
-        tracker.add_source("Subject", subject_row_id)
+        tracker.add_source("Subject_SubjectWorkfolderMapping", subject_row_id)
         tracker.add_source("SubjectDetail", subject_detail_id)
 
         role_props = embedded(item, "Subjects_SubjectRoleRelationship")

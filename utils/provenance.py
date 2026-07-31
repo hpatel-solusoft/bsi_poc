@@ -85,7 +85,12 @@ class ProvenanceTracker:
     DISPLAY_NAMES = {
         "SubjectDetail": "Subject",
         "FraudRiskRule": "Risk Rule",
-        "Workfolder": "Case File"
+        "Workfolder": "Case File",
+        # The Subjects bridge row (Workfolder<->Subject join for one case) —
+        # distinct from the Subject record itself (SubjectDetail, above).
+        # Kept as its own citation rather than merged into "Subject" so a
+        # bridge-row id is never displayed as if it were the Subject's own id.
+        "Subject_SubjectWorkfolderMapping": "Subject-Case Link",
     }
 
     def __init__(self, base_entity_type: str, base_entity_id: Optional[str]):
