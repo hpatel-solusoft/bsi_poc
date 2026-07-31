@@ -127,7 +127,10 @@ def get_narrative_records(subject_id: str) -> Dict[str, Any]:
     comment_count = sum(len(row.get("commentary") or []) for row in allegations)
     logger.info(
         "commentary_reader: subject_id=%s allegations=%d comments=%d structural_relationships=%d",
-        subject_id, len(allegations), comment_count, len(structural),
+        subject_id,
+        len(allegations),
+        comment_count,
+        len(structural),
     )
     return {
         "subject_id": subject_id,

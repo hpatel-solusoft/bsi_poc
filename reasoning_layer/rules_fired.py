@@ -452,8 +452,11 @@ _PROP_RULES: Dict[str, str] = {
 # no related_case_id, and inventing a null one would suggest the rule looked
 # for a case and found none.
 _INSTANCE_KEYS = (
-    "subject_id", "related_subject_id", "related_case_id",
-    "related_network_key", "allegation_type",
+    "subject_id",
+    "related_subject_id",
+    "related_case_id",
+    "related_network_key",
+    "allegation_type",
 )
 
 
@@ -467,14 +470,8 @@ def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
     an investigator that something matched but not what, which is not
     enough to accept or reject the inference.
     """
-    instance = {
-        key: row[key] for key in _INSTANCE_KEYS
-        if row.get(key) is not None
-    }
-    detail = {
-        k: v for k, v in (row.get("detail") or {}).items()
-        if v is not None and v != []
-    }
+    instance = {key: row[key] for key in _INSTANCE_KEYS if row.get(key) is not None}
+    detail = {k: v for k, v in (row.get("detail") or {}).items() if v is not None and v != []}
     if detail:
         instance["detail"] = detail
     instance["confidence"] = row.get("confidence") or "Unresolved"
@@ -490,10 +487,7 @@ def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
     status = row.get("status") or "active"
     instance["status"] = status
     instance["revertable"] = status == "rejected"
-    audit = {
-        k: v for k, v in (row.get("rejection") or {}).items()
-        if v is not None and v != ""
-    }
+    audit = {k: v for k, v in (row.get("rejection") or {}).items() if v is not None and v != ""}
     if audit:
         # Who rejected it, when, and why — and the same for a previous
         # revert. An investigator deciding whether to revert someone else's
@@ -531,10 +525,7 @@ def _summarise(rule_id: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     # must never be handed to any of them as live evidence. Visible in the
     # payload, absent from the counts.
     confidences = [i["confidence"] for i in active if i["confidence"]]
-    confidence = (
-        max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
-        if confidences else "Unresolved"
-    )
+    confidence = max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0)) if confidences else "Unresolved"
 
     if count and rejected:
         rule_status = "partially_rejected"
@@ -569,8 +560,7 @@ def _summarise(rule_id: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_rules_fired(scope: Dict[str, Any],
-                      execution_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Build the full 14-entry rules_fired block for one pipeline run.
 
@@ -596,40 +586,42 @@ def build_rules_fired(scope: Dict[str, Any],
             rows = session.run(query, **params).data()
             summary = _summarise(rule_id, rows)
             execution = executed_by_id.get(rule_id, {})
-            block.append({
-                "rule_id": rule_id,
-                "fired": summary["fired"],
-                "confidence": summary["confidence"],
-                "corroborated": summary["corroborated"],
-                # --- additive, beyond A.4's four required fields ---
-                # What this rule looks for, from config/rule.yaml — so the
-                # Inference panel can explain the rule itself, not only the match.
-                "rule_description": rule_inference.rule_description(rule_id),
-                "relationship_type": rule_inference.rule_label(rule_id),
-                "evidence_count": summary["evidence_count"],
-                # --- rejection / revert state (Human-in-the-Loop) ---
-                # `status` is the rule-level roll-up: active, rejected,
-                # partially_rejected, or not_fired. `revertable` tells the UI
-                # whether POST /revert_rejection has anything to act on for
-                # this case_id + rule_id, so it can enable the control without
-                # a second call to /rule_audit.
-                "matched": summary["matched"],
-                "status": summary["status"],
-                "rejected_count": summary["rejected_count"],
-                "revertable": summary["revertable"],
-                # Which concrete subjects/records this rule fired on. Without
-                # it, "Rule 3 fired, evidence_count 2" tells an investigator
-                # something happened but not to whom — and the co-subject
-                # pipeline runs below make multi-instance results the norm.
-                "instances": summary["instances"],
-                "wave": (
-                    1 if rule_id in rule_registry.WAVE_1_RULE_IDS
-                    else 2 if rule_id in rule_registry.WAVE_2_RULE_IDS
-                    else 0
-                ),
-                "writes_this_run": execution.get("writes", 0),
-                "skipped_reason": execution.get("skipped_reason"),
-            })
+            block.append(
+                {
+                    "rule_id": rule_id,
+                    "fired": summary["fired"],
+                    "confidence": summary["confidence"],
+                    "corroborated": summary["corroborated"],
+                    # --- additive, beyond A.4's four required fields ---
+                    # What this rule looks for, from config/rule.yaml — so the
+                    # Inference panel can explain the rule itself, not only the match.
+                    "rule_description": rule_inference.rule_description(rule_id),
+                    "relationship_type": rule_inference.rule_label(rule_id),
+                    "evidence_count": summary["evidence_count"],
+                    # --- rejection / revert state (Human-in-the-Loop) ---
+                    # `status` is the rule-level roll-up: active, rejected,
+                    # partially_rejected, or not_fired. `revertable` tells the UI
+                    # whether POST /revert_rejection has anything to act on for
+                    # this case_id + rule_id, so it can enable the control without
+                    # a second call to /rule_audit.
+                    "matched": summary["matched"],
+                    "status": summary["status"],
+                    "rejected_count": summary["rejected_count"],
+                    "revertable": summary["revertable"],
+                    # Which concrete subjects/records this rule fired on. Without
+                    # it, "Rule 3 fired, evidence_count 2" tells an investigator
+                    # something happened but not to whom — and the co-subject
+                    # pipeline runs below make multi-instance results the norm.
+                    "instances": summary["instances"],
+                    "wave": (
+                        1
+                        if rule_id in rule_registry.WAVE_1_RULE_IDS
+                        else 2 if rule_id in rule_registry.WAVE_2_RULE_IDS else 0
+                    ),
+                    "writes_this_run": execution.get("writes", 0),
+                    "skipped_reason": execution.get("skipped_reason"),
+                }
+            )
 
     # Second pass: re-render every narrative with the whole block visible.
     # Rule 8's line cites Rule 7's and Rule 2's findings by name and number,
@@ -645,7 +637,10 @@ def build_rules_fired(scope: Dict[str, Any],
     logger.info(
         "rules_fired: case_id=%s subject_id=%s %d/%d rules fired, "
         "%d rejected instance(s) retained for revert",
-        scope["case_id"], scope["primary_subject_id"], fired_count, len(block),
+        scope["case_id"],
+        scope["primary_subject_id"],
+        fired_count,
+        len(block),
         rejected_count,
     )
     return block

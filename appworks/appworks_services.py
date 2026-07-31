@@ -3,19 +3,17 @@ AppWorks Service Router.
 Dispatches calls to the underlying feature-specific service modules.
 Every function MUST return {"result": {...}, "provenance": {...}}.
 """
-import appworks.case_intake as case_intake
-import appworks.subject_enrichment as subject_enrichment
-import appworks.similar_cases as similar_cases
-import appworks.risk_scoring as risk_scoring
-import appworks.investigation_strategy as investigation_strategy
-import appworks.allegation_tasks as allegation_tasks
-import semantic_layer.entity_contracts as contracts
-from appworks.appworks_auth import fetch,fetch_list
-from datetime import datetime, timezone
+
 import logging
-from typing import List, Optional, Any
-import json
-import re
+from typing import Optional
+
+import appworks.allegation_tasks as allegation_tasks
+import appworks.case_intake as case_intake
+import appworks.investigation_strategy as investigation_strategy
+import appworks.risk_scoring as risk_scoring
+import appworks.similar_cases as similar_cases
+import appworks.subject_enrichment as subject_enrichment
+import semantic_layer.entity_contracts as contracts
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +42,13 @@ def _validate(model_class, envelope: dict, tool_name: str) -> dict:
         raise ValueError(error_msg)
 
 
-
 def get_case_header(case_id: str) -> dict:
     """Dispatched from 'verify_case_intake'"""
     res = case_intake.build_case_header_data(case_id)
     return _validate(contracts.CaseHeader, res, "verify_case_intake")
 
 
-def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict:
+def get_enriched_subject_profile(subject_ids: list, case_id: Optional[str] = None) -> dict:
     """Dispatched from 'fetch_subject_history'
 
     Accepts a list of subject IDs (as declared in the manifest).
@@ -77,7 +74,7 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
             "subject_id": sid,
             "first_name": result.get("first_name"),
             "last_name": result.get("last_name"),
-            "dob": result.get("dob",None),
+            "dob": result.get("dob", None),
             "prior_cases": result.get("prior_cases", []),
             "prior_case_count": result.get("prior_case_count", 0),
         }
@@ -95,7 +92,7 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
             "total_prior_case_count": total_cases,
         },
         "provenance": {
-            "sources": list(set(provenance_sources)), # Deduplicate
+            "sources": list(set(provenance_sources)),  # Deduplicate
             "retrieved_at": last_retrieved_at,
             "computed_by": last_computed_by,
         },
@@ -104,17 +101,14 @@ def get_enriched_subject_profile(subject_ids: list, case_id: str = None) -> dict
 
 
 def search_similar_cases(
-    case_id: str = None,
-    fraud_types: list = None,
+    case_id: Optional[str] = None,
+    fraud_types: Optional[list] = None,
     max_total_results: int = 3,
-    **kwargs
+    **kwargs,
 ) -> dict:
     """Dispatched from 'search_similar_cases'"""
     res = similar_cases.search_similar_cases(
-        fraud_types=fraud_types,
-        case_id=case_id,
-        max_total_results=max_total_results,
-        **kwargs
+        fraud_types=fraud_types, case_id=case_id, max_total_results=max_total_results, **kwargs
     )
     return _validate(contracts.SimilarCasesResult, res, "search_similar_cases")
 
@@ -129,17 +123,17 @@ def calculate_risk_metrics(
     case_id: str,
     subject_id: str,
     fraud_types: list,
-    prior_case_count: int = None,
-    primary_in_prior_cases: int = None,
-    total_calculated: float = None,
-    total_ordered: float = None,
-    similar_case_volume: int = None,
-    distinct_types: int = None,
-    has_open_allegation: bool = None,
-    fast_track: bool = None,
-    subject_count: int = None,
-    received_age: int = None,
-    **kwargs
+    prior_case_count: Optional[int] = None,
+    primary_in_prior_cases: Optional[int] = None,
+    total_calculated: Optional[float] = None,
+    total_ordered: Optional[float] = None,
+    similar_case_volume: Optional[int] = None,
+    distinct_types: Optional[int] = None,
+    has_open_allegation: Optional[bool] = None,
+    fast_track: Optional[bool] = None,
+    subject_count: Optional[int] = None,
+    received_age: Optional[int] = None,
+    **kwargs,
 ) -> dict:
     """Dispatched from 'calculate_risk_metrics'"""
     res = risk_scoring.calculate_risk_metrics(
@@ -156,23 +150,15 @@ def calculate_risk_metrics(
         fast_track=fast_track,
         subject_count=subject_count,
         received_age=received_age,
-        **kwargs
+        **kwargs,
     )
     return _validate(contracts.RiskAssessment, res, "calculate_risk_metrics")
 
 
-def get_investigation_plan(
-    fraud_types: list,
-    risk_tier: str, 
-    ai_summary=None,
-    **kwargs
-) -> dict:
+def get_investigation_plan(fraud_types: list, risk_tier: str, ai_summary=None, **kwargs) -> dict:
     """Dispatched from 'get_investigation_plan'"""
     res = investigation_strategy.get_investigation_plan(
-        fraud_types=fraud_types,
-        risk_tier=risk_tier,
-        ai_summary=ai_summary,
-        **kwargs
+        fraud_types=fraud_types, risk_tier=risk_tier, ai_summary=ai_summary, **kwargs
     )
     return _validate(contracts.InvestigationPlan, res, "get_investigation_plan")
 
@@ -186,7 +172,5 @@ def get_allegation_types(**kwargs) -> dict:
 def get_allegation_type_tasks(allegation_types=None, **kwargs) -> dict:
     """Dispatched from 'get_allegation_type_tasks' (AI-16 / Section 8.5) —
     BSI standard catalogue tasks for the case's allegation types."""
-    res = allegation_tasks.get_allegation_type_tasks(
-        allegation_types=allegation_types, **kwargs
-    )
+    res = allegation_tasks.get_allegation_type_tasks(allegation_types=allegation_types, **kwargs)
     return _validate(contracts.AllegationTypeTasksResult, res, "get_allegation_type_tasks")

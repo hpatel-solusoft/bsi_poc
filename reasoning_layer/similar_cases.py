@@ -168,7 +168,9 @@ def find_structural_matches(case_id: str, limit: int = 25) -> dict:
 
     logger.info(
         "find_structural_matches: case_id=%s candidates_scored=%d returned=%d",
-        case_id, total_scored, len(matches),
+        case_id,
+        total_scored,
+        len(matches),
     )
 
     return {

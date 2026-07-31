@@ -28,8 +28,19 @@ from typing import Any, Optional
 # ONLY to the name-fallback key, never to the FEIN key — a FEIN match is
 # exact by definition and needs no fuzzing.
 _EMPLOYER_SUFFIXES = (
-    "incorporated", "inc", "corporation", "corp", "company", "co",
-    "limited", "ltd", "llc", "llp", "lp", "plc", "pc",
+    "incorporated",
+    "inc",
+    "corporation",
+    "corp",
+    "company",
+    "co",
+    "limited",
+    "ltd",
+    "llc",
+    "llp",
+    "lp",
+    "plc",
+    "pc",
 )
 
 # Street-type abbreviations. AppWorks' Address_Address is one free-text
@@ -41,18 +52,39 @@ _EMPLOYER_SUFFIXES = (
 # real address-normalisation service between AppWorks and Neo4j, not a
 # longer table here.
 _STREET_TOKENS = {
-    "street": "st", "st.": "st",
-    "avenue": "ave", "av": "ave", "ave.": "ave",
-    "road": "rd", "rd.": "rd",
-    "drive": "dr", "dr.": "dr",
-    "boulevard": "blvd", "blvd.": "blvd",
-    "lane": "ln", "ln.": "ln",
-    "court": "ct", "ct.": "ct",
-    "place": "pl", "pl.": "pl",
-    "terrace": "ter", "highway": "hwy", "parkway": "pkwy",
-    "apartment": "apt", "apt.": "apt", "unit": "unit", "suite": "ste", "ste.": "ste",
-    "north": "n", "south": "s", "east": "e", "west": "w",
-    "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
+    "street": "st",
+    "st.": "st",
+    "avenue": "ave",
+    "av": "ave",
+    "ave.": "ave",
+    "road": "rd",
+    "rd.": "rd",
+    "drive": "dr",
+    "dr.": "dr",
+    "boulevard": "blvd",
+    "blvd.": "blvd",
+    "lane": "ln",
+    "ln.": "ln",
+    "court": "ct",
+    "ct.": "ct",
+    "place": "pl",
+    "pl.": "pl",
+    "terrace": "ter",
+    "highway": "hwy",
+    "parkway": "pkwy",
+    "apartment": "apt",
+    "apt.": "apt",
+    "unit": "unit",
+    "suite": "ste",
+    "ste.": "ste",
+    "north": "n",
+    "south": "s",
+    "east": "e",
+    "west": "w",
+    "northeast": "ne",
+    "northwest": "nw",
+    "southeast": "se",
+    "southwest": "sw",
 }
 
 _WS = re.compile(r"\s+")
@@ -110,10 +142,9 @@ def to_iso_date(value: Any) -> Optional[str]:
     if isinstance(value, datetime):
         return value.date().isoformat()
     text = str(value).strip()
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
-                "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"):
         try:
-            return datetime.strptime(text[:len(fmt) + 2].strip(), fmt).date().isoformat()
+            return datetime.strptime(text[: len(fmt) + 2].strip(), fmt).date().isoformat()
         except ValueError:
             continue
     # ISO strings with a timezone suffix (the common AppWorks case).
@@ -235,8 +266,9 @@ def alias_value(value: Any) -> Optional[str]:
     return clean_text(value)
 
 
-def commentary_id(case_id: str, source_kind: str, source_id: Optional[str],
-                  text: Optional[str], created_date: Optional[str]) -> str:
+def commentary_id(
+    case_id: str, source_kind: str, source_id: Optional[str], text: Optional[str], created_date: Optional[str]
+) -> str:
     """
     A deterministic, stable id for a :Commentary node.
 
@@ -253,6 +285,7 @@ def commentary_id(case_id: str, source_kind: str, source_id: Optional[str],
     if source_id:
         return f"{source_kind}:{source_id}"
     digest = hashlib.sha1(
-        f"{case_id}|{source_kind}|{text or ''}|{created_date or ''}".encode("utf-8")
+        f"{case_id}|{source_kind}|{text or ''}|{created_date or ''}".encode("utf-8"),
+        usedforsecurity=False,
     ).hexdigest()[:20]
     return f"{source_kind}:h:{digest}"

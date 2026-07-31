@@ -3,12 +3,13 @@
 # AppWorks Gateway & Authentication (OTDS + SAML Flow)
 # ----------------------------------------------------------------
 
+import logging
 import os
 import re
-import logging
-import requests
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Optional
+
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,14 +19,15 @@ logger = logging.getLogger(__name__)
 
 OTDS_URL = os.getenv("OTDS_URL")
 SOAP_URL = os.getenv("SOAP_GATEWAY_URL")
-REST_URL = os.getenv("APPWORKS_URL")   # e.g. http://host:81/.../OSABSIACM
-USER     = os.getenv("APPWORKS_USER")
-PASS     = os.getenv("APPWORKS_PASS")
+REST_URL = os.getenv("APPWORKS_URL")  # e.g. http://host:81/.../OSABSIACM
+USER = os.getenv("APPWORKS_USER")
+PASS = os.getenv("APPWORKS_PASS")
 
 _SAML_TOKEN: Optional[str] = None
 
 
 def perform_login() -> bool:
+    """Authenticate against AppWorks (OTDS ticket -> SAML artifact) and cache the SAML token."""
     global _SAML_TOKEN
 
     if not all([OTDS_URL, SOAP_URL, REST_URL, USER, PASS]):
@@ -61,10 +63,14 @@ def perform_login() -> bool:
             </SOAP:Body>
         </SOAP:Envelope>"""
 
-        soap_resp = requests.post(SOAP_URL, headers={"Content-Type": "text/xml"}, data=soap_envelope, timeout=15)
+        soap_resp = requests.post(
+            SOAP_URL, headers={"Content-Type": "text/xml"}, data=soap_envelope, timeout=15
+        )
         soap_resp.raise_for_status()
 
-        match = re.search(r"<[^>]*?AssertionArtifact[^>]*?>(.*?)</[^>]*?AssertionArtifact>", soap_resp.text, re.DOTALL)
+        match = re.search(
+            r"<[^>]*?AssertionArtifact[^>]*?>(.*?)</[^>]*?AssertionArtifact>", soap_resp.text, re.DOTALL
+        )
         if not match:
             logger.error("SAML AssertionArtifact not found in SOAP response.")
             return False
@@ -98,6 +104,9 @@ def _build_url(endpoint: str) -> str:
     """
     clean = endpoint.lstrip("/")
 
+    if REST_URL is None:
+        raise RuntimeError("APPWORKS_URL environment variable is not configured")
+
     # Derive the base without the last namespace segment
     # REST_URL: http://host/.../api/OSABSIACM
     rest_base = REST_URL.rstrip("/")
@@ -113,16 +122,18 @@ def _build_url(endpoint: str) -> str:
         # Endpoint already includes the raw AppWorks REST service prefix.
         # Rebuild it relative to the app root so we don't duplicate namespaces.
         app_root = rest_base
-        for suffix in (f"/entityRestService/api/{primary_ns}",
-                       f"/entityRestService/api",
-                       f"/entityRestService"):
+        for suffix in (
+            f"/entityRestService/api/{primary_ns}",
+            "/entityRestService/api",
+            "/entityRestService",
+        ):
             if app_root.endswith(suffix):
                 app_root = app_root[: -len(suffix)]
                 break
         return f"{app_root}/{clean}"
     if endpoint_ns == primary_ns:
         # Strip leading namespace, append to REST_URL
-        path_after_ns = clean[len(primary_ns):].lstrip("/")
+        path_after_ns = clean[len(primary_ns) :].lstrip("/")
         return f"{rest_base}/{path_after_ns}"
     elif "/" in clean and not clean.startswith("entities"):
         # Cross-namespace: e.g. SolusoftACMConfig/entities/...
@@ -149,16 +160,17 @@ def _build_list_url(endpoint: str) -> str:
     """
     clean = endpoint.lstrip("/")
 
-    rest_base  = REST_URL.rstrip("/")
+    if REST_URL is None:
+        raise RuntimeError("APPWORKS_URL environment variable is not configured")
+
+    rest_base = REST_URL.rstrip("/")
     primary_ns = rest_base.rsplit("/", 1)[-1]
 
     # Derive the app root: http://host:81/home/BSIDev/app
     # REST_URL structure: <app_root>/entityRestService/api/<ns>
     # Strip "/entityRestService/api/<ns>" to get app_root
     app_root = rest_base
-    for suffix in (f"/entityRestService/api/{primary_ns}",
-                   f"/entityRestService/api",
-                   f"/entityRestService"):
+    for suffix in (f"/entityRestService/api/{primary_ns}", "/entityRestService/api", "/entityRestService"):
         if app_root.endswith(suffix):
             app_root = app_root[: -len(suffix)]
             break
@@ -169,21 +181,23 @@ def _build_list_url(endpoint: str) -> str:
     endpoint_ns = clean.split("/")[0]
     if clean.startswith("entityRestService/api/"):
         app_root = rest_base
-        for suffix in (f"/entityRestService/api/{primary_ns}",
-                       f"/entityRestService/api",
-                       f"/entityRestService"):
+        for suffix in (
+            f"/entityRestService/api/{primary_ns}",
+            "/entityRestService/api",
+            "/entityRestService",
+        ):
             if app_root.endswith(suffix):
                 app_root = app_root[: -len(suffix)]
                 break
         return f"{app_root}/{clean}"
     if endpoint_ns == primary_ns:
-        path_after_ns = clean[len(primary_ns):].lstrip("/")
+        path_after_ns = clean[len(primary_ns) :].lstrip("/")
         return f"{list_base}/{path_after_ns}"
     else:
         return f"{list_base}/{clean}"
 
 
-def fetch_list(endpoint: str, params: dict = None, _retry: bool = True) -> dict:
+def fetch_list(endpoint: str, params: Optional[dict] = None, _retry: bool = True) -> dict:
     """
     Fetch an AppWorks LIST endpoint (entityservice path).
 
@@ -201,12 +215,12 @@ def fetch_list(endpoint: str, params: dict = None, _retry: bool = True) -> dict:
             raise ConnectionError("Unauthorized: AppWorks login failed.")
 
     url = _build_list_url(endpoint)
-    
+
     # Merge SAML token with other parameters
     q_params = {"SAMLart": _SAML_TOKEN}
     if params:
         q_params.update(params)
-        
+
     headers = {"SAMLart": _SAML_TOKEN, "Accept": "application/json"}
     cookies = {"SAMLart": _SAML_TOKEN}
 
@@ -230,7 +244,13 @@ def fetch_list(endpoint: str, params: dict = None, _retry: bool = True) -> dict:
         raise ConnectionError(f"AppWorks List API Error: {str(e)}")
 
 
-def fetch(endpoint: str, method: str = "GET", params: dict = None, payload: dict = None, _retry: bool = True) -> dict:
+def fetch(
+    endpoint: str,
+    method: str = "GET",
+    params: Optional[dict] = None,
+    payload: Optional[dict] = None,
+    _retry: bool = True,
+) -> dict:
     """
     General purpose AppWorks REST fetcher.
     Auto-builds URLs, handles SAML injection, and retries 401s once.
@@ -251,17 +271,13 @@ def fetch(endpoint: str, method: str = "GET", params: dict = None, payload: dict
         )
 
     url = _build_url(endpoint)
-    
+
     # Merge SAML token with other parameters
     q_params = {"SAMLart": _SAML_TOKEN}
     if params:
         q_params.update(params)
 
-    headers = {
-        "SAMLart": _SAML_TOKEN,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
+    headers = {"SAMLart": _SAML_TOKEN, "Content-Type": "application/json", "Accept": "application/json"}
 
     try:
         logger.info(f"[REST] {method} {url}")

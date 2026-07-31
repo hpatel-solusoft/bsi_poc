@@ -33,7 +33,6 @@ its own home when built), or any write.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from reasoning_layer.neo4j_client import get_session
@@ -175,6 +174,9 @@ def check_network_match(subject_id: str) -> dict:
     }
     logger.info(
         "check_network_match: subject_id=%s in_network=%s networks=%d rejected=%d",
-        subject_id, result["in_network"], len(networks), rejected_count,
+        subject_id,
+        result["in_network"],
+        len(networks),
+        rejected_count,
     )
     return _envelope(result)

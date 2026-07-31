@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 # STRUCTURE, but not the base point value of each signal. These are the
 # graph component's base weights, kept as named constants so they are
 # auditable and tunable rather than magic numbers inside the arithmetic.
-_RULE_8_SIGNAL_WEIGHT = 0.15      # recidivist in an active network is a strong signal
-_PRIOR_GUILT_BASE_WEIGHT = 0.10   # weighted down by recency below
+_RULE_8_SIGNAL_WEIGHT = 0.15  # recidivist in an active network is a strong signal
+_PRIOR_GUILT_BASE_WEIGHT = 0.10  # weighted down by recency below
 
 # Section 8.4 tier ladder — identical thresholds to appworks/risk_scoring.py,
 # re-declared here only to re-tier the FINAL (base + graph) score. The base
@@ -233,11 +233,11 @@ _COMPOUND_RULE_PREFIXES = ("Rule_07", "Rule_08", "Rule_09", "Rule_11")
 # "~4.2 yrs (est. from case open date)" rather than asserting a
 # precision the data does not support.
 _RECENCY_DATE_SOURCES = (
-    ("rel_date_closed",        "prior_guilty_case.date_closed", False),
-    ("case_closed_date",       "case.closed_date",              False),
-    ("allegation_date_closed", "allegation.date_closed",        False),
-    ("case_fraud_end_date",    "case.fraud_end_date",           True),
-    ("case_opened_date",       "case.opened_date",              True),
+    ("rel_date_closed", "prior_guilty_case.date_closed", False),
+    ("case_closed_date", "case.closed_date", False),
+    ("allegation_date_closed", "allegation.date_closed", False),
+    ("case_fraud_end_date", "case.fraud_end_date", True),
+    ("case_opened_date", "case.opened_date", True),
 )
 
 # Anything from this year or earlier is treated as an unparsed sentinel
@@ -249,9 +249,15 @@ _RECENCY_DATE_SOURCES = (
 _MIN_PLAUSIBLE_YEAR = 1900
 
 _DATE_FORMATS = (
-    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
-    "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d",
-    "%d-%b-%Y", "%b %d, %Y", "%d %b %Y",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d",
+    "%m/%d/%Y",
+    "%d/%m/%Y",
+    "%Y/%m/%d",
+    "%d-%b-%Y",
+    "%b %d, %Y",
+    "%d %b %Y",
 )
 
 
@@ -311,7 +317,7 @@ def _coerce_date(value: Any) -> Optional[datetime]:
 
     for fmt in _DATE_FORMATS:
         try:
-            return datetime.strptime(text[:len(fmt) + 6].strip(), fmt)
+            return datetime.strptime(text[: len(fmt) + 6].strip(), fmt)
         except ValueError:
             continue
     return None
@@ -354,9 +360,16 @@ def _resolve_prior_recency(prior_case_dates: List[Dict[str, Any]]) -> Dict[str, 
             years = _years_since(raw)
             if years is None:
                 continue
+            coerced = _coerce_date(raw)
+            if coerced is None:
+                # Unreachable in practice: _years_since(raw) above already
+                # returned non-None, and it derives from the same
+                # deterministic _coerce_date(raw). Guarded explicitly
+                # rather than with `assert`, which python -O strips.
+                continue
             candidate = {
                 "years": round(years, 2),
-                "date": _coerce_date(raw).date().isoformat(),
+                "date": coerced.date().isoformat(),
                 "source": label,
                 "estimated": is_estimate,
                 "case_id": entry.get("case_id"),
@@ -366,8 +379,7 @@ def _resolve_prior_recency(prior_case_dates: List[Dict[str, Any]]) -> Dict[str, 
             break  # first usable field wins for THIS prior case
 
     if best is None:
-        return {"years": None, "date": None, "source": None,
-                "estimated": False, "case_id": None}
+        return {"years": None, "date": None, "source": None, "estimated": False, "case_id": None}
     return best
 
 
@@ -539,11 +551,25 @@ def apply_graph_risk_signals(
         "apply_graph_risk_signals: case_id=%s subject_id=%s base=%.4f/%s -> final=%.4f/%s "
         "rule8=%s net_size=%d mult=%.1f prior_guilt=%s (count=%d recency_yrs=%s via=%s est=%s weight=%.2f) "
         "fasttrack=%s (recommended=%s appworks=%s) compound=%s",
-        case_id, subject_id, base_score, base_tier, final_score, final_tier,
-        rule_8_signal, network_size, network_size_multiplier,
-        prior_guilt_fired, prior_guilty_count, prior_guilt_recency_years,
-        recency["source"], recency["estimated"], recency_weight,
-        fasttrack_override, fasttrack_recommended, is_fasttrack, compound_escalation,
+        case_id,
+        subject_id,
+        base_score,
+        base_tier,
+        final_score,
+        final_tier,
+        rule_8_signal,
+        network_size,
+        network_size_multiplier,
+        prior_guilt_fired,
+        prior_guilty_count,
+        prior_guilt_recency_years,
+        recency["source"],
+        recency["estimated"],
+        recency_weight,
+        fasttrack_override,
+        fasttrack_recommended,
+        is_fasttrack,
+        compound_escalation,
     )
 
     return {

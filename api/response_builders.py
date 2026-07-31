@@ -1,8 +1,10 @@
-from utils import html_converter
-from typing import Dict, Any, Optional, List
-from fastapi import HTTPException
 import logging
 import re
+from typing import Any, Dict, List, Optional
+
+from fastapi import HTTPException
+
+from utils import html_converter
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +17,12 @@ def render_markdown_html(markdown_text: str) -> str:
 def render_markdown_html_with_sources(markdown_text: str, provenance_trail: List[dict]) -> str:
     """Render markdown and append data sources when the agent omitted them."""
     text = markdown_text or ""
-    if not re.search(r"(?:^|\n)\s*(?:#{1,6}\s*|\*\*\s*)(?:Data\s+Sources|Data\s+Provenance|Provenance)(?:\s*\*\*)?\s*(?:\n|$)", text, re.IGNORECASE):
-        text = (
-            f"{text.rstrip()}\n\n"
-            f"### Data Sources\n{format_provenance_lines(provenance_trail)}"
-        )
+    if not re.search(
+        r"(?:^|\n)\s*(?:#{1,6}\s*|\*\*\s*)(?:Data\s+Sources|Data\s+Provenance|Provenance)(?:\s*\*\*)?\s*(?:\n|$)",
+        text,
+        re.IGNORECASE,
+    ):
+        text = f"{text.rstrip()}\n\n" f"### Data Sources\n{format_provenance_lines(provenance_trail)}"
     return render_markdown_html(text)
 
 
@@ -27,38 +30,40 @@ def format_provenance_lines(provenance_trail: List[dict]) -> str:
     """Render provenance trail as a clean markdown list, silently skipping empty blocks."""
     if not provenance_trail:
         return "- No external records cited."
-    
+
     lines = []
     valid_blocks_found = False
 
     for p in provenance_trail:
         sources = p.get("sources", [])
-        
+
         # 1. THE FIX: Silently skip this entire tool block if it has no sources
         if not sources:
             continue
-            
+
         valid_blocks_found = True
         computed_by = p.get("computed_by", "Not available")
         retrieved_at = p.get("retrieved_at", "Not available")
-        
+
         # Clean up the timestamp for display
-        display_time = str(retrieved_at).replace("T", " ")[:19] + " UTC" if "T" in str(retrieved_at) else retrieved_at
-        
+        display_time = (
+            str(retrieved_at).replace("T", " ")[:19] + " UTC" if "T" in str(retrieved_at) else retrieved_at
+        )
+
         lines.append(f"**Sources Retrieved ({display_time}):**")
-        lines.append("") # Blank line required before Markdown lists
-        
+        lines.append("")  # Blank line required before Markdown lists
+
         for source in sources:
             lines.append(f"- {source}")
-        
-        lines.append("") # Blank line required after Markdown lists
+
+        lines.append("")  # Blank line required after Markdown lists
         lines.append(f"*(Method: {computed_by})*")
-        lines.append("") # Blank line to separate multiple tool calls cleanly
-        
+        lines.append("")  # Blank line to separate multiple tool calls cleanly
+
     # 2. If the AI ran tools, but ALL of them yielded 0 valid sources:
     if not valid_blocks_found:
         return "- No external records cited."
-        
+
     return "\n".join(lines)
 
 
@@ -66,6 +71,7 @@ def safe_join(items: List[str], sep: str = ", ") -> str:
     """Join non-empty strings safely; return 'Not available' when empty."""
     clean = [str(i).strip() for i in (items or []) if str(i).strip()]
     return sep.join(clean) if clean else "Not available"
+
 
 def parse_bsi_section(text: str, header_name: str) -> List[str]:
     """Extract bullet/numbered list items under a markdown section header."""
@@ -96,15 +102,12 @@ def plan_has_substance(plan: dict) -> bool:
         for key in ("investigation_steps", "evidence_checklist", "escalation_criteria")
     )
 
+
 def format_plan_markdown_item(item, index: int = 1) -> str:
     """Render one investigation step, checklist item, or escalation line."""
     if isinstance(item, dict):
         label = (
-            item.get("action")
-            or item.get("item")
-            or item.get("description")
-            or item.get("text")
-            or ""
+            item.get("action") or item.get("item") or item.get("description") or item.get("text") or ""
         ).strip()
         if not label:
             return ""
@@ -146,6 +149,7 @@ def format_plan_markdown_item(item, index: int = 1) -> str:
         return ""
     return f"- {text}" if not text.startswith("-") else text
 
+
 def build_plan_summary(
     case_id: str,
     plan: dict,
@@ -164,7 +168,7 @@ def build_plan_summary(
     if not isinstance(complaint_summary, dict):
         complaint_summary = {}
 
-    label = complaint_summary.get("complaint_no") or case_id 
+    label = complaint_summary.get("complaint_no") or case_id
     steps = plan_list_field(plan, "investigation_steps")
     checklist = plan_list_field(plan, "evidence_checklist")
     criteria = plan_list_field(plan, "escalation_criteria")
@@ -242,10 +246,12 @@ def build_plan_summary(
         lines.append("- No escalation criteria were returned.")
     lines.append("")
 
-    lines.extend([
-        "### Data Sources",
-        format_provenance_lines(provenance_trail),
-    ])
+    lines.extend(
+        [
+            "### Data Sources",
+            format_provenance_lines(provenance_trail),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -266,7 +272,8 @@ def render_investigation_steps_markdown(steps: List[Dict[str, Any]]) -> str:
     if not steps:
         return "- No investigation steps were returned."
     lines = [
-        formatted for idx, step in enumerate(steps, start=1)
+        formatted
+        for idx, step in enumerate(steps, start=1)
         if (formatted := format_plan_markdown_item(step, idx))
     ]
     return "\n".join(lines) if lines else "- No investigation steps were returned."
@@ -318,7 +325,8 @@ def apply_step_override_to_summary(
     if not override_steps:
         return markdown_text
     return replace_markdown_section(
-        markdown_text, "Investigation Steps",
+        markdown_text,
+        "Investigation Steps",
         render_investigation_steps_markdown(override_steps),
     )
 
@@ -359,7 +367,6 @@ def resolve_plan_agent_summary(
     return build_plan_summary(case_id, plan, case_data, provenance_trail)
 
 
-
 def fired_rules_only(rules_fired: Optional[List[dict]]) -> List[dict]:
     """
     Drop the rules that did not fire, for the API response only.
@@ -381,10 +388,7 @@ def fired_rules_only(rules_fired: Optional[List[dict]]) -> List[dict]:
     malformed entry cannot be shown to have fired, and forwarding it would
     push the problem into the UI.
     """
-    return [
-        entry for entry in (rules_fired or [])
-        if isinstance(entry, dict) and entry.get("matched")
-    ]
+    return [entry for entry in (rules_fired or []) if isinstance(entry, dict) and entry.get("matched")]
 
 
 def build_confidence_summary(rules_fired: Optional[List[dict]]) -> Dict[str, int]:
@@ -392,7 +396,7 @@ def build_confidence_summary(rules_fired: Optional[List[dict]]) -> Dict[str, int
     confidence, corroborated per entry) into a {high, medium, unresolved}
     count of FIRED rules, for the /intake graph_findings response block."""
     summary = {"high": 0, "medium": 0, "unresolved": 0}
-    for entry in (rules_fired or []):
+    for entry in rules_fired or []:
         if not isinstance(entry, dict) or not entry.get("fired"):
             continue
         confidence = str(entry.get("confidence") or "").strip().lower()

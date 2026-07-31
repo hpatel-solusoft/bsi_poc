@@ -45,8 +45,8 @@ from reasoning_layer import (
     rule_engine,
     rule_registry,
     rules_fired,
-    scope as scope_resolver,
 )
+from reasoning_layer import scope as scope_resolver
 from reasoning_layer.neo4j_client import GraphUnavailableError, get_session
 from utils.provenance import graph_provenance
 
@@ -95,7 +95,8 @@ def _run_extraction_stage(case_id: str, subject_id: str) -> Dict[str, Any]:
     logger.info(
         "pipeline: extraction case_id=%s subject_id=%s attributions=%d unresolved=%d "
         "written=%d suppressed=%d corroborations_linked=%d",
-        case_id, subject_id,
+        case_id,
+        subject_id,
         len(extraction_result.get("attributions", [])),
         len(extraction_result.get("unresolved_allegation_ids", [])),
         len(load_result.get("written", [])),
@@ -138,15 +139,13 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str
     given run was invalidated.
     """
     existing = pipeline_state_repository.get_run_state(case_id, subject_id)
-    already_done = (
-        existing
-        and existing.get("status") == "completed"
-        and existing.get("cleared_at") is None
-    )
+    already_done = existing and existing.get("status") == "completed" and existing.get("cleared_at") is None
     if already_done and not force:
         logger.info(
-            "run_pipeline SKIPPED case_id=%s subject_id=%s — already completed at %s "
-            "(Principle 10)", case_id, subject_id, existing.get("completed_at"),
+            "run_pipeline SKIPPED case_id=%s subject_id=%s — already completed at %s " "(Principle 10)",
+            case_id,
+            subject_id,
+            existing.get("completed_at"),
         )
         scope = scope_resolver.resolve_scope(case_id, subject_id)
         return _envelope(
@@ -233,6 +232,7 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str
         sources=["Neo4j graph query"],
         computed_by="reasoning_layer.pipeline.run_pipeline",
     )
+
 
 # ---------------------------------------------------------------------------
 # Case-level orchestration: every subject, not just the primary
@@ -327,7 +327,9 @@ def _reasoning_population_for_case(case_id: str, direct_subject_ids: List[str]) 
             "run_pipeline_for_case: case_id=%s expanded reasoning population from "
             "%d direct subject(s) to %d via one-hop scope (co-subject/employer/"
             "address/alias) — extra: %s",
-            case_id, len(direct_subject_ids), len(population),
+            case_id,
+            len(direct_subject_ids),
+            len(population),
             sorted(seen - set(direct_subject_ids)),
         )
     return population
@@ -366,7 +368,7 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
 
     # for rule #13, replace highlighted code with below:
     _CASE_LEVEL_RULE_IDS = {"Rule_08_Recidivist_Escalation", "Rule_13_FastTrack_Escalation"}
-    
+
     merged: List[Dict[str, Any]] = []
     for index, template in enumerate(blocks[0]):
         entry = dict(template)
@@ -382,10 +384,13 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
                     if network_key is not None:
                         key = ("related_network_key", str(network_key))
                     else:
-                        key = tuple(sorted(
-                            (k, str(v)) for k, v in instance.items()
-                            if k not in ("confidence", "corroborated")
-                        ))
+                        key = tuple(
+                            sorted(
+                                (k, str(v))
+                                for k, v in instance.items()
+                                if k not in ("confidence", "corroborated")
+                            )
+                        )
                 if key in seen:
                     continue
                 seen.add(key)
@@ -396,13 +401,10 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
         entry["evidence_count"] = len(instances)
         entry["fired"] = len(instances) > 0
         entry["confidence"] = (
-            max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0))
-            if confidences else "Unresolved"
+            max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0)) if confidences else "Unresolved"
         )
         entry["corroborated"] = any(i.get("corroborated") for i in instances)
-        entry["writes_this_run"] = sum(
-            block[index].get("writes_this_run", 0) or 0 for block in blocks
-        )
+        entry["writes_this_run"] = sum(block[index].get("writes_this_run", 0) or 0 for block in blocks)
         # A rule is only genuinely "skipped" if it was skipped for every
         # subject; skipped for one and run for another is not a skip.
         reasons = {block[index].get("skipped_reason") for block in blocks}
@@ -411,8 +413,7 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
     return merged
 
 
-def run_pipeline_for_case(case_id: str, force: bool = False,
-                          reason: str = "etl_resync") -> dict:
+def run_pipeline_for_case(case_id: str, force: bool = False, reason: str = "etl_resync") -> dict:
     """
     Run the pipeline for EVERY subject on the case and return one merged
     rules_fired block.
@@ -431,8 +432,13 @@ def run_pipeline_for_case(case_id: str, force: bool = False,
     direct_subject_ids = subjects_for_case(case_id)
     if not direct_subject_ids:
         return _envelope(
-            result={"pipeline_status": "no_subjects", "case_id": case_id,
-                    "subjects_run": [], "subject_count": 0, "rules_fired": []},
+            result={
+                "pipeline_status": "no_subjects",
+                "case_id": case_id,
+                "subjects_run": [],
+                "subject_count": 0,
+                "rules_fired": [],
+            },
             sources=["Neo4j graph query"],
             computed_by="reasoning_layer.pipeline.run_pipeline_for_case",
         )
@@ -453,22 +459,25 @@ def run_pipeline_for_case(case_id: str, force: bool = False,
             block = result.get("rules_fired") or []
             if block:
                 blocks.append(block)
-            ran.append({"subject_id": subject_id,
-                        "pipeline_status": result.get("pipeline_status")})
+            ran.append({"subject_id": subject_id, "pipeline_status": result.get("pipeline_status")})
         except Exception as exc:  # noqa: BLE001 — one subject must not sink the case
             logger.error(
                 "run_pipeline_for_case: case_id=%s subject_id=%s FAILED — %s",
-                case_id, subject_id, exc,
+                case_id,
+                subject_id,
+                exc,
             )
-            ran.append({"subject_id": subject_id, "pipeline_status": "failed",
-                        "error": str(exc)})
+            ran.append({"subject_id": subject_id, "pipeline_status": "failed", "error": str(exc)})
 
     merged = _merge_rules_fired(blocks)
     fired = sum(1 for e in merged if e.get("fired"))
     logger.info(
-        "run_pipeline_for_case: case_id=%s direct_subjects=%d reasoned_subjects=%d "
-        "rules_fired=%d/%d",
-        case_id, len(direct_subject_ids), len(subject_ids), fired, len(merged),
+        "run_pipeline_for_case: case_id=%s direct_subjects=%d reasoned_subjects=%d " "rules_fired=%d/%d",
+        case_id,
+        len(direct_subject_ids),
+        len(subject_ids),
+        fired,
+        len(merged),
     )
     return _envelope(
         result={

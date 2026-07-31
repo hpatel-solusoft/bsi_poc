@@ -149,7 +149,7 @@ RETURN rej.relationship_type AS relationship_type,
        rej.rejected_by AS investigator_id, rej.rejected_at AS rejected_at,
        rej.reason AS reason, rej.rule_id AS rule_id
 """
-# print("_REJECTIONS_QUERY",_REJECTIONS_QUERY)
+
 
 def _envelope(result: Dict[str, Any]) -> dict:
     """Standard {result, provenance} envelope (Principle 8) — identical in
@@ -162,9 +162,7 @@ def _envelope(result: Dict[str, Any]) -> dict:
     }
 
 
-def _find_rejection(
-    entry: Dict[str, Any], rejections: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
+def _find_rejection(entry: Dict[str, Any], rejections: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Best-effort correlation of one rejected relationship instance to
     its :Rejection notation, by relationship_type plus order-insensitive
     from_key/to_key membership. Rule guard queries (rules/*.cypher) key a
@@ -294,7 +292,12 @@ def assemble_related_network(case_id: str, subject_id: str) -> dict:
     logger.info(
         "assemble_related_network: case_id=%s subject_id=%s entries=%d "
         "(high=%d medium=%d unresolved=%d) rejected=%d",
-        case_id, subject_id, len(related_network),
-        counts["high"], counts["medium"], counts["unresolved"], rejected_count,
+        case_id,
+        subject_id,
+        len(related_network),
+        counts["high"],
+        counts["medium"],
+        counts["unresolved"],
+        rejected_count,
     )
     return _envelope(result)

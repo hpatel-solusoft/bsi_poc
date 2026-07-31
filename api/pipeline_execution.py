@@ -22,19 +22,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j.exceptions import Neo4jError
 
-from reasoning_layer.neo4j_client import GraphUnavailableError
-from reasoning_layer.graph_queries import check_network_match
-from reasoning_layer.context_enrichment import enrich_graph_context
-from reasoning_layer.similar_cases import find_structural_matches
-from reasoning_layer.risk_signals import apply_graph_risk_signals
-from reasoning_layer.investigation_tasks import build_rule_aware_tasks, tag_step_sources
-
-from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-
-from core.investigation_plan_override_repository import get_override, compute_plan_staleness
-
-from api.message_utils import extract_agent_summary, merge_provenance, merge_direct_result
+from api.message_utils import (
+    extract_agent_summary,
+    merge_direct_result,
+    merge_provenance,
+)
 from api.response_builders import parse_bsi_section
+from core.investigation_plan_override_repository import (
+    compute_plan_staleness,
+    get_override,
+)
+from reasoning_layer.context_enrichment import enrich_graph_context
+from reasoning_layer.graph_queries import check_network_match
+from reasoning_layer.investigation_tasks import build_rule_aware_tasks, tag_step_sources
+from reasoning_layer.neo4j_client import GraphUnavailableError
+from reasoning_layer.risk_signals import apply_graph_risk_signals
+from reasoning_layer.similar_cases import find_structural_matches
+from semantic_layer.entity_contracts import (
+    InvestigationPlan as InvestigationPlanContract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +60,8 @@ def run_intake_direct_pipeline(
     subject_id = (sections.get("complaint_intelligence") or {}).get("subject_primary_id")
     if not subject_id:
         logger.warning(
-            "context enrichment + network match skipped for case_id=%s — "
-            "no subject_primary_id resolved", case_id,
+            "context enrichment + network match skipped for case_id=%s — " "no subject_primary_id resolved",
+            case_id,
         )
         return sections, provenance_trail
 
@@ -66,20 +72,22 @@ def run_intake_direct_pipeline(
     # assembles below.
     try:
         envelope = check_network_match(subject_id)
-        provenance_trail = merge_direct_result(
-            sections, provenance_trail, "network_match_flag", envelope
-        )
+        provenance_trail = merge_direct_result(sections, provenance_trail, "network_match_flag", envelope)
     except (ValueError, GraphUnavailableError, Neo4jError) as exc:
         # Non-blocking by design: a graph outage or bad subject_id
         # must not fail complaint intake. Degrade to an empty,
         # clearly-unavailable flag instead.
         logger.warning(
             "check_network_match unavailable for case_id=%s subject_id=%s — %s",
-            case_id, subject_id, exc,
+            case_id,
+            subject_id,
+            exc,
         )
         sections["network_match_flag"] = {
-            "subject_id": subject_id, "in_network": None,
-            "network_count": None, "networks": [],
+            "subject_id": subject_id,
+            "in_network": None,
+            "network_count": None,
+            "networks": [],
             "rejected_membership_count": None,
             "unavailable_reason": str(exc),
         }
@@ -99,10 +107,14 @@ def run_intake_direct_pipeline(
         # pipeline_execution_state (PostgreSQL) and the Neo4j graph rather
         # than returning the cached rules_fired.
         enrichment = enrich_graph_context(
-            case_id, subject_id, force=reload_ai_summary,
+            case_id,
+            subject_id,
+            force=reload_ai_summary,
         )["result"]
         provenance_trail = merge_direct_result(
-            sections, provenance_trail, "graph_context",
+            sections,
+            provenance_trail,
+            "graph_context",
             {
                 "result": enrichment["graph_context"],
                 "provenance": {
@@ -117,12 +129,16 @@ def run_intake_direct_pipeline(
     except (ValueError, GraphUnavailableError, Neo4jError) as exc:
         logger.warning(
             "context enrichment unavailable for case_id=%s subject_id=%s — %s",
-            case_id, subject_id, exc,
+            case_id,
+            subject_id,
+            exc,
         )
         sections["graph_context"] = {
             "subject_id": subject_id,
-            "is_cross_case_hub": None, "hub_case_ids": [],
-            "fraud_networks": [], "prior_guilty_cases": [],
+            "is_cross_case_hub": None,
+            "hub_case_ids": [],
+            "fraud_networks": [],
+            "prior_guilty_cases": [],
             "shared_connections": [],
             "unavailable_reason": str(exc),
         }
@@ -157,10 +173,12 @@ def run_similar_cases_pipeline(
     except (ValueError, GraphUnavailableError, Neo4jError) as exc:
         logger.warning(
             "structural similar-case matching unavailable for case_id=%s — %s",
-            case_id, exc,
+            case_id,
+            exc,
         )
         structural = {
-            "matches": [], "source": "structural_graph",
+            "matches": [],
+            "source": "structural_graph",
             "total_candidates_scored": 0,
             "unavailable_reason": str(exc),
         }
@@ -187,18 +205,23 @@ def run_similar_cases_pipeline(
     # explains, it does not decide inclusion.
     sections: Dict[str, Any] = {}
     new_provenance = merge_direct_result(
-        sections, new_provenance, "similar_cases",
-        {"result": structural,
-         "provenance": {"sources": ["Neo4j graph query"], "retrieved_at": "",
-                        "computed_by": "reasoning_layer.similar_cases"}},
+        sections,
+        new_provenance,
+        "similar_cases",
+        {
+            "result": structural,
+            "provenance": {
+                "sources": ["Neo4j graph query"],
+                "retrieved_at": "",
+                "computed_by": "reasoning_layer.similar_cases",
+            },
+        },
     )
 
     agent_summary = extract_agent_summary(messages)
 
     similar_cases_data = sections.get("similar_cases", {})
-    similar_section = {
-        "similar_cases": similar_cases_data
-    }
+    similar_section = {"similar_cases": similar_cases_data}
 
     merged_provenance = merge_provenance(
         case_data.get("provenance_trail", []),
@@ -259,7 +282,9 @@ def run_risk_assessment_pipeline(
             logger.warning(
                 "graph risk signals unavailable for case_id=%s subject_id=%s — %s; "
                 "returning AppWorks base score only",
-                case_id, subject_id, exc,
+                case_id,
+                subject_id,
+                exc,
             )
             risk_assessment["neo4j_signals"] = {"unavailable_reason": str(exc)}
     else:
@@ -298,9 +323,7 @@ def run_risk_assessment_pipeline(
             risk_assessment["recommendations"] = ""
     else:
         risk_assessment = {"recommendations": ""}
-    risk_section = {
-        "risk_assessment": risk_assessment
-    }
+    risk_section = {"risk_assessment": risk_assessment}
 
     merged_provenance = merge_provenance(
         case_data.get("provenance_trail", []),
@@ -362,8 +385,8 @@ def run_plan_pipeline(
     # Convert parsed strings to typed dicts.
     # 'owner' and 'deadline_days' are intentionally absent —
     # they are populated during the human analyst review step.
-    steps_dicts     = [{"step": i + 1, "action": s} for i, s in enumerate(steps)]     if steps     else None
-    checklist_dicts = [{"item": s}                  for s in checklist]                 if checklist else None
+    steps_dicts = [{"step": i + 1, "action": s} for i, s in enumerate(steps)] if steps else None
+    checklist_dicts = [{"item": s} for s in checklist] if checklist else None
 
     # AI-16 / Section 8.5: annotate every step with where it came from — a
     # rule-aware task, a BSI catalogue task, or the agent's own synthesis —
@@ -381,27 +404,25 @@ def run_plan_pipeline(
     plan_id = plan_result.get("plan_id") or f"PLAN-{cid}-{datetime.now().strftime('%Y%m%d')}"
 
     investigation_plan = {
-        "plan_id":             plan_id,
-        "fraud_types":         plan_result.get("fraud_types", []),
-        "risk_tier":           plan_result.get("risk_tier", "UNSPECIFIED"),
+        "plan_id": plan_id,
+        "fraud_types": plan_result.get("fraud_types", []),
+        "risk_tier": plan_result.get("risk_tier", "UNSPECIFIED"),
         "investigation_steps": steps_dicts,
-        "evidence_checklist":  checklist_dicts,
+        "evidence_checklist": checklist_dicts,
         "escalation_criteria": criteria or None,
         "escalation_required": plan_result.get("escalation_required", False),
         # Section 8.5: carried on the plan and displayed SEPARATELY from the
         # generic investigation steps, so the rule that justifies each
         # recommendation stays visible to the investigator.
-        "rule_aware_tasks":    rule_aware_tasks,
-        "catalog_tasks":       catalog_tasks,
+        "rule_aware_tasks": rule_aware_tasks,
+        "catalog_tasks": catalog_tasks,
     }
 
     try:
         validated_plan = InvestigationPlanContract(**investigation_plan)
         investigation_plan = validated_plan.model_dump(exclude_none=True)
     except Exception as e:
-        logger.warning(
-            f"Investigation plan schema validation failed — storing unvalidated: {e}"
-        )
+        logger.warning(f"Investigation plan schema validation failed — storing unvalidated: {e}")
 
     # Modify Investigation Steps flow (Section D.6): a saved override
     # replaces investigation_steps only — evidence_checklist,
@@ -420,14 +441,10 @@ def run_plan_pipeline(
         modified_on = None
 
     plan_stale = (
-        compute_plan_staleness(cache_updated_at_before_call, modified_on)
-        if override is not None
-        else False
+        compute_plan_staleness(cache_updated_at_before_call, modified_on) if override is not None else False
     )
 
-    plan_section = {
-        "investigation_plan": investigation_plan
-    }
+    plan_section = {"investigation_plan": investigation_plan}
 
     merged_provenance = merge_provenance(
         case_data.get("provenance_trail", []),
@@ -435,6 +452,12 @@ def run_plan_pipeline(
     )
 
     return (
-        assistant_text, investigation_plan, plan_section, merged_provenance,
-        plan_source, modified_by, modified_on, plan_stale,
+        assistant_text,
+        investigation_plan,
+        plan_section,
+        merged_provenance,
+        plan_source,
+        modified_by,
+        modified_on,
+        plan_stale,
     )

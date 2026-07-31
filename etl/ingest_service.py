@@ -42,7 +42,6 @@ from typing import Any, Dict, List, Optional
 from core import graph_ingest_repository
 from etl import graph_sync
 from reasoning_layer import pipeline
-from reasoning_layer.neo4j_client import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -100,21 +99,34 @@ def load_case(case_id: str) -> Dict[str, Any]:
             graph_ingest_repository.mark_started(case_id)
             counts = graph_sync.sync_case(case_id)
             graph_ingest_repository.mark_loaded(case_id, counts)
-            return {"case_id": case_id, "status": "loaded", "counts": counts,
-                    "attempts": attempt, "error": None}
+            return {
+                "case_id": case_id,
+                "status": "loaded",
+                "counts": counts,
+                "attempts": attempt,
+                "error": None,
+            }
         except Exception as exc:  # noqa: BLE001 — see docstring: isolate per-case failure
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "ingest_service: load FAILED case_id=%s attempt=%d/%d — %s",
-                case_id, attempt, _MAX_ATTEMPTS, last_error,
+                case_id,
+                attempt,
+                _MAX_ATTEMPTS,
+                last_error,
             )
             if attempt < _MAX_ATTEMPTS:
                 time.sleep(_BACKOFF_SECONDS[attempt - 1])
 
     logger.error("ingest_service: load GAVE UP case_id=%s after %d attempts", case_id, _MAX_ATTEMPTS)
     graph_ingest_repository.mark_failed(case_id, last_error or "unknown error")
-    return {"case_id": case_id, "status": "failed", "counts": {},
-            "attempts": _MAX_ATTEMPTS, "error": last_error}
+    return {
+        "case_id": case_id,
+        "status": "failed",
+        "counts": {},
+        "attempts": _MAX_ATTEMPTS,
+        "error": last_error,
+    }
 
 
 def reason_case(case_id: str) -> Dict[str, Any]:
@@ -140,24 +152,33 @@ def reason_case(case_id: str) -> Dict[str, Any]:
             envelope = pipeline.run_pipeline(case_id, subject_id, force=True)
             result = envelope["result"]
             fired = [r["rule_id"] for r in result.get("rules_fired", []) if r["fired"]]
-            runs.append({
-                "subject_id": subject_id,
-                "pipeline_status": result["pipeline_status"],
-                "rules_fired": fired,
-                "rules_fired_count": len(fired),
-                "error": None,
-            })
+            runs.append(
+                {
+                    "subject_id": subject_id,
+                    "pipeline_status": result["pipeline_status"],
+                    "rules_fired": fired,
+                    "rules_fired_count": len(fired),
+                    "error": None,
+                }
+            )
             logger.info(
                 "ingest_service: reasoned case_id=%s subject_id=%s rules_fired=%d %s",
-                case_id, subject_id, len(fired), fired,
+                case_id,
+                subject_id,
+                len(fired),
+                fired,
             )
         except Exception as exc:  # noqa: BLE001 — one subject's failure is not the case's
             logger.exception("ingest_service: reasoning FAILED case_id=%s subject_id=%s", case_id, subject_id)
-            runs.append({
-                "subject_id": subject_id, "pipeline_status": "failed",
-                "rules_fired": [], "rules_fired_count": 0,
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+            runs.append(
+                {
+                    "subject_id": subject_id,
+                    "pipeline_status": "failed",
+                    "rules_fired": [],
+                    "rules_fired_count": 0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
 
     failed = [r for r in runs if r["error"]]
     if runs and not failed:
@@ -188,7 +209,8 @@ def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
     """
     logger.info(
         "ingest_service: START cases=%d run_reasoning=%s",
-        len(case_ids), run_reasoning,
+        len(case_ids),
+        run_reasoning,
     )
 
     # --- Phase 1: load everything ---
@@ -196,8 +218,7 @@ def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
     loaded = [r["case_id"] for r in load_results if r["status"] == "loaded"]
     load_failed = [r for r in load_results if r["status"] == "failed"]
 
-    logger.info("ingest_service: LOAD PHASE complete — loaded=%d failed=%d",
-                len(loaded), len(load_failed))
+    logger.info("ingest_service: LOAD PHASE complete — loaded=%d failed=%d", len(loaded), len(load_failed))
 
     # --- Phase 2: reason over the now-complete graph ---
     pipeline_results: List[Dict[str, Any]] = []
@@ -216,7 +237,9 @@ def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
     }
     logger.info(
         "ingest_service: DONE loaded=%d/%d pipeline_reasoned=%d reasoning_failures=%d",
-        report["cases_loaded"], report["cases_requested"],
-        report["pipeline_reasoned"], report["pipeline_reasoning_failed"],
+        report["cases_loaded"],
+        report["cases_requested"],
+        report["pipeline_reasoned"],
+        report["pipeline_reasoning_failed"],
     )
     return report

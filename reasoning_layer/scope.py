@@ -91,11 +91,15 @@ def resolve_scope(case_id: str, subject_id: str) -> Dict[str, Any]:
             # every rule matches nothing, rather than matching everything.
             logger.warning(
                 "scope: subject_id=%s not found in graph — rules will match nothing "
-                "for case_id=%s. Has ETL run for this case?", subject_id, case_id,
+                "for case_id=%s. Has ETL run for this case?",
+                subject_id,
+                case_id,
             )
             return {
-                "case_id": case_id, "primary_subject_id": subject_id,
-                "scope_subject_ids": [subject_id], "scope_case_ids": [case_id],
+                "case_id": case_id,
+                "primary_subject_id": subject_id,
+                "scope_subject_ids": [subject_id],
+                "scope_case_ids": [case_id],
                 "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
                 "subject_in_graph": False,
             }
@@ -121,6 +125,10 @@ def resolve_scope(case_id: str, subject_id: str) -> Dict[str, Any]:
     }
     logger.info(
         "scope: case_id=%s subject_id=%s subjects_in_scope=%d cases_in_scope=%d expansion=%s",
-        case_id, subject_id, len(scope_subject_ids), len(scope_case_ids), scope["expansion"],
+        case_id,
+        subject_id,
+        len(scope_subject_ids),
+        len(scope_case_ids),
+        scope["expansion"],
     )
     return scope

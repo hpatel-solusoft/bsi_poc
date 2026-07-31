@@ -15,15 +15,18 @@ class AppWorksPaths:
     class FraudRules:
         @staticmethod
         def risk_rules_all() -> str:
+            """Path for the full active fraud-risk-rules catalogue list."""
             return "/OSABSIACM/entities/FraudRiskRules/lists/FraudRiskRules_FraudRiskRulesListInternal"
-        
+
         @staticmethod
         def risk_rules_by_id(id: str) -> str:
+            """Path for the child Rules entities of a single FraudRiskRules item."""
             return f"/entities/FraudRiskRules/items/{id}/childEntities/Rules"
-        
+
     class Workfolder:
         @staticmethod
         def item(id: str) -> str:
+            """Path for a single Workfolder (case) item by id."""
             return f"/entities/Workfolder/items/{id}"
 
         # NOTE: allegations(), commentary(), financial(), and subjects() were
@@ -47,13 +50,14 @@ class AppWorksPaths:
         # which returns one row per case the subject is on — Subject detail
         # Properties, own Workfolder id, and IsPrimarySubject flag all embedded.
 
-
         @staticmethod
         def aliases(id: str) -> str:
+            """Path for a Subject's child Subject_Alias entities."""
             return f"/entities/Subject/items/{id}/childEntities/Subject_Alias"
 
         @staticmethod
         def jobs(id: str) -> str:
+            """Path for a Subject's employment (Job) records — sources EMPLOYED_BY."""
             # Sources EMPLOYED_BY (Section 3.2) — employer_name/fein per employment
             # record. Use the actual AppWorks service path for the Job list
             # endpoint filtered by subject.
@@ -61,6 +65,7 @@ class AppWorksPaths:
 
         @staticmethod
         def wages(id: str) -> str:
+            """Path for a Subject's wage records — sources HAS_WAGE_RECORD_WITH."""
             # Sources HAS_WAGE_RECORD_WITH (Section 3.2) — a separate,
             # independent path to Subject-Employer linkage from the Job table,
             # per the reference doc's own "(independent path, better coverage)"
@@ -70,6 +75,7 @@ class AppWorksPaths:
 
         @staticmethod
         def assets(id: str) -> str:
+            """Path for a Subject's Asset relationships (registered, not yet consumed by the ETL)."""
             # :Asset (Section 3.1) — "modeled but disabled in the reasoner".
             # Confirmed against the live AppWorks response: this is a
             # 'relationships' endpoint, not 'childEntities'. Path registered
@@ -82,10 +88,12 @@ class AppWorksPaths:
 
         @staticmethod
         def case_allegations_by_type_id(type_id: str) -> str:
+            """Path for allegations filtered by a given allegation type id."""
             return f"/entities/Allegations/lists/Allegations_All?Allegations_AllegationsType$Identity.Id={type_id}"
 
         @staticmethod
         def by_workfolder(workfolder_id: str) -> str:
+            """Path for all allegations on a case, with AllegationType/Agency embedded per row."""
             # Single-call list endpoint: one round trip returns Allegation +
             # AllegationType + Agency embedded per row (Allegations_AllegationsType$Properties,
             # Allegations_Source$Properties) — replaces the old 3-call chase
@@ -95,6 +103,7 @@ class AppWorksPaths:
 
         @staticmethod
         def allegation_type_manage() -> str:
+            """Path for the AllegationType management catalogue list."""
             return "/entities/AllegationType/lists/AllegationType_ManageAllegationType"
 
     class AllegationTypeTask:
@@ -102,6 +111,7 @@ class AppWorksPaths:
 
         @staticmethod
         def manage_allegation_type_tasks() -> str:
+            """Path for the global (not allegation-type-scoped) task catalogue."""
             # Flat catalogue of every configured BSI task type. Each row
             # carries TaskName, AllegationTypeTask_IsDefaultTask and
             # Show_IN_UI. The list is global — it does not associate tasks
@@ -117,12 +127,15 @@ class AppWorksPaths:
         Replaces the old 3-call chase in case_intake._parse_subjects
         (Subjects item -> Subject detail item -> SubjectRole item).
         """
+
         @staticmethod
         def by_workfolder(workfolder_id: str) -> str:
+            """Path for every Subjects row on a given case."""
             return f"/entities/Subjects/lists/All_Subjects?Subjects_Workfolder$Identity.Id={workfolder_id}"
 
         @staticmethod
         def by_subject(subject_id: str) -> str:
+            """Path for every Subjects row for a given subject, across all their cases."""
             # Same All_Subjects list endpoint as by_workfolder(), filtered the
             # other direction: every Subjects row for this Subject detail id,
             # across every case they're on. Each row embeds its own
@@ -141,8 +154,10 @@ class AppWorksPaths:
         Named AddressList to avoid colliding with Subject.addresses(), which
         still returns the relationship href form used elsewhere.
         """
+
         @staticmethod
         def by_subject(subject_id: str) -> str:
+            """Path for a subject's addresses (see class docstring for embedded fields)."""
             return f"/entities/Address/lists/Address_All?Address_Subject$Identity.Id={subject_id}"
 
     class FinancialList:
@@ -152,8 +167,10 @@ class AppWorksPaths:
         $Identity). Replaces the old 2-call chase per financial record
         (Financial item -> FraudTypeClassification item).
         """
+
         @staticmethod
         def by_workfolder(workfolder_id: str) -> str:
+            """Path for a case's financial records (see class docstring for embedded fields)."""
             return f"/entities/Financial/lists/Financial_All?Financial_WorkfolderRelationship$Identity.Id={workfolder_id}"
 
     class CommentaryList:
@@ -162,8 +179,10 @@ class AppWorksPaths:
         embedded per row (WorkfolderCommentary_CommentaryTypeRelationship$Properties).
         Replaces the old 2-call chase per comment (Commentary item -> CommentaryType item).
         """
+
         @staticmethod
         def by_workfolder(workfolder_id: str) -> str:
+            """Path for a case's commentary entries (see class docstring for embedded fields)."""
             return (
                 "/entities/WorkfolderCommentary/lists/WorkfolderCommentary_All"
                 f"?WorkfolderCommentary_WorkfolderRelationship$Identity.Id={workfolder_id}"

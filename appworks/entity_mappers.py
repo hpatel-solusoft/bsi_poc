@@ -27,16 +27,16 @@ never widen this to `**detail_props`.
 """
 
 import logging
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
+from appworks.appworks_paths import AppWorksPaths as AW
 from appworks.appworks_utils import (
-    extract_id_from_href,
-    get_relationship_items,
     embedded,
     embedded_id,
+    extract_id_from_href,
+    get_relationship_items,
 )
 from utils.provenance import ProvenanceTracker
-from appworks.appworks_paths import AppWorksPaths as AW
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +44,16 @@ logger = logging.getLogger(__name__)
 def map_workfolder_core(wf_props: Dict[str, Any]) -> Dict[str, Any]:
     """Standardizes extraction of core workfolder properties."""
     return {
-        "complaint_no":                      wf_props.get("WorkfolderComplaintNumber"),
-        "status":                            wf_props.get("WorkfolderStatus"),
-        "description":                       wf_props.get("WorkfolderDescription"),
-        "case_description":                  wf_props.get("Workfolder_CaseDescription"),
-        "date_received":                     wf_props.get("WorkfolderDateReceived"),
-        "date_reported":                     wf_props.get("WorkfolderDateReported"),
-        "allegation":                        wf_props.get("WorkFolderAllegation"),
+        "complaint_no": wf_props.get("WorkfolderComplaintNumber"),
+        "status": wf_props.get("WorkfolderStatus"),
+        "description": wf_props.get("WorkfolderDescription"),
+        "case_description": wf_props.get("Workfolder_CaseDescription"),
+        "date_received": wf_props.get("WorkfolderDateReceived"),
+        "date_reported": wf_props.get("WorkfolderDateReported"),
+        "allegation": wf_props.get("WorkFolderAllegation"),
         "workfolder_allegations_description": wf_props.get("WorkfolderAllegationsDescription"),
-        "workfolder_reviewer_comments":       wf_props.get("WorkfolderReviewerComments"),
-        "workfolder_analyst_comments":        wf_props.get("WorkfolderAnalystComments"),
+        "workfolder_reviewer_comments": wf_props.get("WorkfolderReviewerComments"),
+        "workfolder_analyst_comments": wf_props.get("WorkfolderAnalystComments"),
     }
 
 
@@ -76,16 +76,18 @@ def fetch_commentary_rows(workfolder_id: str, tracker: ProvenanceTracker) -> Lis
         if item_id:
             tracker.add_source("WorkfolderCommentary", item_id)
 
-        rows.append({
-            "comment_id": str(item_id) if item_id else None,
-            "props": item.get("Properties", {}),
-            "tracking": item.get("Tracking", {}),
-            "type_props": embedded(item, "WorkfolderCommentary_CommentaryTypeRelationship"),
-            # Case-level field, embedded on the relationship back to the
-            # parent Workfolder — WorkfolderCommentary_All repeats the same
-            # value on every row (it describes the case, not the comment).
-            "workfolder_rel_props": embedded(item, "WorkfolderCommentary_WorkfolderRelationship"),
-        })
+        rows.append(
+            {
+                "comment_id": str(item_id) if item_id else None,
+                "props": item.get("Properties", {}),
+                "tracking": item.get("Tracking", {}),
+                "type_props": embedded(item, "WorkfolderCommentary_CommentaryTypeRelationship"),
+                # Case-level field, embedded on the relationship back to the
+                # parent Workfolder — WorkfolderCommentary_All repeats the same
+                # value on every row (it describes the case, not the comment).
+                "workfolder_rel_props": embedded(item, "WorkfolderCommentary_WorkfolderRelationship"),
+            }
+        )
     return rows
 
 
@@ -123,10 +125,12 @@ def map_commentary(workfolder_id: str, tracker: ProvenanceTracker) -> Dict[str, 
 
     for row in fetch_commentary_rows(workfolder_id, tracker):
         try:
-            items.append({
-                "commentary_text": row["props"].get("WorkfolderCommentary_Comment"),
-                "commentary_type": row["type_props"].get("Type"),
-            })
+            items.append(
+                {
+                    "commentary_text": row["props"].get("WorkfolderCommentary_Comment"),
+                    "commentary_type": row["type_props"].get("Type"),
+                }
+            )
 
             if allegation_description is None:
                 rel_props = row.get("workfolder_rel_props") or {}
@@ -176,14 +180,16 @@ def fetch_allegation_rows(workfolder_id: str, tracker: ProvenanceTracker) -> Lis
         if agency_id:
             tracker.add_source("Agency", agency_id)
 
-        rows.append({
-            "allegation_id": str(alleg_id),
-            "alleg_props": item.get("Properties", {}),
-            "type_props": embedded(item, "Allegations_AllegationsType"),
-            "type_id": type_id,
-            "agency_props": embedded(item, "Allegations_Source"),
-            "agency_id": agency_id,
-        })
+        rows.append(
+            {
+                "allegation_id": str(alleg_id),
+                "alleg_props": item.get("Properties", {}),
+                "type_props": embedded(item, "Allegations_AllegationsType"),
+                "type_id": type_id,
+                "agency_props": embedded(item, "Allegations_Source"),
+                "agency_id": agency_id,
+            }
+        )
     return rows
 
 
@@ -218,32 +224,38 @@ def map_allegations(workfolder_id: str, tracker: ProvenanceTracker) -> List[Dict
                 or f"Unknown allegation type {type_id or 'unknown'}"
             )
 
-            allegations_list.append({
-                "allegation_id":           row["allegation_id"],
-                "status":                  alleg_props.get("Allegations_Status"),
-                "allegation_status":       alleg_props.get("Allegations_AllegationStatus"),
-                "date_received":           alleg_props.get("Allegations_DateReceived"),
-                "date_reported":           alleg_props.get("Allegations_DateReported"),
-                "date_closed":             alleg_props.get("Allegations_DateClosed"),
-                "closure_date_reported":   alleg_props.get("Allegations_ClosureDateReported"),
-                "close_comment":           alleg_props.get("Allegations_AllegationCloseComment"),
-                "comment":                 alleg_props.get("Allegations_Comment"),
-                # New fields confirmed on the Allegations_All payload — not
-                # captured anywhere before this round.
-                "agency_referral_number":  alleg_props.get("Allegations_AgencyReferralNumber"),
-                "completed_date":          alleg_props.get("Allegations_AllegationDateCompleted"),
-                "norris_code":             alleg_props.get("Allegations_DispositionNorrisCode"),
-                "allegation_type": {
-                    "id":          type_id,
-                    "description": allegation_description,
-                    "short_desc":  type_props.get("AllegationType_AllegationTypeShortDesc"),
-                    "defaults":    type_props.get("AllegationType_AllegationTypeDefaults"),
-                },
-                "source_agency": {
-                    "name":              agency_props.get("Agency_AgencyName"),
-                    "short_description": agency_props.get("Agency_AgencyShortDescription"),
-                } if agency_props else None,
-            })
+            allegations_list.append(
+                {
+                    "allegation_id": row["allegation_id"],
+                    "status": alleg_props.get("Allegations_Status"),
+                    "allegation_status": alleg_props.get("Allegations_AllegationStatus"),
+                    "date_received": alleg_props.get("Allegations_DateReceived"),
+                    "date_reported": alleg_props.get("Allegations_DateReported"),
+                    "date_closed": alleg_props.get("Allegations_DateClosed"),
+                    "closure_date_reported": alleg_props.get("Allegations_ClosureDateReported"),
+                    "close_comment": alleg_props.get("Allegations_AllegationCloseComment"),
+                    "comment": alleg_props.get("Allegations_Comment"),
+                    # New fields confirmed on the Allegations_All payload — not
+                    # captured anywhere before this round.
+                    "agency_referral_number": alleg_props.get("Allegations_AgencyReferralNumber"),
+                    "completed_date": alleg_props.get("Allegations_AllegationDateCompleted"),
+                    "norris_code": alleg_props.get("Allegations_DispositionNorrisCode"),
+                    "allegation_type": {
+                        "id": type_id,
+                        "description": allegation_description,
+                        "short_desc": type_props.get("AllegationType_AllegationTypeShortDesc"),
+                        "defaults": type_props.get("AllegationType_AllegationTypeDefaults"),
+                    },
+                    "source_agency": (
+                        {
+                            "name": agency_props.get("Agency_AgencyName"),
+                            "short_description": agency_props.get("Agency_AgencyShortDescription"),
+                        }
+                        if agency_props
+                        else None
+                    ),
+                }
+            )
         except Exception as exc:
             logger.error(f"⚠️ Error mapping individual allegation: {exc}")
 
@@ -289,23 +301,25 @@ def map_financials(workfolder_id: str, tracker: ProvenanceTracker) -> Dict[str, 
             total_calculated += calc
             total_ordered += ordr
 
-            records.append({
-                "calculated":    calc,
-                "ordered":       ordr,
-                "comment":       props.get("Financial_Comment"),
-                "start_date":    props.get("Financial_RequestedStartDate"),
-                "end_date":      props.get("Financial_RequestedEndDate"),
-                "date":          props.get("Financial_Date"),
-                "fraud_type":    fraud_type_props.get("Classification_Name"),
-                "fraud_type_id": fraud_type_id,
-            })
+            records.append(
+                {
+                    "calculated": calc,
+                    "ordered": ordr,
+                    "comment": props.get("Financial_Comment"),
+                    "start_date": props.get("Financial_RequestedStartDate"),
+                    "end_date": props.get("Financial_RequestedEndDate"),
+                    "date": props.get("Financial_Date"),
+                    "fraud_type": fraud_type_props.get("Classification_Name"),
+                    "fraud_type_id": fraud_type_id,
+                }
+            )
         except Exception as e:
             logger.error(f"⚠️ Error mapping individual financial record: {str(e)}")
 
     return {
-        "records":          records,
+        "records": records,
         "total_calculated": total_calculated,
-        "total_ordered":    total_ordered,
+        "total_ordered": total_ordered,
     }
 
 
@@ -358,13 +372,15 @@ def fetch_subject_rows(workfolder_id: str, tracker: ProvenanceTracker) -> List[D
         if role_id:
             tracker.add_source("SubjectRole", role_id)
 
-        rows.append({
-            "subject_row_id": subject_row_id,
-            "subject_id": subject_detail_id,
-            "subj_props": item.get("Properties", {}),
-            "detail_props": embedded(item, "Subjects_Subject"),
-            "role_props": role_props,
-        })
+        rows.append(
+            {
+                "subject_row_id": subject_row_id,
+                "subject_id": subject_detail_id,
+                "subj_props": item.get("Properties", {}),
+                "detail_props": embedded(item, "Subjects_Subject"),
+                "role_props": role_props,
+            }
+        )
     return rows
 
 
@@ -393,15 +409,17 @@ def map_subject_addresses(subject_id: str, tracker: ProvenanceTracker) -> List[D
             type_props = embedded(item, "Address_AddressType_Relation")
             scz_props = embedded(item, "Address_StateCityZip_Relation")
 
-            addresses_list.append({
-                "address": props.get("Address_Address"),
-                "apt_suite": props.get("Address_AptSuite"),
-                "zipcode": props.get("Address_Zipcode"),
-                "address_type": type_props.get("AddressType_Type"),
-                "city": scz_props.get("StateCityZip_City"),
-                "state": scz_props.get("StateCityZip_State"),
-                "county": scz_props.get("StateCityZip_County"),
-            })
+            addresses_list.append(
+                {
+                    "address": props.get("Address_Address"),
+                    "apt_suite": props.get("Address_AptSuite"),
+                    "zipcode": props.get("Address_Zipcode"),
+                    "address_type": type_props.get("AddressType_Type"),
+                    "city": scz_props.get("StateCityZip_City"),
+                    "state": scz_props.get("StateCityZip_State"),
+                    "county": scz_props.get("StateCityZip_County"),
+                }
+            )
         except Exception as e:
             logger.error(f"⚠️ Error mapping individual address: {str(e)}")
 
@@ -455,34 +473,36 @@ def map_subjects(workfolder_id: str, tracker: ProvenanceTracker) -> List[Dict[st
             addresses_list = map_subject_addresses(subject_detail_id, tracker)
             alias_records = map_subject_aliases(subject_detail_id)
 
-            subjects_list.append({
-                "subject_id": subject_detail_id,
-                "subject_type": subj_props.get("Subjects_SubjectType"),
-                "is_primary_subject": subj_props.get("Subjects_IsPrimarySubject"),
-                "role": role_props.get("RoleName"),
-                "details": {
-                    "identifier": detail_props.get("Subject_Identifier"),
-                    "first_name": detail_props.get("Subject_FirstName"),
-                    "middle_initial": detail_props.get("Subject_MiddleInitial"),
-                    "last_name": detail_props.get("Subject_LastName"),
-                    "gender": detail_props.get("Subject_Gender"),
-                    "dob": detail_props.get("Subject_DOB"),
-                    "dod": detail_props.get("Subject_DOD"),
-                    "phone_number": detail_props.get("Subject_PhoneNumber"),
-                    "subject_type": detail_props.get("Subject_SubjectType"),
-                    "company_name": detail_props.get("Subject_CompanyName"),
-                    "provider_number": detail_props.get("Subject_ProviderNumber"),
-                    "pob": detail_props.get("Subject_POB"),
-                    "comment": detail_props.get("Subject_Comment"),
-                    "destination": detail_props.get("Subject_Destination"),
-                    "date_entered": detail_props.get("Subject_Date_Entered"),
-                    "aliases": detail_props.get("Subject_Aliases"),
-                    # Subject_SSN / Subject_DrivingLicenseNumber intentionally
-                    # omitted — Tier 1 PII, reference doc Section 3.5.
-                },
-                "addresses": addresses_list,
-                "alias_records": alias_records,
-            })
+            subjects_list.append(
+                {
+                    "subject_id": subject_detail_id,
+                    "subject_type": subj_props.get("Subjects_SubjectType"),
+                    "is_primary_subject": subj_props.get("Subjects_IsPrimarySubject"),
+                    "role": role_props.get("RoleName"),
+                    "details": {
+                        "identifier": detail_props.get("Subject_Identifier"),
+                        "first_name": detail_props.get("Subject_FirstName"),
+                        "middle_initial": detail_props.get("Subject_MiddleInitial"),
+                        "last_name": detail_props.get("Subject_LastName"),
+                        "gender": detail_props.get("Subject_Gender"),
+                        "dob": detail_props.get("Subject_DOB"),
+                        "dod": detail_props.get("Subject_DOD"),
+                        "phone_number": detail_props.get("Subject_PhoneNumber"),
+                        "subject_type": detail_props.get("Subject_SubjectType"),
+                        "company_name": detail_props.get("Subject_CompanyName"),
+                        "provider_number": detail_props.get("Subject_ProviderNumber"),
+                        "pob": detail_props.get("Subject_POB"),
+                        "comment": detail_props.get("Subject_Comment"),
+                        "destination": detail_props.get("Subject_Destination"),
+                        "date_entered": detail_props.get("Subject_Date_Entered"),
+                        "aliases": detail_props.get("Subject_Aliases"),
+                        # Subject_SSN / Subject_DrivingLicenseNumber intentionally
+                        # omitted — Tier 1 PII, reference doc Section 3.5.
+                    },
+                    "addresses": addresses_list,
+                    "alias_records": alias_records,
+                }
+            )
         except Exception as e:
             logger.error(f"⚠️ Error mapping individual subject: {str(e)}")
 

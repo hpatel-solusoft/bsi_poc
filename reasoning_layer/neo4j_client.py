@@ -17,8 +17,8 @@ import os
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
-from neo4j import GraphDatabase, Driver
-from neo4j.exceptions import ServiceUnavailable, AuthError
+from neo4j import Driver, GraphDatabase, Session
+from neo4j.exceptions import AuthError, ServiceUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,8 @@ def init_driver() -> None:
         # a real deprecation (like the CALL-subquery one this codebase just
         # fixed at source in etl/graph_sync.py) must stay visible.
         driver = GraphDatabase.driver(
-            uri, auth=(user, password),
+            uri,
+            auth=(user, password),
             notifications_disabled_classifications=["UNRECOGNIZED"],
         )
         driver.verify_connectivity()
@@ -91,7 +92,7 @@ def close_driver() -> None:
 
 
 @contextmanager
-def get_session(database: Optional[str] = None) -> Iterator["neo4j.Session"]:
+def get_session(database: Optional[str] = None) -> Iterator[Session]:
     """
     Yield a Neo4j session from the driver. Sessions are cheap in the
     Neo4j Python driver (unlike a pooled Postgres connection) — the
@@ -101,7 +102,12 @@ def get_session(database: Optional[str] = None) -> Iterator["neo4j.Session"]:
     """
     if _driver is None:
         init_driver()
-    assert _driver is not None
+    if _driver is None:
+        # init_driver() always either sets the driver or raises
+        # GraphUnavailableError — this should be unreachable, but an
+        # `assert` here would be silently stripped under `python -O`,
+        # so guard explicitly instead.
+        raise GraphUnavailableError("Neo4j driver failed to initialize")
 
     db_name = database or os.getenv("NEO4J_DATABASE", "neo4j")
     session = _driver.session(database=db_name)

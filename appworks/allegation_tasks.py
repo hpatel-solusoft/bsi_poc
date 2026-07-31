@@ -21,9 +21,10 @@
 # AllegationTypeTask_IsDefaultTask and Show_IN_UI — there is no allegation
 # type on the row and no relationship link to one. This module therefore
 # returns the catalogue as-is and does NOT pretend to filter by allegation
-# type: inventing an association AppWorks does not publish would put tasks
-# in front of an investigator under a false justification. The allegation
-# types on the case are echoed back as requested_types for context only.
+# type — inventing an association AppWorks does not publish would put
+# tasks in front of an investigator under a false justification. The
+# allegation types on the case are echoed back as requested_types for
+# context only.
 # ----------------------------------------------------------------
 
 import logging
@@ -42,9 +43,7 @@ def _normalize(value: Any) -> str:
     return str(value or "").strip()
 
 
-def get_allegation_type_tasks(
-    allegation_types: Optional[List[str]] = None, **kwargs
-) -> Dict[str, Any]:
+def get_allegation_type_tasks(allegation_types: Optional[List[str]] = None, **kwargs) -> Dict[str, Any]:
     """
     Return BSI's configured investigative task catalogue.
 
@@ -89,6 +88,7 @@ def get_allegation_type_tasks(
 
     try:
         from appworks.appworks_auth import fetch
+
         raw = fetch(AppWorksPaths.AllegationTypeTask.manage_allegation_type_tasks())
         items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get(_LIST_KEY, [])
     except Exception as exc:  # noqa: BLE001 — see docstring: degrade, don't fail the plan
@@ -116,15 +116,17 @@ def get_allegation_type_tasks(
             seen_task_ids.add(task_id)
             # tracker.add_source("AllegationTypeTask", task_id)
 
-        catalog_tasks.append({
-            "task_id": task_id,
-            "task_type": task_name,
-            "is_default_task": bool(props.get("AllegationTypeTask_IsDefaultTask", False)),
-            # Section 8.5 / AI-16: every task declares its origin, so a step
-            # selected from the catalogue stays distinguishable from one
-            # derived from a fired rule.
-            "source": "catalog",
-        })
+        catalog_tasks.append(
+            {
+                "task_id": task_id,
+                "task_type": task_name,
+                "is_default_task": bool(props.get("AllegationTypeTask_IsDefaultTask", False)),
+                # Section 8.5 / AI-16: every task declares its origin, so a step
+                # selected from the catalogue stays distinguishable from one
+                # derived from a fired rule.
+                "source": "catalog",
+            }
+        )
 
     # Deterministic order: BSI's default tasks first (they are the standard
     # opening set), then alphabetically. Two runs over an unchanged
@@ -138,7 +140,8 @@ def get_allegation_type_tasks(
 
     logger.info(
         "get_allegation_type_tasks: catalog_tasks=%d default_tasks=%d",
-        len(catalog_tasks), len(default_tasks),
+        len(catalog_tasks),
+        len(default_tasks),
     )
 
     return {

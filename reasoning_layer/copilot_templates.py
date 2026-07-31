@@ -117,17 +117,21 @@ def get_subject_connections(subject_id: str, **kwargs) -> dict:
     rejected = list(row.get("rejected_connections") or [])
     logger.info(
         "copilot_template get_subject_connections: subject_id=%s active=%d rejected=%d",
-        p["subject_id"], len(connections), len(rejected),
+        p["subject_id"],
+        len(connections),
+        len(rejected),
     )
-    return _envelope({
-        "subject_id": p["subject_id"],
-        "connections": connections,
-        "connection_count": len(connections),
-        # Surfaced, never merged into `connections` — a rejected connection
-        # is review history, not a current fact.
-        "rejected_connections": rejected,
-        "rejected_count": len(rejected),
-    })
+    return _envelope(
+        {
+            "subject_id": p["subject_id"],
+            "connections": connections,
+            "connection_count": len(connections),
+            # Surfaced, never merged into `connections` — a rejected connection
+            # is review history, not a current fact.
+            "rejected_connections": rejected,
+            "rejected_count": len(rejected),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -158,23 +162,29 @@ def get_rules_fired(case_id: str, **kwargs) -> dict:
     """What rules fired on this case and why? (Section 6.3)"""
     p = _require(case_id=case_id)
     rows = _rows(_RULES_FIRED, case_id=p["case_id"])
-    rules = [{
-        "rule_id": r["rule_id"],
-        "fired": (r["active_count"] or 0) > 0,
-        "active_edge_count": r["active_count"],
-        "rejected_edge_count": r["rejected_count"],
-        "corroborated_edge_count": r["corroborated_count"],
-        "confidences": [c for c in (r["confidences"] or []) if c],
-    } for r in rows]
+    rules = [
+        {
+            "rule_id": r["rule_id"],
+            "fired": (r["active_count"] or 0) > 0,
+            "active_edge_count": r["active_count"],
+            "rejected_edge_count": r["rejected_count"],
+            "corroborated_edge_count": r["corroborated_count"],
+            "confidences": [c for c in (r["confidences"] or []) if c],
+        }
+        for r in rows
+    ]
     logger.info(
         "copilot_template get_rules_fired: case_id=%s rules=%d",
-        p["case_id"], len(rules),
+        p["case_id"],
+        len(rules),
     )
-    return _envelope({
-        "case_id": p["case_id"],
-        "rules": rules,
-        "fired_rule_count": sum(1 for r in rules if r["fired"]),
-    })
+    return _envelope(
+        {
+            "case_id": p["case_id"],
+            "rules": rules,
+            "fired_rule_count": sum(1 for r in rules if r["fired"]),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +245,10 @@ def get_risk_signals(case_id: str, subject_id: str, **kwargs) -> dict:
     }
     logger.info(
         "copilot_template get_risk_signals: case_id=%s subject_id=%s networks=%d prior_guilty=%d",
-        p["case_id"], p["subject_id"], len(networks), prior_guilty_count,
+        p["case_id"],
+        p["subject_id"],
+        len(networks),
+        prior_guilty_count,
     )
     return _envelope(result)
 
@@ -262,23 +275,30 @@ def get_employer_case_history(fein: str, **kwargs) -> dict:
     """Has this employer appeared in other cases? (Section 6.3)"""
     p = _require(fein=fein)
     rows = _rows(_EMPLOYER_CASE_HISTORY, fein=p["fein"])
-    cases = [{
-        "case_id": r["case_id"],
-        "complaint_no": r.get("complaint_no"),
-        "status": r.get("status"),
-        "fraud_amount": r.get("fraud_amount"),
-        "opened_date": r.get("opened_date"),
-        "subject_ids": list(r.get("subject_ids") or []),
-    } for r in rows]
+    cases = [
+        {
+            "case_id": r["case_id"],
+            "complaint_no": r.get("complaint_no"),
+            "status": r.get("status"),
+            "fraud_amount": r.get("fraud_amount"),
+            "opened_date": r.get("opened_date"),
+            "subject_ids": list(r.get("subject_ids") or []),
+        }
+        for r in rows
+    ]
     logger.info(
-        "copilot_template get_employer_case_history: fein=%s cases=%d", p["fein"], len(cases),
+        "copilot_template get_employer_case_history: fein=%s cases=%d",
+        p["fein"],
+        len(cases),
     )
-    return _envelope({
-        "fein": p["fein"],
-        "employer_name": rows[0].get("employer_name") if rows else None,
-        "cases": cases,
-        "case_count": len(cases),
-    })
+    return _envelope(
+        {
+            "fein": p["fein"],
+            "employer_name": rows[0].get("employer_name") if rows else None,
+            "cases": cases,
+            "case_count": len(cases),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -309,21 +329,28 @@ def get_full_network(case_id: str, **kwargs) -> dict:
     """Who is in the fraud network and what are their cases? (Section 6.3)"""
     p = _require(case_id=case_id)
     rows = _rows(_FULL_NETWORK, case_id=p["case_id"])
-    networks = [{
-        "network_key": r["network_key"],
-        "network_type": r.get("network_type"),
-        "formed_by_rule": r.get("formed_by_rule"),
-        "members": list(r.get("members") or []),
-        "member_count": len(r.get("members") or []),
-    } for r in rows]
+    networks = [
+        {
+            "network_key": r["network_key"],
+            "network_type": r.get("network_type"),
+            "formed_by_rule": r.get("formed_by_rule"),
+            "members": list(r.get("members") or []),
+            "member_count": len(r.get("members") or []),
+        }
+        for r in rows
+    ]
     logger.info(
-        "copilot_template get_full_network: case_id=%s networks=%d", p["case_id"], len(networks),
+        "copilot_template get_full_network: case_id=%s networks=%d",
+        p["case_id"],
+        len(networks),
     )
-    return _envelope({
-        "case_id": p["case_id"],
-        "networks": networks,
-        "network_count": len(networks),
-    })
+    return _envelope(
+        {
+            "case_id": p["case_id"],
+            "networks": networks,
+            "network_count": len(networks),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -339,10 +366,12 @@ def get_structural_similar_cases(case_id: str, limit: int = 25, **kwargs) -> dic
     investigator different things about the same pair of cases.
     """
     from reasoning_layer.similar_cases import find_structural_matches
+
     envelope = find_structural_matches(case_id, limit=limit)
     logger.info(
         "copilot_template get_structural_similar_cases: case_id=%s matches=%d",
-        case_id, len(envelope["result"].get("matches", [])),
+        case_id,
+        len(envelope["result"].get("matches", [])),
     )
     return envelope
 
@@ -391,20 +420,24 @@ def get_rejection_history(case_id: str, **kwargs) -> dict:
     records = list(row.get("rejection_records") or [])
     logger.info(
         "copilot_template get_rejection_history: case_id=%s rejected_edges=%d records=%d",
-        p["case_id"], len(rels), len(records),
+        p["case_id"],
+        len(rels),
+        len(records),
     )
-    return _envelope({
-        "case_id": p["case_id"],
-        "rejected_relationships": rels,
-        "rejection_records": records,
-        "rejected_count": len(rels) + len(records),
-        # Read by the prompt layer; states the handling rule as data so the
-        # answer cannot quietly restate a rejected inference as live.
-        "status_note": (
-            "These inferences were reviewed and rejected. They are historical "
-            "review context and must not be presented as current findings."
-        ),
-    })
+    return _envelope(
+        {
+            "case_id": p["case_id"],
+            "rejected_relationships": rels,
+            "rejection_records": records,
+            "rejected_count": len(rels) + len(records),
+            # Read by the prompt layer; states the handling rule as data so the
+            # answer cannot quietly restate a rejected inference as live.
+            "status_note": (
+                "These inferences were reviewed and rejected. They are historical "
+                "review context and must not be presented as current findings."
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -454,15 +487,20 @@ def get_case_merge_history(case_id: str, **kwargs) -> dict:
     derived = list(row.get("merge_derived_subjects") or [])
     logger.info(
         "copilot_template get_case_merge_history: case_id=%s in=%d out=%d derived_subjects=%d",
-        p["case_id"], len(merged_in), len(merged_out), len(derived),
+        p["case_id"],
+        len(merged_in),
+        len(merged_out),
+        len(derived),
     )
-    return _envelope({
-        "case_id": p["case_id"],
-        "merged_in_cases": merged_in,
-        "merged_out_cases": merged_out,
-        "merge_derived_subjects": derived,
-        "has_merge_history": bool(merged_in or merged_out or derived),
-    })
+    return _envelope(
+        {
+            "case_id": p["case_id"],
+            "merged_in_cases": merged_in,
+            "merged_out_cases": merged_out,
+            "merge_derived_subjects": derived,
+            "has_merge_history": bool(merged_in or merged_out or derived),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -493,16 +531,20 @@ def get_cross_case_hub_summary(subject_id: str, **kwargs) -> dict:
     cases = list(row.get("cases") or [])
     logger.info(
         "copilot_template get_cross_case_hub_summary: subject_id=%s hub=%s cases=%d",
-        p["subject_id"], row.get("is_cross_case_hub"), len(cases),
+        p["subject_id"],
+        row.get("is_cross_case_hub"),
+        len(cases),
     )
-    return _envelope({
-        "subject_id": p["subject_id"],
-        "is_cross_case_hub": bool(row.get("is_cross_case_hub", False)),
-        "hub_case_ids": list(row.get("hub_case_ids") or []),
-        "cases": cases,
-        "case_count": len(cases),
-        "primary_case_count": sum(1 for c in cases if c.get("is_primary")),
-    })
+    return _envelope(
+        {
+            "subject_id": p["subject_id"],
+            "is_cross_case_hub": bool(row.get("is_cross_case_hub", False)),
+            "hub_case_ids": list(row.get("hub_case_ids") or []),
+            "cases": cases,
+            "case_count": len(cases),
+            "primary_case_count": sum(1 for c in cases if c.get("is_primary")),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -536,29 +578,36 @@ def get_wage_corroboration_detail(case_id: str, subject_id: str, **kwargs) -> di
     """What wage evidence corroborates this SLAM allegation? (Section 6.3)"""
     p = _require(case_id=case_id, subject_id=subject_id)
     rows = _rows(_WAGE_CORROBORATION, case_id=p["case_id"], subject_id=p["subject_id"])
-    allegations = [{
-        "allegation_type": r.get("allegation_type"),
-        "wage_corroborated": bool(r.get("wage_corroborated", False)),
-        "corroboration_confidence": r.get("corroboration_confidence"),
-        # Rule 12 distinguishes a verified date overlap (High) from wages
-        # present but dates absent (Medium). Carried through so the answer
-        # can state which of the two it is.
-        "date_overlap_verified": r.get("date_overlap_verified"),
-        "corroboration_rule": r.get("corroboration_rule"),
-        "wage_records": list(r.get("wage_records") or []),
-    } for r in rows]
+    allegations = [
+        {
+            "allegation_type": r.get("allegation_type"),
+            "wage_corroborated": bool(r.get("wage_corroborated", False)),
+            "corroboration_confidence": r.get("corroboration_confidence"),
+            # Rule 12 distinguishes a verified date overlap (High) from wages
+            # present but dates absent (Medium). Carried through so the answer
+            # can state which of the two it is.
+            "date_overlap_verified": r.get("date_overlap_verified"),
+            "corroboration_rule": r.get("corroboration_rule"),
+            "wage_records": list(r.get("wage_records") or []),
+        }
+        for r in rows
+    ]
     logger.info(
         "copilot_template get_wage_corroboration_detail: case_id=%s subject_id=%s allegations=%d",
-        p["case_id"], p["subject_id"], len(allegations),
+        p["case_id"],
+        p["subject_id"],
+        len(allegations),
     )
-    return _envelope({
-        "case_id": p["case_id"],
-        "subject_id": p["subject_id"],
-        "fraud_start_date": rows[0].get("fraud_start_date") if rows else None,
-        "fraud_end_date": rows[0].get("fraud_end_date") if rows else None,
-        "allegations": allegations,
-        "corroborated_count": sum(1 for a in allegations if a["wage_corroborated"]),
-    })
+    return _envelope(
+        {
+            "case_id": p["case_id"],
+            "subject_id": p["subject_id"],
+            "fraud_start_date": rows[0].get("fraud_start_date") if rows else None,
+            "fraud_end_date": rows[0].get("fraud_end_date") if rows else None,
+            "allegations": allegations,
+            "corroborated_count": sum(1 for a in allegations if a["wage_corroborated"]),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -581,26 +630,34 @@ def get_connection_path(subject_id_a: str, subject_id_b: str, **kwargs) -> dict:
     """How exactly is A connected to B, even across subjects not in the
     same detected network? (Sections 6.3, 9.3)"""
     p = _require(subject_id_a=subject_id_a, subject_id_b=subject_id_b)
-    row = _single(
-        _CONNECTION_PATH,
-        subject_id_a=p["subject_id_a"], subject_id_b=p["subject_id_b"],
-    ) or {}
+    row = (
+        _single(
+            _CONNECTION_PATH,
+            subject_id_a=p["subject_id_a"],
+            subject_id_b=p["subject_id_b"],
+        )
+        or {}
+    )
     path = list(row.get("connection_path") or [])
     logger.info(
         "copilot_template get_connection_path: %s -> %s hops=%s",
-        p["subject_id_a"], p["subject_id_b"], row.get("hop_count"),
+        p["subject_id_a"],
+        p["subject_id_b"],
+        row.get("hop_count"),
     )
-    return _envelope({
-        "subject_id_a": p["subject_id_a"],
-        "subject_id_b": p["subject_id_b"],
-        "connection_path": path,
-        "path_nodes": list(row.get("path_nodes") or []),
-        "hop_count": row.get("hop_count"),
-        # Explicit, so an answer says "no connection within four hops"
-        # rather than treating an empty list as "not connected at all".
-        "connected": bool(path),
-        "search_depth_limit": 4,
-    })
+    return _envelope(
+        {
+            "subject_id_a": p["subject_id_a"],
+            "subject_id_b": p["subject_id_b"],
+            "connection_path": path,
+            "path_nodes": list(row.get("path_nodes") or []),
+            "hop_count": row.get("hop_count"),
+            # Explicit, so an answer says "no connection within four hops"
+            # rather than treating an empty list as "not connected at all".
+            "connected": bool(path),
+            "search_depth_limit": 4,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -633,25 +690,31 @@ def get_network_financial_exposure(case_id: str, **kwargs) -> dict:
     networks = []
     for r in rows:
         cases = list(r.get("case_rows") or [])
-        networks.append({
-            "network_key": r["network_key"],
-            "network_type": r.get("network_type"),
-            "member_count": r.get("member_count"),
-            "case_count": r.get("case_count"),
-            "total_exposure": round(float(r.get("total_exposure") or 0.0), 2),
-            "cases": cases,
-            # Stated rather than hidden: a case with a null fraud_amount
-            # contributes 0, so the total is a floor, not a certainty.
-            "cases_missing_amount": sum(1 for c in cases if c.get("fraud_amount") is None),
-        })
+        networks.append(
+            {
+                "network_key": r["network_key"],
+                "network_type": r.get("network_type"),
+                "member_count": r.get("member_count"),
+                "case_count": r.get("case_count"),
+                "total_exposure": round(float(r.get("total_exposure") or 0.0), 2),
+                "cases": cases,
+                # Stated rather than hidden: a case with a null fraud_amount
+                # contributes 0, so the total is a floor, not a certainty.
+                "cases_missing_amount": sum(1 for c in cases if c.get("fraud_amount") is None),
+            }
+        )
     total = round(sum(n["total_exposure"] for n in networks), 2)
     logger.info(
         "copilot_template get_network_financial_exposure: case_id=%s networks=%d total=%.2f",
-        p["case_id"], len(networks), total,
+        p["case_id"],
+        len(networks),
+        total,
     )
-    return _envelope({
-        "case_id": p["case_id"],
-        "networks": networks,
-        "network_count": len(networks),
-        "total_exposure_all_networks": total,
-    })
+    return _envelope(
+        {
+            "case_id": p["case_id"],
+            "networks": networks,
+            "network_count": len(networks),
+            "total_exposure_all_networks": total,
+        }
+    )

@@ -1,8 +1,7 @@
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, field_validator
-
-from typing import Dict, List, Optional, Any
 
 from semantic_layer.entity_contracts import InvestigationStep
 
@@ -58,6 +57,7 @@ class ModifyInvestigationStepsRequest(BaseModel):
     summary are never accepted here — they remain AI-generated at all
     times, per the Section D.6 scope rule.
     """
+
     case_id: str
     # Reuses the same {step, action, owner?, deadline_days?} shape the
     # AI-generated plan already uses (semantic_layer.entity_contracts.
@@ -86,6 +86,7 @@ class ModifyInvestigationStepsRequest(BaseModel):
 
 class ModifyInvestigationStepsResponse(BaseModel):
     """Response for POST /plan/modify_investigation_steps."""
+
     case_id: str
     status: str
     plan_source: str
@@ -95,11 +96,13 @@ class ModifyInvestigationStepsResponse(BaseModel):
 
 class RevertToAiPlanRequest(BaseModel):
     """POST /plan/revert_to_ai — deletes case_id's saved override."""
+
     case_id: str
 
 
 class RevertToAiPlanResponse(BaseModel):
     """Response for POST /plan/revert_to_ai."""
+
     case_id: str
     status: str
     plan_source: str
@@ -115,6 +118,7 @@ class InvestigationStepsResponse(BaseModel):
     is_modify_investigation_steps, so a caller checks one flag rather
     than inspecting which of two fields is populated.
     """
+
     case_id: str
     investigation_steps: List[InvestigationStep]
     # True  -> investigation_steps came from investigation_plan_overrides
@@ -173,6 +177,7 @@ class CopilotRequest(BaseModel):
 
 class ConversationTurn(BaseModel):
     """One transcript turn in the user/assistant shape /copilot uses."""
+
     role: str
     content: str
 
@@ -187,9 +192,11 @@ class ConversationHistoryResponse(BaseModel):
     conversation_history table) for support/observability, matching the
     conversation_history_source field on the /copilot response.
     """
+
     case_id: str
     conversation_history: List[ConversationTurn]
     conversation_history_source: str
+
 
 class GraphIngestRequest(BaseModel):
     """
@@ -215,6 +222,7 @@ class GraphIngestRequest(BaseModel):
     attribution edges the Wave 2 network rules need — reasoning only the
     primary would silently starve those rules of their other endpoints.
     """
+
     case_ids: List[str]
     run_rules: bool = True
 
@@ -223,6 +231,7 @@ class GraphIngestRequest(BaseModel):
 # D2 — POST /reject_inference (Functional Specification D2;
 # reasoning_layer/rejection.py)
 # -----------------------------------------------------------------------
+
 
 class RevertRejectionRequest(BaseModel):
     """
@@ -235,6 +244,7 @@ class RevertRejectionRequest(BaseModel):
     reason they're required on /reject_inference: this overrules a
     prior rejection decision, so who did it and why must be recorded.
     """
+
     case_id: str
     rule_id: str
     investigator_id: str
@@ -243,6 +253,7 @@ class RevertRejectionRequest(BaseModel):
     @field_validator("case_id", "rule_id", "investigator_id", "reason")
     @classmethod
     def must_be_non_blank(cls, value: str) -> str:
+        """Reject empty or whitespace-only strings for these required fields."""
         if not value or not value.strip():
             raise ValueError("must be a non-empty string.")
         return value
@@ -250,12 +261,14 @@ class RevertRejectionRequest(BaseModel):
 
 class RevertedItem(BaseModel):
     """One instance restored to active by a bulk revert."""
+
     subject_id_a: Optional[str] = None
     subject_id_b: Optional[str] = None
 
 
 class RevertRejectionResponse(BaseModel):
     """What the UI needs to flip the rule's rows back to un-rejected."""
+
     reverted: bool
     case_id: str
     rule_id: str
@@ -267,6 +280,7 @@ class RevertRejectionResponse(BaseModel):
     reverted_items: List[RevertedItem] = []
     reverted_at: Optional[str] = None
     model_config = {"extra": "allow"}
+
 
 class RejectInferenceRequest(BaseModel):
     """
@@ -290,6 +304,7 @@ class RejectInferenceRequest(BaseModel):
     :Rejection audit trail records who made that call — see
     reasoning_layer/rejection.py's module docstring ATTRIBUTION NOTE.
     """
+
     case_id: str
     rule_id: str
     reason: str
@@ -298,6 +313,7 @@ class RejectInferenceRequest(BaseModel):
     @field_validator("case_id", "rule_id", "reason", "investigator_id")
     @classmethod
     def must_be_non_blank(cls, value: str) -> str:
+        """Reject empty or whitespace-only strings for these required fields."""
         if not value or not value.strip():
             raise ValueError("must be a non-empty string.")
         return value
@@ -305,12 +321,14 @@ class RejectInferenceRequest(BaseModel):
 
 class RejectedItem(BaseModel):
     """One instance rejected by a bulk reject_inference call."""
+
     subject_id_a: Optional[str] = None
     subject_id_b: Optional[str] = None
 
 
 class RejectInferenceResponse(BaseModel):
     """Response for POST /reject_inference (D2 Output Contract, v2)."""
+
     accepted: bool
     case_id: str
     rule_id: str
@@ -326,6 +344,7 @@ class RejectInferenceResponse(BaseModel):
 # D3 — GET /fraud_network/{case_id} (Functional Specification D3;
 # reasoning_layer/fraud_network.py)
 # -----------------------------------------------------------------------
+
 
 class FraudNetworkNode(BaseModel):
     id: str
@@ -359,6 +378,7 @@ class GraphNode(BaseModel):
     bare id would collide between a :Case and a :Subject. `key` carries
     the bare business key for callers that need it (the reject flow).
     """
+
     id: str
     ref: Optional[str] = None
     label: str
@@ -378,6 +398,7 @@ class GraphEdge(BaseModel):
     are exactly the POST /reject_inference parameters, pre-resolved so
     the UI reads them off the clicked edge.
     """
+
     id: Optional[str] = None
     source: str
     target: str
@@ -395,6 +416,7 @@ class GraphEdge(BaseModel):
 
 class CaseGraph(BaseModel):
     """Everything related to the case: all nodes, all relationships."""
+
     nodes: List[GraphNode] = []
     edges: List[GraphEdge] = []
     node_count: int = 0
@@ -411,6 +433,7 @@ class FraudNetworkResponse(BaseModel):
     the original FraudNetwork-only groupings, retained unchanged so the
     current screen keeps working while the frontend migrates.
     """
+
     case_id: str
     case_found: bool = True
     graph: CaseGraph = CaseGraph()
@@ -422,6 +445,7 @@ class FraudNetworkResponse(BaseModel):
 # D4 — GET /rule_audit/{case_id} (Functional Specification D4;
 # reasoning_layer/rule_audit.py)
 # -----------------------------------------------------------------------
+
 
 class InferredRelationship(BaseModel):
     subject_id_a: str
@@ -442,6 +466,7 @@ class RuleAuditEntry(BaseModel):
 
 class RuleAuditResponse(BaseModel):
     """Response for GET /rule_audit/{case_id} (D4 Output Contract)."""
+
     case_id: str
     primary_subject_id: Optional[str] = None
     rules: List[RuleAuditEntry]

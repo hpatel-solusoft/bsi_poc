@@ -2,16 +2,16 @@
 Converts the manifest tool catalogue into OpenAI function-calling schema.
 Intentionally generic — has no knowledge of specific tool names.
 """
-from typing import List, Optional
 
+from typing import List
 
 # Map manifest type strings to OpenAI JSON Schema types
 _TYPE_MAP = {
-    "string":  {"type": "string"},
+    "string": {"type": "string"},
     "integer": {"type": "integer"},
-    "number":  {"type": "number"},
-    "dict":    {"type": "object"},
-    "object":  {"type": "object"},
+    "number": {"type": "number"},
+    "dict": {"type": "object"},
+    "object": {"type": "object"},
 }
 
 
@@ -57,7 +57,7 @@ def build_openai_tools(dispatcher) -> List[dict]:
     """
     tools = []
     for tool in dispatcher.get_tool_catalogue():
-        #if scope and tool.get("scope") != scope :
+        # if scope and tool.get("scope") != scope :
         #    continue
         properties = {}
         required_names = []
@@ -76,17 +76,19 @@ def build_openai_tools(dispatcher) -> List[dict]:
 
         # Prepend trigger to description so the LLM can filter by flow.
         desc = tool["description"].strip()
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": desc,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required_names,
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": desc,
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required_names,
+                    },
                 },
-            },
-        })
+            }
+        )
 
     return tools

@@ -44,7 +44,12 @@ from typing import Any, Dict, List, Optional
 
 from appworks.appworks_auth import fetch
 from appworks.appworks_paths import AppWorksPaths as AW
-from appworks.appworks_utils import embedded, extract_id_from_href, get_relationship_items, safe_fetch
+from appworks.appworks_utils import (
+    embedded,
+    extract_id_from_href,
+    get_relationship_items,
+    safe_fetch,
+)
 from etl import normalizers as N
 from reasoning_layer.neo4j_client import get_session
 
@@ -56,6 +61,7 @@ SOURCE_SYSTEM = "AppWorks"
 # ============================================================
 # FETCH — AppWorks REST -> canonical Section 3.1 field names
 # ============================================================
+
 
 def _first(props: Dict[str, Any], *names: str) -> Optional[Any]:
     """Property-name fallback chain. AppWorks exposes the same logical
@@ -98,11 +104,16 @@ def _fetch_subject_addresses(subject_id: str) -> List[Dict[str, Any]]:
         key = N.address_key(street, city, state, zip_code)
         if not key:
             continue
-        addresses.append({
-            "address_key": key,
-            "street": street, "city": city, "state": state, "zip": zip_code,
-            "street_normalized": N.normalize_street(street),
-        })
+        addresses.append(
+            {
+                "address_key": key,
+                "street": street,
+                "city": city,
+                "state": state,
+                "zip": zip_code,
+                "street_normalized": N.normalize_street(street),
+            }
+        )
     return addresses
 
 
@@ -128,12 +139,16 @@ def _fetch_subject_employers(subject_id: str) -> List[Dict[str, Any]]:
         key = N.employer_key(fein, fid, name)
         if not key:
             continue
-        employers.append({
-            "employer_key": key, "employer_name": name,
-            "fein": fein, "employer_fid": fid,
-            "start_date": N.to_iso_date(_first(props, "Job_StartDate", "Job_HireDate")),
-            "end_date": N.to_iso_date(_first(props, "Job_EndDate", "Job_TerminationDate")),
-        })
+        employers.append(
+            {
+                "employer_key": key,
+                "employer_name": name,
+                "fein": fein,
+                "employer_fid": fid,
+                "start_date": N.to_iso_date(_first(props, "Job_StartDate", "Job_HireDate")),
+                "end_date": N.to_iso_date(_first(props, "Job_EndDate", "Job_TerminationDate")),
+            }
+        )
     return employers
 
 
@@ -162,21 +177,34 @@ def _fetch_subject_wages(subject_id: str) -> List[Dict[str, Any]]:
         key = N.employer_key(fein, fid, name)
         if not key:
             continue
-        period_start = N.to_iso_date(_first(props, "SubjectWages_PeriodStart", "SubjectWages_StartDate", "Wages_QuarterStart"))
-        period_end = N.to_iso_date(_first(props, "SubjectWages_PeriodEnd", "SubjectWages_EndDate", "Wages_QuarterEnd"))
+        period_start = N.to_iso_date(
+            _first(props, "SubjectWages_PeriodStart", "SubjectWages_StartDate", "Wages_QuarterStart")
+        )
+        period_end = N.to_iso_date(
+            _first(props, "SubjectWages_PeriodEnd", "SubjectWages_EndDate", "Wages_QuarterEnd")
+        )
         year = N.clean_text(_first(props, "SubjectWages_Year", "Wages_Year"))
         quarter = N.clean_text(_first(props, "SubjectWages_Quarter", "Wages_Quarter"))
-        wages.append({
-            "employer_key": key, "employer_name": name, "fein": fein, "employer_fid": fid,
-            "period_start": period_start, "period_end": period_end,
-            "wage_year": year, "wage_quarter": quarter,
-            "wage_amount": N.to_float(_first(props, "SubjectWages_Amount", "SubjectWages_WageAmount", "Wages_Amount")),
-            # Distinguishes two wage rows for the same subject+employer in
-            # different periods. Without it, MERGE collapses an entire
-            # employment history into one relationship and Rule 12's date
-            # overlap check has nothing left to compare against.
-            "period_key": f"{year or ''}|{quarter or ''}|{period_start or ''}|{period_end or ''}",
-        })
+        wages.append(
+            {
+                "employer_key": key,
+                "employer_name": name,
+                "fein": fein,
+                "employer_fid": fid,
+                "period_start": period_start,
+                "period_end": period_end,
+                "wage_year": year,
+                "wage_quarter": quarter,
+                "wage_amount": N.to_float(
+                    _first(props, "SubjectWages_Amount", "SubjectWages_WageAmount", "Wages_Amount")
+                ),
+                # Distinguishes two wage rows for the same subject+employer in
+                # different periods. Without it, MERGE collapses an entire
+                # employment history into one relationship and Rule 12's date
+                # overlap check has nothing left to compare against.
+                "period_key": f"{year or ''}|{quarter or ''}|{period_start or ''}|{period_end or ''}",
+            }
+        )
     return wages
 
 
@@ -207,8 +235,12 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
         # No confirmed AppWorks source for these (GAP_ANALYSIS.md); the
         # fallback chain is a best effort and will often resolve to None,
         # which Rule 12 handles explicitly rather than matching everything.
-        "fraud_start_date": N.to_iso_date(_first(wf_props, "WorkfolderFraudStartDate", "Workfolder_FraudPeriodStart")),
-        "fraud_end_date": N.to_iso_date(_first(wf_props, "WorkfolderFraudEndDate", "Workfolder_FraudPeriodEnd")),
+        "fraud_start_date": N.to_iso_date(
+            _first(wf_props, "WorkfolderFraudStartDate", "Workfolder_FraudPeriodStart")
+        ),
+        "fraud_end_date": N.to_iso_date(
+            _first(wf_props, "WorkfolderFraudEndDate", "Workfolder_FraudPeriodEnd")
+        ),
         # is_dta_case / disposition: still no confirmed source on the
         # Workfolder entity in this codebase or the standalone test app.
         # Read optimistically through a fallback chain, left null when
@@ -236,59 +268,79 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
 
             allegation_id = extract_id_from_href(self_href)
             if not allegation_id:
-                logger.warning("etl.graph_sync: allegation with no resolvable id skipped (case_id=%s)", case_id)
+                logger.warning(
+                    "etl.graph_sync: allegation with no resolvable id skipped (case_id=%s)", case_id
+                )
                 continue
 
-            comment_text = N.clean_text(_first(
-                props, "Allegations_Comment", "Allegations_Comments",
-                "Allegations_AllegationComment", "Allegations_Narrative", "Allegations_Description",
-            ))
+            comment_text = N.clean_text(
+                _first(
+                    props,
+                    "Allegations_Comment",
+                    "Allegations_Comments",
+                    "Allegations_AllegationComment",
+                    "Allegations_Narrative",
+                    "Allegations_Description",
+                )
+            )
 
-            allegations.append({
-                "allegation_id": allegation_id,
-                # Section 3.1: Allegation Type is a controlled-vocabulary STRING,
-                # not a node — the nested AppWorks type object is flattened to
-                # one descriptive string here.
-                "allegation_type": N.clean_text(_first(
-                    type_props,
-                    "AllegationType_AllegationTypeDescription",
-                    "AllegationType_AllegationTypeShortDesc",
-                )),
-                "status": N.clean_text(props.get("Allegations_AllegationStatus")),
-                "record_status": N.clean_text(props.get("Allegations_Status")),
-                "norris_code": N.clean_text(props.get("Allegations_DispositionNorrisCode")),
-                "outcome": N.clean_text(_first(props, "Allegations_Outcome", "Allegations_Disposition")),
-                # Closure date of the allegation itself. Synced because it
-                # is the ONLY closure date present on older AppWorks cases
-                # (e.g. 658423812), where the workfolder-level
-                # WorkfolderCloseDate is never populated. Rule 7 falls back
-                # to this when :Case.closed_date is null, so that a prior
-                # guilty case can still be DATED rather than only detected
-                # — without it, prior-guilt recency scoring in
-                # reasoning_layer/risk_signals.py has no input at all on
-                # exactly the historical cases it most needs to weigh.
-                "date_closed": N.to_iso_date(_first(
-                    props, "Allegations_DateClosed", "Allegations_ClosedDate",
-                )),
-                "comment_text": comment_text,
-                "source_table": "Allegations",
-                "retrieved_at": retrieved_at,
-                # wage_corroborated / corroborating_employer_fein deliberately
-                # NOT set: Section 3.1 lists them on :Allegation, but they are
-                # Rule 12's write targets. A rule concludes corroboration; ETL
-                # does not fetch it.
-            })
+            allegations.append(
+                {
+                    "allegation_id": allegation_id,
+                    # Section 3.1: Allegation Type is a controlled-vocabulary STRING,
+                    # not a node — the nested AppWorks type object is flattened to
+                    # one descriptive string here.
+                    "allegation_type": N.clean_text(
+                        _first(
+                            type_props,
+                            "AllegationType_AllegationTypeDescription",
+                            "AllegationType_AllegationTypeShortDesc",
+                        )
+                    ),
+                    "status": N.clean_text(props.get("Allegations_AllegationStatus")),
+                    "record_status": N.clean_text(props.get("Allegations_Status")),
+                    "norris_code": N.clean_text(props.get("Allegations_DispositionNorrisCode")),
+                    "outcome": N.clean_text(_first(props, "Allegations_Outcome", "Allegations_Disposition")),
+                    # Closure date of the allegation itself. Synced because it
+                    # is the ONLY closure date present on older AppWorks cases
+                    # (e.g. 658423812), where the workfolder-level
+                    # WorkfolderCloseDate is never populated. Rule 7 falls back
+                    # to this when :Case.closed_date is null, so that a prior
+                    # guilty case can still be DATED rather than only detected
+                    # — without it, prior-guilt recency scoring in
+                    # reasoning_layer/risk_signals.py has no input at all on
+                    # exactly the historical cases it most needs to weigh.
+                    "date_closed": N.to_iso_date(
+                        _first(
+                            props,
+                            "Allegations_DateClosed",
+                            "Allegations_ClosedDate",
+                        )
+                    ),
+                    "comment_text": comment_text,
+                    "source_table": "Allegations",
+                    "retrieved_at": retrieved_at,
+                    # wage_corroborated / corroborating_employer_fein deliberately
+                    # NOT set: Section 3.1 lists them on :Allegation, but they are
+                    # Rule 12's write targets. A rule concludes corroboration; ETL
+                    # does not fetch it.
+                }
+            )
 
             if comment_text:
-                commentary.append({
-                    "comment_id": N.commentary_id(case_id, "Allegation_Comment", allegation_id, comment_text, None),
-                    "comment_text": comment_text,
-                    "comment_type": "Allegation_Comment",
-                    "created_date": N.to_iso_date(props.get("S_CREATEDDATE")),
-                    "attach_to": "allegation",
-                    "attach_id": allegation_id,
-                    "source_table": "Allegations",
-                })
+                commentary.append(
+                    {
+                        "comment_id": N.commentary_id(
+                            case_id, "Allegation_Comment", allegation_id, comment_text, None
+                        ),
+                        "comment_text": comment_text,
+                        "comment_type": "Allegation_Comment",
+                        "created_date": N.to_iso_date(props.get("S_CREATEDDATE")),
+                        "attach_to": "allegation",
+                        "attach_id": allegation_id,
+                        "source_table": "Allegations",
+                    }
+                )
 
     # --- Case commentary ---
     comm_href = wf_links.get("relationship:Workfolder_WorkfolderCommentaryNewRelationship", {}).get("href")
@@ -296,27 +348,36 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
         for item in get_relationship_items(comm_href, "Workfolder_WorkfolderCommentaryNewRelationship"):
             self_href = item.get("_links", {}).get("self", {}).get("href", "")
             props, links = (
-                safe_fetch(self_href, "WorkfolderCommentary") if self_href
+                safe_fetch(self_href, "WorkfolderCommentary")
+                if self_href
                 else (item.get("Properties", {}), {})
             )
-            type_href = links.get("relationship:WorkfolderCommentary_CommentaryTypeRelationship", {}).get("href", "")
+            type_href = links.get("relationship:WorkfolderCommentary_CommentaryTypeRelationship", {}).get(
+                "href", ""
+            )
             type_props, _ = safe_fetch(type_href, "CommentaryType") if type_href else ({}, {})
 
             text = N.clean_text(_first(props, "WorkfolderCommentary_Comment", "Commentary_Comment"))
             if not text:
                 continue
             created = N.to_iso_date(props.get("S_CREATEDDATE"))
-            commentary.append({
-                "comment_id": N.commentary_id(
-                    case_id, "Case_Commentary", extract_id_from_href(self_href), text, created,
-                ),
-                "comment_text": text,
-                "comment_type": N.clean_text(type_props.get("Type")) or "Case_Commentary",
-                "created_date": created,
-                "attach_to": "case",
-                "attach_id": case["case_id"],
-                "source_table": "WorkfolderCommentary",
-            })
+            commentary.append(
+                {
+                    "comment_id": N.commentary_id(
+                        case_id,
+                        "Case_Commentary",
+                        extract_id_from_href(self_href),
+                        text,
+                        created,
+                    ),
+                    "comment_text": text,
+                    "comment_type": N.clean_text(type_props.get("Type")) or "Case_Commentary",
+                    "created_date": created,
+                    "attach_to": "case",
+                    "attach_id": case["case_id"],
+                    "source_table": "WorkfolderCommentary",
+                }
+            )
 
     # --- Subjects (+ address / alias / employer / wage / Subject_Comment) ---
     subjects: List[Dict[str, Any]] = []
@@ -329,7 +390,9 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
             detail_href = subj_links.get("relationship:Subjects_Subject", {}).get("href", "")
             subject_id = extract_id_from_href(detail_href)
             if not subject_id:
-                logger.warning("etl.graph_sync: subject with no resolvable subject_id skipped (case_id=%s)", case_id)
+                logger.warning(
+                    "etl.graph_sync: subject with no resolvable subject_id skipped (case_id=%s)", case_id
+                )
                 continue
             detail_props, detail_links = safe_fetch(detail_href, "Subject")
 
@@ -337,54 +400,75 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
             role_props, _ = safe_fetch(role_href, "SubjectRole") if role_href else ({}, {})
 
             is_company = bool(N.clean_text(detail_props.get("Subject_CompanyName")))
-            subject_comment = N.clean_text(_first(
-                detail_props, "Subject_Comment", "Subject_Comments", "Subject_Notes",
-            ))
+            subject_comment = N.clean_text(
+                _first(
+                    detail_props,
+                    "Subject_Comment",
+                    "Subject_Comments",
+                    "Subject_Notes",
+                )
+            )
 
-            subjects.append({
-                "subject_id": subject_id,
-                "first_name": N.clean_text(detail_props.get("Subject_FirstName")),
-                "last_name": N.clean_text(detail_props.get("Subject_LastName")),
-                "company_name": N.clean_text(detail_props.get("Subject_CompanyName")) if is_company else None,
-                # Subject_EIN is AppWorks' name for what Section 3.1 calls a
-                # company Subject's `fein` — same concept, different label.
-                "fein": N.normalize_fein(detail_props.get("Subject_EIN")) if is_company else None,
-                "subject_type": "Company" if is_company else "Individual",
-                # subject_role is case-specific (Section 3.2 makes it a property
-                # ON APPEARS_IN_CASE, not a permanent trait) — carried on this
-                # dict only to be written onto the relationship, never the node.
-                "subject_role": N.clean_text(
-                    role_props.get("RoleName") or subj_props.get("Subjects_SubjectType")
-                ),
-                "is_primary": N.to_bool(subj_props.get("Subjects_IsPrimarySubject")),
-                "addresses": _fetch_subject_addresses(subject_id),
-                "aliases": _fetch_subject_aliases(subject_id, detail_links),
-                "employers": _fetch_subject_employers(subject_id),
-                "wages": _fetch_subject_wages(subject_id),
-                "source_table": "Subject",
-                "retrieved_at": retrieved_at,
-                # ssn is Tier 1 PII (Section 3.5) — never fetched, never stored.
-            })
+            subjects.append(
+                {
+                    "subject_id": subject_id,
+                    "first_name": N.clean_text(detail_props.get("Subject_FirstName")),
+                    "last_name": N.clean_text(detail_props.get("Subject_LastName")),
+                    "company_name": (
+                        N.clean_text(detail_props.get("Subject_CompanyName")) if is_company else None
+                    ),
+                    # Subject_EIN is AppWorks' name for what Section 3.1 calls a
+                    # company Subject's `fein` — same concept, different label.
+                    "fein": N.normalize_fein(detail_props.get("Subject_EIN")) if is_company else None,
+                    "subject_type": "Company" if is_company else "Individual",
+                    # subject_role is case-specific (Section 3.2 makes it a property
+                    # ON APPEARS_IN_CASE, not a permanent trait) — carried on this
+                    # dict only to be written onto the relationship, never the node.
+                    "subject_role": N.clean_text(
+                        role_props.get("RoleName") or subj_props.get("Subjects_SubjectType")
+                    ),
+                    "is_primary": N.to_bool(subj_props.get("Subjects_IsPrimarySubject")),
+                    "addresses": _fetch_subject_addresses(subject_id),
+                    "aliases": _fetch_subject_aliases(subject_id, detail_links),
+                    "employers": _fetch_subject_employers(subject_id),
+                    "wages": _fetch_subject_wages(subject_id),
+                    "source_table": "Subject",
+                    "retrieved_at": retrieved_at,
+                    # ssn is Tier 1 PII (Section 3.5) — never fetched, never stored.
+                }
+            )
 
             if subject_comment:
-                commentary.append({
-                    "comment_id": N.commentary_id(case_id, "Subject_Comment", subject_id, subject_comment, None),
-                    "comment_text": subject_comment,
-                    "comment_type": "Subject_Comment",
-                    "created_date": None,
-                    "attach_to": "subject",
-                    "attach_id": subject_id,
-                    "source_table": "Subject",
-                })
+                commentary.append(
+                    {
+                        "comment_id": N.commentary_id(
+                            case_id, "Subject_Comment", subject_id, subject_comment, None
+                        ),
+                        "comment_text": subject_comment,
+                        "comment_type": "Subject_Comment",
+                        "created_date": None,
+                        "attach_to": "subject",
+                        "attach_id": subject_id,
+                        "source_table": "Subject",
+                    }
+                )
 
     logger.info(
         "etl.graph_sync: FETCHED case_id=%s subjects=%d allegations=%d commentary=%d employers=%d wages=%d",
-        case_id, len(subjects), len(allegations), len(commentary),
+        case_id,
+        len(subjects),
+        len(allegations),
+        len(commentary),
         sum(len(s["employers"]) for s in subjects),
         sum(len(s["wages"]) for s in subjects),
     )
-    return {"case": case, "subjects": subjects, "allegations": allegations,
-            "commentary": commentary, "retrieved_at": retrieved_at}
+    return {
+        "case": case,
+        "subjects": subjects,
+        "allegations": allegations,
+        "commentary": commentary,
+        "retrieved_at": retrieved_at,
+    }
 
 
 # ============================================================
@@ -618,6 +702,7 @@ def _tx_load(tx, data: Dict[str, Any]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
 
     def run(query: str, key: str, **params) -> None:
+        """Execute one Cypher write and record its affected-node count under key."""
         record = tx.run(query, **common, **params).single()
         counts[key] = int(record["n"]) if record and record["n"] is not None else 0
 

@@ -65,10 +65,7 @@ def get_recent_turns(case_id: str) -> Optional[List[dict]]:
     else:
         logger.info("conversation_history HIT for case_id=%s turns=%d", case_id, len(rows))
 
-    return [
-        {"role": row["role"], "content": row["content"]}
-        for row in rows
-    ]
+    return [{"role": row["role"], "content": row["content"]} for row in rows]
 
 
 def append_turn(
@@ -108,7 +105,9 @@ def append_turn(
             )
         logger.info(
             "conversation_history append OK case_id=%s role=%s turn_index=%d",
-            case_id, role, next_turn_index,
+            case_id,
+            role,
+            next_turn_index,
         )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error("conversation_history append FAILED for case_id=%s: %s", case_id, exc)

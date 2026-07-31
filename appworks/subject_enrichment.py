@@ -6,13 +6,20 @@ Manifest tool: fetch_subject_history
 """
 
 import logging
-from typing import Dict, List, Optional, Any
-from appworks.entity_mappers import map_commentary, map_workfolder_core
+from typing import Dict, Optional
+
 from appworks.appworks_paths import AppWorksPaths
-from appworks.appworks_utils import safe_fetch, get_relationship_items, embedded, embedded_id
+from appworks.appworks_utils import (
+    embedded,
+    embedded_id,
+    get_relationship_items,
+    safe_fetch,
+)
+from appworks.entity_mappers import map_commentary, map_workfolder_core
 from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
+
 
 def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None) -> Dict:
     """
@@ -76,16 +83,18 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
             core_props = map_workfolder_core(wf_props)
             commentary = map_commentary(wf_id, tracker)
 
-            prior_cases.append({
-                "workfolder_id":      wf_id,
-                "is_primary_subject": is_primary,
-                **core_props,
-                "commentary":            commentary["items"],
-                "commentary_count":      commentary["count"],
-                # Case-level field AppWorks repeats on every commentary row —
-                # map_commentary already dedupes it to a single value here.
-                "allegation_description": commentary["allegation_description"],
-            })
+            prior_cases.append(
+                {
+                    "workfolder_id": wf_id,
+                    "is_primary_subject": is_primary,
+                    **core_props,
+                    "commentary": commentary["items"],
+                    "commentary_count": commentary["count"],
+                    # Case-level field AppWorks repeats on every commentary row —
+                    # map_commentary already dedupes it to a single value here.
+                    "allegation_description": commentary["allegation_description"],
+                }
+            )
         except Exception as exc:
             logger.warning(f"⚠️ Failed processing Subjects row: {exc}")
 
@@ -100,5 +109,5 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
             "prior_cases": prior_cases,
             "prior_case_count": len(prior_cases),
         },
-        "provenance": tracker.get_provenance_block()
+        "provenance": tracker.get_provenance_block(),
     }

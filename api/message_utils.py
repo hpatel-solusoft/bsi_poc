@@ -1,12 +1,13 @@
-from config.settings import  TOP_LEVEL_SECTIONS
 import json
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
+from config.settings import TOP_LEVEL_SECTIONS
 
 _SECTION_COMPLAINT_INTEL = "complaint_intelligence"
 
 
-
 def find_tool_name_by_call_id(messages: list, call_id: str) -> Optional[str]:
+    """The tool/function name for a given tool_call id, or None if not found."""
     for msg in messages:
         if msg.get("role") == "assistant":
             for tc in msg.get("tool_calls", []):
@@ -15,7 +16,7 @@ def find_tool_name_by_call_id(messages: list, call_id: str) -> Optional[str]:
     return None
 
 
-def extract_tool_results(messages: list,  tool_section_map: Dict[str, str]) -> dict:
+def extract_tool_results(messages: list, tool_section_map: Dict[str, str]) -> dict:
     """CS-3: Build section dict from tool result messages.
 
     Tool results are stored exactly as the LLM received them.
@@ -33,12 +34,11 @@ def extract_tool_results(messages: list,  tool_section_map: Dict[str, str]) -> d
         if msg.get("role") != "tool":
             continue
         tool_name = find_tool_name_by_call_id(messages, msg["tool_call_id"])
-        if tool_name and tool_name in tool_section_map:       # ← uses parameter
-            section = tool_section_map[tool_name] 
+        if tool_name and tool_name in tool_section_map:  # ← uses parameter
+            section = tool_section_map[tool_name]
             try:
                 data = json.loads(msg["content"])
 
-             
                 # Inject convenience top-level fields for downstream prompts.
                 # subject_primary_id  — used by /plan, , /copilot prompts.
                 # fraud_types         — flattened list for the same consumers.
@@ -83,11 +83,13 @@ def merge_direct_result(
     """
     sections[section] = envelope.get("result", {})
     prov = envelope.get("provenance", {})
-    provenance_trail.append({
-        "sources":      prov.get("sources", []),
-        "retrieved_at": prov.get("retrieved_at", ""),
-        "computed_by":  prov.get("computed_by", ""),
-    })
+    provenance_trail.append(
+        {
+            "sources": prov.get("sources", []),
+            "retrieved_at": prov.get("retrieved_at", ""),
+            "computed_by": prov.get("computed_by", ""),
+        }
+    )
     return provenance_trail
 
 
@@ -108,17 +110,13 @@ def merge_provenance(existing: List[dict], new_entries: List[dict]) -> List[dict
         merged.append(entry)
     return merged
 
+
 def extract_agent_summary(messages: list) -> str:
     """Return the final assistant text from the last stop turn."""
-    # print("*"*50)
-    # print(messages)
     for msg in reversed(messages):
         if msg.get("role") == "assistant" and msg.get("content"):
-            # print("Agent summary extracted:", msg["content"])
             return msg["content"]
     return ""
-
-
 
 
 def build_ai_summary(
@@ -141,10 +139,7 @@ def build_ai_summary(
     provenance_trail — merged provenance for this route's response
     """
     # Separate: investigation sections stay nested, top-level sections float up
-    investigation_data = {
-        k: v for k, v in case_data.items()
-        if k not in TOP_LEVEL_SECTIONS
-    }
+    investigation_data = {k: v for k, v in case_data.items() if k not in TOP_LEVEL_SECTIONS}
 
     ai_summary: dict = {"investigation": investigation_data}
 

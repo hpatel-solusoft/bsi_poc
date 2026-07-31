@@ -111,9 +111,7 @@ _RULE_DEFS: Dict[str, Dict[str, Any]] = _CONFIG["rules"]
 _DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
     rid: dict(defn.get("params") or {}) for rid, defn in _RULE_DEFS.items()
 }
-_RULE_NAMES: Dict[str, str] = {
-    rid: defn.get("name", rid) for rid, defn in _RULE_DEFS.items()
-}
+_RULE_NAMES: Dict[str, str] = {rid: defn.get("name", rid) for rid, defn in _RULE_DEFS.items()}
 # Opt-in only: a rule with no config_version key in YAML is not a
 # candidate for the versioned sync below, so its behavior is completely
 # unchanged from before this feature existed (seeded ON CREATE, then left
@@ -121,9 +119,7 @@ _RULE_NAMES: Dict[str, str] = {
 # participate — see the sync note above Rule_07 in rules.yaml for the
 # reasoning.
 _CONFIG_VERSIONS: Dict[str, int] = {
-    rid: int(defn["config_version"])
-    for rid, defn in _RULE_DEFS.items()
-    if "config_version" in defn
+    rid: int(defn["config_version"]) for rid, defn in _RULE_DEFS.items() if "config_version" in defn
 }
 
 
@@ -236,11 +232,14 @@ def ensure_registry() -> int:
         for row in synced:
             logger.info(
                 "rule_registry: synced params for %s (params_config_version %s -> %s)",
-                row["rule_id"], row["previous_version"], row["new_version"],
+                row["rule_id"],
+                row["previous_version"],
+                row["new_version"],
             )
         if not synced:
-            logger.debug("rule_registry: versioned params already up to date for %s",
-                         list(_CONFIG_VERSIONS.keys()))
+            logger.debug(
+                "rule_registry: versioned params already up to date for %s", list(_CONFIG_VERSIONS.keys())
+            )
 
     return count
 
@@ -266,16 +265,23 @@ def load_registry() -> Dict[str, Dict[str, Any]]:
         logger.warning("rule_registry: empty — seeding from rules config defaults")
         ensure_registry()
         return {
-            rule_id: {"enabled": bool(_RULE_DEFS[rule_id].get("enabled", True)),
-                      "params": dict(params)}
+            rule_id: {"enabled": bool(_RULE_DEFS[rule_id].get("enabled", True)), "params": dict(params)}
             for rule_id, params in _DEFAULT_PARAMS.items()
         }
 
     registry: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         props = dict(row["props"])
-        for meta in ("rule_id", "rule_name", "wave", "enabled", "created_at",
-                     "params_config_version", "params_synced_at", "params_synced_reason"):
+        for meta in (
+            "rule_id",
+            "rule_name",
+            "wave",
+            "enabled",
+            "created_at",
+            "params_config_version",
+            "params_synced_at",
+            "params_synced_reason",
+        ):
             props.pop(meta, None)
         registry[row["rule_id"]] = {
             "enabled": row["enabled"] if row["enabled"] is not None else True,
