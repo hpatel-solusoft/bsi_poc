@@ -13,12 +13,12 @@ return the {result, provenance} envelope.
 """
 
 import logging
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
-from appworks.appworks_utils import safe_fetch
-from utils.provenance import ProvenanceTracker
-from appworks.entity_mappers import map_allegations, map_subjects, map_financials
 from appworks.appworks_paths import AppWorksPaths
+from appworks.appworks_utils import safe_fetch
+from appworks.entity_mappers import map_allegations, map_financials, map_subjects
+from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +30,8 @@ def _derive_fraud_types(allegations_list: List[Dict], case_props: Dict) -> List[
     """
     types = []
     for alleg in allegations_list:
-        desc = (
-            alleg.get("allegation_type", {}).get("description") or
-            alleg.get("allegation_type", {}).get("short_desc")
+        desc = alleg.get("allegation_type", {}).get("description") or alleg.get("allegation_type", {}).get(
+            "short_desc"
         )
         if desc and desc not in types:
             types.append(desc)
@@ -40,10 +39,10 @@ def _derive_fraud_types(allegations_list: List[Dict], case_props: Dict) -> List[
     if not types:
         # Fallback for dirty data / legacy schema
         fallback = (
-            case_props.get("WorkfolderAllegation") or
-            case_props.get("WorkFolderAllegation") or
-            case_props.get("Workfolder_Allegation") or
-            case_props.get("WorkFolder_Allegation")
+            case_props.get("WorkfolderAllegation")
+            or case_props.get("WorkFolderAllegation")
+            or case_props.get("Workfolder_Allegation")
+            or case_props.get("WorkFolder_Allegation")
         )
         if isinstance(fallback, str) and fallback.strip():
             types.append(fallback.strip())
@@ -73,7 +72,7 @@ def build_case_header_data(case_id: str) -> Dict[str, Any]:
         logger.error(f"❌ Critical Error: Could not fetch root Workfolder for {case_id}")
         return {
             "result": {"case_id": case_id, "error": "Case record not found or API unavailable"},
-            "provenance": tracker.get_provenance_block(computed_by="Failed REST retrieval")
+            "provenance": tracker.get_provenance_block(computed_by="Failed REST retrieval"),
         }
 
     logger.info(f"✅ Successfully retrieved Workfolder for {case_id}")
@@ -121,12 +120,8 @@ def build_case_header_data(case_id: str) -> Dict[str, Any]:
     }
 
     logger.info(
-        f"✅ clean_result built — {len(allegations_list)} allegation(s), "
-        f"{len(subjects_list)} subject(s)"
+        f"✅ clean_result built — {len(allegations_list)} allegation(s), " f"{len(subjects_list)} subject(s)"
     )
 
     # 6. Return Architecture Envelope
-    return {
-        "result": clean_result,
-        "provenance": tracker.get_provenance_block()
-    }
+    return {"result": clean_result, "provenance": tracker.get_provenance_block()}

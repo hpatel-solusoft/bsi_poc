@@ -60,24 +60,20 @@ def _envelope(result: Dict[str, Any], computed_by: str) -> dict:
     return {
         "result": result,
         "provenance": graph_provenance(
-            computed_by, ["Neo4j :Commentary / :Allegation narrative fields"],
+            computed_by,
+            ["Neo4j :Commentary / :Allegation narrative fields"],
         ),
     }
 
 
 def _flatten_allegation_ids(narrative_records: Dict[str, Any]) -> List[str]:
     return [
-        row["allegation_id"]
-        for row in narrative_records.get("allegations", [])
-        if row.get("allegation_id")
+        row["allegation_id"] for row in narrative_records.get("allegations", []) if row.get("allegation_id")
     ]
 
 
 def _has_any_commentary(narrative_records: Dict[str, Any]) -> bool:
-    return any(
-        row.get("commentary")
-        for row in narrative_records.get("allegations", [])
-    )
+    return any(row.get("commentary") for row in narrative_records.get("allegations", []))
 
 
 def _call_llm_json(prompt: str) -> dict:
@@ -90,8 +86,8 @@ def _call_llm_json(prompt: str) -> dict:
         model=_model(),
         messages=[{"role": "user", "content": prompt}],
         temperature=0,  # extraction is a structured-reasoning task, not
-                        # a creative one — determinism is preferred over
-                        # varied phrasing across pipeline runs.
+        # a creative one — determinism is preferred over
+        # varied phrasing across pipeline runs.
         response_format={"type": "json_object"},
     )
     raw = response.choices[0].message.content or "{}"
@@ -121,8 +117,8 @@ def run_extraction(subject_id: str, narrative_records: Dict[str, Any]) -> dict:
 
     if not all_allegation_ids:
         logger.info(
-            "extraction_stage: subject_id=%s has no allegations in scope — "
-            "nothing to extract", subject_id,
+            "extraction_stage: subject_id=%s has no allegations in scope — " "nothing to extract",
+            subject_id,
         )
         result = ExtractionResult(subject_id=subject_id).model_dump()
         return _envelope(result, "reasoning_layer.extraction_stage.run_extraction")
@@ -131,7 +127,8 @@ def run_extraction(subject_id: str, narrative_records: Dict[str, Any]) -> dict:
         logger.info(
             "extraction_stage: subject_id=%s has %d allegation(s) but zero "
             "commentary — skipping the LLM call, all marked unresolved",
-            subject_id, len(all_allegation_ids),
+            subject_id,
+            len(all_allegation_ids),
         )
         result = ExtractionResult(
             subject_id=subject_id,
@@ -159,7 +156,9 @@ def run_extraction(subject_id: str, narrative_records: Dict[str, Any]) -> dict:
             last_error = exc
             logger.warning(
                 "extraction_stage: subject_id=%s attempt=%d returned invalid JSON: %s",
-                subject_id, attempt, exc,
+                subject_id,
+                attempt,
+                exc,
             )
 
     if parsed is None:
@@ -172,13 +171,14 @@ def run_extraction(subject_id: str, narrative_records: Dict[str, Any]) -> dict:
         validated = ExtractionResult(**parsed)
     except ValidationError as exc:
         raise ValueError(
-            f"Extraction Stage LLM output for subject_id={subject_id!r} failed "
-            f"schema validation: {exc}"
+            f"Extraction Stage LLM output for subject_id={subject_id!r} failed " f"schema validation: {exc}"
         ) from exc
 
     logger.info(
         "extraction_stage: subject_id=%s attributions=%d unresolved=%d corroborations=%d",
-        subject_id, len(validated.attributions), len(validated.unresolved_allegation_ids),
+        subject_id,
+        len(validated.attributions),
+        len(validated.unresolved_allegation_ids),
         len(validated.corroborations),
     )
     return _envelope(validated.model_dump(), "reasoning_layer.extraction_stage.run_extraction")

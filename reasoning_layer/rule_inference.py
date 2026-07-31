@@ -135,9 +135,7 @@ _STRUCTURAL_TO_NETWORK: Dict[str, str] = {
     "Rule_05_Alias_Identity": "Rule_06_Identity_Fraud_Network",
 }
 
-_RULE_NUMBERS: Dict[str, int] = {
-    rule_id: int(rule_id.split("_")[1]) for rule_id in _RULE_LABELS
-}
+_RULE_NUMBERS: Dict[str, int] = {rule_id: int(rule_id.split("_")[1]) for rule_id in _RULE_LABELS}
 
 
 def rule_label(rule_id: str) -> str:
@@ -147,16 +145,17 @@ def rule_label(rule_id: str) -> str:
 
 
 def rule_number(rule_id: str) -> Optional[int]:
+    """The rule's numeric identifier (e.g. 3 for Rule_03_...), or None if unknown."""
     return _RULE_NUMBERS.get(rule_id)
 
 
 def rule_display_name(rule_id: str) -> str:
-    """"FastTrack Recommendation" — the finding's name, for a reader."""
+    """ "FastTrack Recommendation" — the finding's name, for a reader."""
     return _RULE_DISPLAY_NAMES.get(rule_id, rule_id)
 
 
 def rule_heading(rule_id: str) -> str:
-    """"Rule 13 (FastTrack Recommendation)" — the head of every narrative.
+    """ "Rule 13 (FastTrack Recommendation)" — the head of every narrative.
 
     Keeping the rule NUMBER visible matters: investigators and the audit
     trail refer to findings by number, and a narrative an investigator
@@ -232,8 +231,9 @@ def rule_description(rule_id: str) -> Optional[str]:
 # Small formatting helpers
 # ======================================================================
 
+
 def display_name(first_name: Any, last_name: Any, subject_id: Any = None) -> Optional[str]:
-    """"Maria Williams" from the parts the graph holds.
+    """ "Maria Williams" from the parts the graph holds.
 
     Falls back to whichever part exists, then to the subject_id. A subject
     with no name on record still needs to be identifiable in the sentence —
@@ -247,7 +247,7 @@ def display_name(first_name: Any, last_name: Any, subject_id: Any = None) -> Opt
 
 
 def format_address(detail: Dict[str, Any]) -> Optional[str]:
-    """"244 Elmwood Avenue, Quincy MA 02169" from the :Address parts."""
+    """ "244 Elmwood Avenue, Quincy MA 02169" from the :Address parts."""
     street = str(detail.get("street")).strip() if detail.get("street") else None
     locality = " ".join(
         str(detail.get(key)).strip()
@@ -260,7 +260,7 @@ def format_address(detail: Dict[str, Any]) -> Optional[str]:
 
 
 def format_money(value: Any) -> Optional[str]:
-    """"$51,550" — whole dollars, or cents where they are actually present.
+    """ "$51,550" — whole dollars, or cents where they are actually present.
 
     Fraud amounts are quoted back to investigators and compared against a
     threshold in the same sentence, so the two must be formatted
@@ -279,7 +279,7 @@ def format_money(value: Any) -> Optional[str]:
 
 
 def _article(noun: str) -> str:
-    """"an Employer Fraud Network" / "a PCA Check-Split Network".
+    """ "an Employer Fraud Network" / "a PCA Check-Split Network".
 
     Worth a helper rather than an inline check: the network name is config-
     driven and appears in four different sentences, and "a Employer Fraud
@@ -331,14 +331,8 @@ def _corroboration_clause(instance: Dict[str, Any], basis: str) -> str:
     wrote about it, and the sentence must not imply otherwise.
     """
     if instance.get("corroborated"):
-        return (
-            f"The system matched this {basis}, and confirmed it against "
-            "investigator commentary."
-        )
-    return (
-        f"The system matched this {basis}. It has not been corroborated by "
-        "investigator commentary."
-    )
+        return f"The system matched this {basis}, and confirmed it against " "investigator commentary."
+    return f"The system matched this {basis}. It has not been corroborated by " "investigator commentary."
 
 
 def _confidence_clause(instance: Dict[str, Any]) -> Optional[str]:
@@ -346,7 +340,8 @@ def _confidence_clause(instance: Dict[str, Any]) -> Optional[str]:
     if not confidence or confidence == "Unresolved":
         return (
             "Confidence is unresolved — the evidence supports more than one reading."
-            if confidence == "Unresolved" else None
+            if confidence == "Unresolved"
+            else None
         )
     return f"Confidence: {confidence}."
 
@@ -363,9 +358,7 @@ def _network_members_phrase(members: Any) -> Optional[str]:
     for member in members:
         if not isinstance(member, dict):
             continue
-        name = display_name(
-            member.get("first_name"), member.get("last_name"), member.get("subject_id")
-        )
+        name = display_name(member.get("first_name"), member.get("last_name"), member.get("subject_id"))
         if not name:
             continue
         context: List[str] = []
@@ -380,6 +373,7 @@ def _network_members_phrase(members: Any) -> Optional[str]:
 # ======================================================================
 # Cross-rule context
 # ======================================================================
+
 
 class InferenceContext:
     """
@@ -427,11 +421,13 @@ class InferenceContext:
                 subject_id = instance.get("subject_id")
                 detail = instance.get("detail") or {}
                 if subject_id:
-                    self.prior_guilty.setdefault(subject_id, []).append({
-                        "case_ref": detail.get("complaint_no") or instance.get("related_case_id"),
-                        "outcome": detail.get("outcome"),
-                        "date_closed": detail.get("date_closed"),
-                    })
+                    self.prior_guilty.setdefault(subject_id, []).append(
+                        {
+                            "case_ref": detail.get("complaint_no") or instance.get("related_case_id"),
+                            "outcome": detail.get("outcome"),
+                            "date_closed": detail.get("date_closed"),
+                        }
+                    )
             elif rule_id in _NETWORK_NAMES:
                 detail = instance.get("detail") or {}
                 record = {
@@ -439,7 +435,8 @@ class InferenceContext:
                     "network_name": _NETWORK_NAMES[rule_id],
                     "network_key": instance.get("related_network_key") or detail.get("network_key"),
                     "member_ids": [
-                        m.get("subject_id") for m in (detail.get("members") or [])
+                        m.get("subject_id")
+                        for m in (detail.get("members") or [])
                         if isinstance(m, dict) and m.get("subject_id")
                     ],
                 }
@@ -460,9 +457,7 @@ class InferenceContext:
         if instance.get("subject_id") and instance.get("subject_name"):
             self.subject_names.setdefault(instance["subject_id"], instance["subject_name"])
         if instance.get("related_subject_id") and instance.get("related_subject_name"):
-            self.subject_names.setdefault(
-                instance["related_subject_id"], instance["related_subject_name"]
-            )
+            self.subject_names.setdefault(instance["related_subject_id"], instance["related_subject_name"])
         for member in (instance.get("detail") or {}).get("members") or []:
             if isinstance(member, dict) and member.get("subject_id"):
                 name = display_name(member.get("first_name"), member.get("last_name"))
@@ -472,16 +467,20 @@ class InferenceContext:
     # --- lookups used by the narratives ---
 
     def name_for(self, subject_id: Any) -> Optional[str]:
+        """Display name for a subject id, or None if unknown/unset."""
         return self.subject_names.get(subject_id) if subject_id else None
 
     def subjects_with_prior_guilty(self) -> List[str]:
+        """Subject ids with a prior guilty finding, sorted for stable output."""
         return sorted(self.prior_guilty)
 
     def networks_for(self, subject_id: Any) -> List[Dict[str, Any]]:
+        """Fraud networks a subject belongs to, or an empty list if none/unset."""
         return self.networks.get(subject_id, []) if subject_id else []
 
-    def shared_network(self, subject_id: Any, other_subject_id: Any,
-                       rule_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def shared_network(
+        self, subject_id: Any, other_subject_id: Any, rule_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         The network BOTH subjects belong to, optionally restricted to the
         one a given rule formed. This is what lets Rule 1's narrative end
@@ -508,12 +507,14 @@ class InferenceContext:
             networks = self.networks_for(subject_id)
             if not networks:
                 continue
-            found.append({
-                "subject_id": subject_id,
-                "subject_name": self.name_for(subject_id) or str(subject_id),
-                "priors": priors,
-                "networks": networks,
-            })
+            found.append(
+                {
+                    "subject_id": subject_id,
+                    "subject_name": self.name_for(subject_id) or str(subject_id),
+                    "priors": priors,
+                    "networks": networks,
+                }
+            )
         return found
 
 
@@ -524,6 +525,7 @@ _EMPTY_CONTEXT = InferenceContext()
 # Per-rule narratives
 # ======================================================================
 
+
 def _both_parties(instance: Dict[str, Any]) -> Optional[str]:
     subject = instance.get("subject_name")
     other = instance.get("related_subject_name")
@@ -532,8 +534,7 @@ def _both_parties(instance: Dict[str, Any]) -> Optional[str]:
     return subject or other
 
 
-def _network_consequence(rule_id: str, instance: Dict[str, Any],
-                         context: InferenceContext) -> Optional[str]:
+def _network_consequence(rule_id: str, instance: Dict[str, Any], context: InferenceContext) -> Optional[str]:
     """
     The CONSEQUENCE clause on a structural rule: did this structural match
     actually become a network? Only rendered when the corresponding network
@@ -544,7 +545,9 @@ def _network_consequence(rule_id: str, instance: Dict[str, Any],
     if not network_rule:
         return None
     record = context.shared_network(
-        instance.get("subject_id"), instance.get("related_subject_id"), network_rule,
+        instance.get("subject_id"),
+        instance.get("related_subject_id"),
+        network_rule,
     )
     if not record:
         return None
@@ -552,8 +555,7 @@ def _network_consequence(rule_id: str, instance: Dict[str, Any],
     return f"{article} {record['network_name']} has been formed between the two subjects."
 
 
-def _structural_narrative(rule_id: str, instance: Dict[str, Any],
-                          context: InferenceContext) -> Optional[str]:
+def _structural_narrative(rule_id: str, instance: Dict[str, Any], context: InferenceContext) -> Optional[str]:
     parties = _both_parties(instance)
     if not parties:
         return None
@@ -563,10 +565,7 @@ def _structural_narrative(rule_id: str, instance: Dict[str, Any],
         employer = detail.get("employer_name")
         fein = detail.get("fein")
         if employer and fein:
-            finding = (
-                f"{parties} both hold employment records with {employer} — "
-                f"the same FEIN {fein}."
-            )
+            finding = f"{parties} both hold employment records with {employer} — " f"the same FEIN {fein}."
         elif employer:
             finding = (
                 f"{parties} both hold employment records with {employer}. "
@@ -583,48 +582,48 @@ def _structural_narrative(rule_id: str, instance: Dict[str, Any],
         address = format_address(detail)
         finding = (
             f"{parties} are both on record at {address} — the same normalised address."
-            if address else
-            f"{parties} are both on record at the same normalised address."
+            if address
+            else f"{parties} are both on record at the same normalised address."
         )
         basis = "structurally from the addresses on file"
 
     elif rule_id == "Rule_05_Alias_Identity":
         alias = detail.get("alias_pattern")
         finding = (
-            f"{parties} are linked by the alias \"{alias}\", held by both subjects."
-            if alias else
-            f"{parties} are linked by a shared alias."
+            f'{parties} are linked by the alias "{alias}", held by both subjects.'
+            if alias
+            else f"{parties} are linked by a shared alias."
         )
         basis = "structurally from the alias records on file"
 
     else:
         return None
 
-    return _join([
-        finding,
-        _corroboration_clause(instance, basis),
-        _network_consequence(rule_id, instance, context),
-    ])
+    return _join(
+        [
+            finding,
+            _corroboration_clause(instance, basis),
+            _network_consequence(rule_id, instance, context),
+        ]
+    )
 
 
-def _network_narrative(rule_id: str, instance: Dict[str, Any],
-                       context: InferenceContext) -> Optional[str]:
+def _network_narrative(rule_id: str, instance: Dict[str, Any], context: InferenceContext) -> Optional[str]:
     detail = instance.get("detail") or {}
     network_name = _NETWORK_NAMES.get(rule_id, "fraud network")
     members = _network_members_phrase(detail.get("members"))
     network_key = instance.get("related_network_key") or detail.get("network_key")
 
     article = _sentence_case(_article(network_name))
-    member_count = len([
-        m for m in (detail.get("members") or []) if isinstance(m, dict) and m.get("subject_id")
-    ])
+    member_count = len(
+        [m for m in (detail.get("members") or []) if isinstance(m, dict) and m.get("subject_id")]
+    )
     if members and member_count == 1:
         # One member is a real and reportable state — the second member can
         # sit outside this run's scope. "Its members are Ann Lee" is not, and
         # an investigator reading it assumes data is missing.
         finding = (
-            f"{article} {network_name} has been formed. The member in scope for "
-            f"this case is {members}."
+            f"{article} {network_name} has been formed. The member in scope for " f"this case is {members}."
         )
     elif members:
         finding = f"{article} {network_name} has been formed. Its members are {members}."
@@ -638,13 +637,11 @@ def _network_narrative(rule_id: str, instance: Dict[str, Any],
     # an investigator can neither verify nor reject.
     if rule_id == "Rule_02_Employer_Fraud_Network":
         basis_detail = (
-            "Members each hold an active allegation on a different case and share "
-            "the same employer."
+            "Members each hold an active allegation on a different case and share " "the same employer."
         )
     elif rule_id == "Rule_04_Address_Fraud_Network":
         basis_detail = (
-            "Members each hold an active allegation on a different case and share "
-            "the same address."
+            "Members each hold an active allegation on a different case and share " "the same address."
         )
     elif rule_id == "Rule_06_Identity_Fraud_Network":
         basis_detail = (
@@ -666,8 +663,7 @@ def _network_narrative(rule_id: str, instance: Dict[str, Any],
     return _join([finding, basis_detail, corroboration, _confidence_clause(instance)])
 
 
-def _case_narrative(rule_id: str, instance: Dict[str, Any],
-                    context: InferenceContext) -> Optional[str]:
+def _case_narrative(rule_id: str, instance: Dict[str, Any], context: InferenceContext) -> Optional[str]:
     detail = instance.get("detail") or {}
     subject = instance.get("subject_name")
     case_ref = detail.get("complaint_no") or instance.get("related_case_id")
@@ -679,39 +675,44 @@ def _case_narrative(rule_id: str, instance: Dict[str, Any],
         closed = detail.get("date_closed")
         who = subject or "The subject"
         when = f", closed {closed}" if closed else ""
-        return _join([
-            f"{who} has a prior case ({case_ref}) disposed as {outcome}{when}.",
-            "The system read this from the closed case record on file, not from narrative.",
-            "The prior disposition is a matter of record and carries into the risk "
-            "assessment for the active case.",
-        ])
+        return _join(
+            [
+                f"{who} has a prior case ({case_ref}) disposed as {outcome}{when}.",
+                "The system read this from the closed case record on file, not from narrative.",
+                "The prior disposition is a matter of record and carries into the risk "
+                "assessment for the active case.",
+            ]
+        )
 
     if rule_id == "Rule_10_Merged_Case_Propagation":
         if not case_ref:
             return None
         who = subject or "The subject"
-        return _join([
-            f"{who}'s history has been inherited from case {case_ref}, which was "
-            "merged into this case.",
-            "The system propagated the subject's involvement forward along the "
-            "recorded merge, so the merged case's history now reads as part of this one.",
-            "The originating case is recorded on the link, so the inherited records "
-            "remain distinguishable from those raised on this case directly.",
-        ])
+        return _join(
+            [
+                f"{who}'s history has been inherited from case {case_ref}, which was "
+                "merged into this case.",
+                "The system propagated the subject's involvement forward along the "
+                "recorded merge, so the merged case's history now reads as part of this one.",
+                "The originating case is recorded on the link, so the inherited records "
+                "remain distinguishable from those raised on this case directly.",
+            ]
+        )
 
     if rule_id == "Rule_11_Cross_Case_Hub":
         case_ids = detail.get("hub_case_ids") or []
         if not subject or not case_ids:
             return None
         listed = ", ".join(str(c) for c in case_ids)
-        return _join([
-            f"{subject} appears as a co-subject across {len(case_ids)} separate "
-            f"cases ({listed}).",
-            "The system flagged this subject as a cross-case hub — a subject "
-            "recurring across otherwise unconnected investigations.",
-            "Recurrence alone is not a finding of wrongdoing; it is a pattern the "
-            "investigator should account for.",
-        ])
+        return _join(
+            [
+                f"{subject} appears as a co-subject across {len(case_ids)} separate " f"cases ({listed}).",
+                "The system flagged this subject as a cross-case hub — a subject "
+                "recurring across otherwise unconnected investigations.",
+                "Recurrence alone is not a finding of wrongdoing; it is a pattern the "
+                "investigator should account for.",
+            ]
+        )
 
     if rule_id == "Rule_08_Recidivist_Escalation":
         return _recidivist_narrative(instance, context, case_ref)
@@ -722,8 +723,9 @@ def _case_narrative(rule_id: str, instance: Dict[str, Any],
     return None
 
 
-def _recidivist_narrative(instance: Dict[str, Any], context: InferenceContext,
-                          case_ref: Any) -> Optional[str]:
+def _recidivist_narrative(
+    instance: Dict[str, Any], context: InferenceContext, case_ref: Any
+) -> Optional[str]:
     """
     Rule 8 escalates a CASE, so its own query returns no subject — but the
     escalation is meaningless without naming the person and the two findings
@@ -737,13 +739,10 @@ def _recidivist_narrative(instance: Dict[str, Any], context: InferenceContext,
             prior = record["priors"][0] if record["priors"] else {}
             prior_ref = prior.get("case_ref")
             prior_text = (
-                f"a prior Guilty case ({prior_ref}, Rule 7)" if prior_ref
-                else "a prior Guilty case (Rule 7)"
+                f"a prior Guilty case ({prior_ref}, Rule 7)" if prior_ref else "a prior Guilty case (Rule 7)"
             )
             network = record["networks"][0]
-            network_text = (
-                f"a member of {_article(network['network_name'])} {network['network_name']}"
-            )
+            network_text = f"a member of {_article(network['network_name'])} {network['network_name']}"
             network_rule = rule_number(network["rule_id"])
             network_text += f" (Rule {network_rule})" if network_rule else ""
             clauses.append(f"{record['subject_name']} has {prior_text} and is {network_text}")
@@ -753,22 +752,22 @@ def _recidivist_narrative(instance: Dict[str, Any], context: InferenceContext,
         # subject's pipeline wrote them). State the escalation without
         # inventing the names behind it.
         finding = (
-            "A subject on this case has both a prior Guilty case and active "
-            "fraud network membership."
+            "A subject on this case has both a prior Guilty case and active " "fraud network membership."
         )
 
     case_text = f" on case {case_ref}" if case_ref else ""
-    return _join([
-        finding,
-        f"Combined with the active allegations{case_text}, the system has flagged "
-        "this subject as a recidivist within an active fraud network.",
-        "This raises the case's risk position; it does not itself determine the outcome.",
-        _confidence_clause(instance),
-    ])
+    return _join(
+        [
+            finding,
+            f"Combined with the active allegations{case_text}, the system has flagged "
+            "this subject as a recidivist within an active fraud network.",
+            "This raises the case's risk position; it does not itself determine the outcome.",
+            _confidence_clause(instance),
+        ]
+    )
 
 
-def _fasttrack_narrative(instance: Dict[str, Any], context: InferenceContext,
-                         case_ref: Any) -> Optional[str]:
+def _fasttrack_narrative(instance: Dict[str, Any], context: InferenceContext, case_ref: Any) -> Optional[str]:
     """
     Rule 13 produces a RECOMMENDATION, and the wording has to keep that
     distinction visible. Every other narrative reports what the system
@@ -798,17 +797,18 @@ def _fasttrack_narrative(instance: Dict[str, Any], context: InferenceContext,
     reasons.append("the case is not currently designated FastTrack")
 
     case_text = f" case {case_ref}" if case_ref else " this case"
-    return _join([
-        f"The system has recommended{case_text} for FastTrack escalation.",
-        f"{_sentence_case(_oxford(reasons))}.",
-        "This is a recommendation generated by the system — the investigator "
-        "decides whether to act on it.",
-        _confidence_clause(instance),
-    ])
+    return _join(
+        [
+            f"The system has recommended{case_text} for FastTrack escalation.",
+            f"{_sentence_case(_oxford(reasons))}.",
+            "This is a recommendation generated by the system — the investigator "
+            "decides whether to act on it.",
+            _confidence_clause(instance),
+        ]
+    )
 
 
-def _wage_corroboration_narrative(instance: Dict[str, Any],
-                                  context: InferenceContext) -> Optional[str]:
+def _wage_corroboration_narrative(instance: Dict[str, Any], context: InferenceContext) -> Optional[str]:
     detail = instance.get("detail") or {}
     allegation = instance.get("allegation_type") or detail.get("allegation_type")
     if not allegation:
@@ -845,8 +845,7 @@ def _wage_corroboration_narrative(instance: Dict[str, Any],
     return _join([finding, basis, weight, _confidence_clause(instance)])
 
 
-def _elevation_narrative(instance: Dict[str, Any],
-                         context: InferenceContext) -> Optional[str]:
+def _elevation_narrative(instance: Dict[str, Any], context: InferenceContext) -> Optional[str]:
     detail = instance.get("detail") or {}
     other = instance.get("related_subject_name")
     subject = instance.get("subject_name") or "the subject"
@@ -854,18 +853,21 @@ def _elevation_narrative(instance: Dict[str, Any],
     if not other:
         return None
     what = f"inferred {confirmed} connection" if confirmed else "inferred connection"
-    return _join([
-        f"The {what} between {subject} and {other} is independently described in "
-        "investigator commentary.",
-        "The system had already inferred this connection structurally; the narrative "
-        "confirms it from a separate source.",
-        "Its confidence has been elevated to High on that basis.",
-    ])
+    return _join(
+        [
+            f"The {what} between {subject} and {other} is independently described in "
+            "investigator commentary.",
+            "The system had already inferred this connection structurally; the narrative "
+            "confirms it from a separate source.",
+            "Its confidence has been elevated to High on that basis.",
+        ]
+    )
 
 
 # ======================================================================
 # Entry points
 # ======================================================================
+
 
 def _rejection_clause(instance: Dict[str, Any]) -> Optional[str]:
     """
@@ -894,8 +896,9 @@ def _rejection_clause(instance: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def build_inference(rule_id: str, instance: Dict[str, Any],
-                    context: Optional[InferenceContext] = None) -> Optional[str]:
+def build_inference(
+    rule_id: str, instance: Dict[str, Any], context: Optional[InferenceContext] = None
+) -> Optional[str]:
     """
     The investigator-facing narrative for one rule match: what was found, on
     what evidence, how it was established, and what the system did with it.
@@ -925,17 +928,20 @@ def build_inference(rule_id: str, instance: Dict[str, Any],
     return _join([f"{rule_heading(rule_id)}: {body}", _rejection_clause(instance)])
 
 
-def enrich_instance(rule_id: str, instance: Dict[str, Any],
-                    context: Optional[InferenceContext] = None) -> Dict[str, Any]:
+def enrich_instance(
+    rule_id: str, instance: Dict[str, Any], context: Optional[InferenceContext] = None
+) -> Dict[str, Any]:
     """Add subject display names and the narrative to one instance."""
     enriched = dict(instance)
 
     subject_name = display_name(
-        enriched.pop("first_name", None), enriched.pop("last_name", None),
+        enriched.pop("first_name", None),
+        enriched.pop("last_name", None),
         enriched.get("subject_id"),
     )
     related_name = display_name(
-        enriched.pop("related_first_name", None), enriched.pop("related_last_name", None),
+        enriched.pop("related_first_name", None),
+        enriched.pop("related_last_name", None),
         enriched.get("related_subject_id"),
     )
     if subject_name:
@@ -991,8 +997,7 @@ def render_block(block: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # one; leading with the rejected line would read, at a glance, as if
         # the whole rule had been withdrawn.
         rendered = [
-            i["inference"] for i in instances
-            if i.get("inference") and i.get("status", "active") == "active"
+            i["inference"] for i in instances if i.get("inference") and i.get("status", "active") == "active"
         ] or [i["inference"] for i in instances if i.get("inference")]
         if not rendered:
             entry["inference_summary"] = None

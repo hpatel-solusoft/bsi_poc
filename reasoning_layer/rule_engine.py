@@ -40,22 +40,20 @@ _RULES_DIR = Path(__file__).parent / "rules"
 # executing, and a rule disappearing should break loudly at startup
 # rather than quietly stop firing.
 RULE_FILES: Dict[str, Path] = {
-    "Rule_01_Shared_Employer":         _RULES_DIR / "wave1" / "rule_01_shared_employer.cypher",
-    "Rule_03_Shared_Address":          _RULES_DIR / "wave1" / "rule_03_shared_address.cypher",
-    "Rule_05_Alias_Identity":          _RULES_DIR / "wave1" / "rule_05_alias_identity.cypher",
+    "Rule_01_Shared_Employer": _RULES_DIR / "wave1" / "rule_01_shared_employer.cypher",
+    "Rule_03_Shared_Address": _RULES_DIR / "wave1" / "rule_03_shared_address.cypher",
+    "Rule_05_Alias_Identity": _RULES_DIR / "wave1" / "rule_05_alias_identity.cypher",
     "Rule_10_Merged_Case_Propagation": _RULES_DIR / "wave1" / "rule_10_merged_case_propagation.cypher",
-    "Rule_11_Cross_Case_Hub":          _RULES_DIR / "wave1" / "rule_11_cross_case_hub.cypher",
-
-    "Rule_02_Employer_Fraud_Network":  _RULES_DIR / "wave2" / "rule_02_employer_fraud_network.cypher",
-    "Rule_04_Address_Fraud_Network":   _RULES_DIR / "wave2" / "rule_04_address_fraud_network.cypher",
-    "Rule_06_Identity_Fraud_Network":  _RULES_DIR / "wave2" / "rule_06_identity_fraud_network.cypher",
-    "Rule_07_Prior_Guilty":            _RULES_DIR / "wave2" / "rule_07_prior_guilty.cypher",
-    "Rule_08_Recidivist_Escalation":   _RULES_DIR / "wave2" / "rule_08_recidivist_escalation.cypher",
-    "Rule_09_PCA_CheckSplit":          _RULES_DIR / "wave2" / "rule_09_pca_checksplit.cypher",
+    "Rule_11_Cross_Case_Hub": _RULES_DIR / "wave1" / "rule_11_cross_case_hub.cypher",
+    "Rule_02_Employer_Fraud_Network": _RULES_DIR / "wave2" / "rule_02_employer_fraud_network.cypher",
+    "Rule_04_Address_Fraud_Network": _RULES_DIR / "wave2" / "rule_04_address_fraud_network.cypher",
+    "Rule_06_Identity_Fraud_Network": _RULES_DIR / "wave2" / "rule_06_identity_fraud_network.cypher",
+    "Rule_07_Prior_Guilty": _RULES_DIR / "wave2" / "rule_07_prior_guilty.cypher",
+    "Rule_08_Recidivist_Escalation": _RULES_DIR / "wave2" / "rule_08_recidivist_escalation.cypher",
+    "Rule_09_PCA_CheckSplit": _RULES_DIR / "wave2" / "rule_09_pca_checksplit.cypher",
     "Rule_12_SLAM_Wage_Corroboration": _RULES_DIR / "wave2" / "rule_12_slam_wage_corroboration.cypher",
-    "Rule_13_FastTrack_Escalation":    _RULES_DIR / "wave2" / "rule_13_fasttrack_escalation.cypher",
-
-    "Rule_14_Confirmation_Elevation":  _RULES_DIR / "modifiers" / "rule_14_confirmation_elevation.cypher",
+    "Rule_13_FastTrack_Escalation": _RULES_DIR / "wave2" / "rule_13_fasttrack_escalation.cypher",
+    "Rule_14_Confirmation_Elevation": _RULES_DIR / "modifiers" / "rule_14_confirmation_elevation.cypher",
 }
 
 _cypher_cache: Dict[str, str] = {}
@@ -67,7 +65,6 @@ def _load_cypher(rule_id: str) -> str:
         if not path.exists():
             raise FileNotFoundError(f"Rule file missing for {rule_id}: {path}")
         _cypher_cache[rule_id] = path.read_text(encoding="utf-8")
-        print(_cypher_cache[rule_id])
     return _cypher_cache[rule_id]
 
 
@@ -81,8 +78,9 @@ def verify_rule_files() -> List[str]:
     return sorted(RULE_FILES)
 
 
-def execute_rules(rule_ids: List[str], scope: Dict[str, Any],
-                  registry: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def execute_rules(
+    rule_ids: List[str], scope: Dict[str, Any], registry: Dict[str, Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """
     Execute `rule_ids` in the given order against the resolved scope.
 
@@ -108,11 +106,16 @@ def execute_rules(rule_ids: List[str], scope: Dict[str, Any],
 
             if not entry.get("enabled", True):
                 logger.info("rule_engine: %s SKIPPED (disabled in :InferenceRule registry)", rule_id)
-                results.append({
-                    "rule_id": rule_id, "rule_file": RULE_FILES[rule_id].name,
-                    "executed": False, "writes": 0,
-                    "skipped_reason": "disabled_in_registry", "duration_ms": 0,
-                })
+                results.append(
+                    {
+                        "rule_id": rule_id,
+                        "rule_file": RULE_FILES[rule_id].name,
+                        "executed": False,
+                        "writes": 0,
+                        "skipped_reason": "disabled_in_registry",
+                        "duration_ms": 0,
+                    }
+                )
                 continue
 
             params = {
@@ -123,15 +126,13 @@ def execute_rules(rule_ids: List[str], scope: Dict[str, Any],
                 "asserted_at": asserted_at,
                 **entry.get("params", {}),
             }
-            print(f"rule_engine: {rule_id} params={params}")
+            logger.debug("rule_engine: %s params=%s", rule_id, params)
             started = datetime.now(timezone.utc)
             try:
                 record = session.execute_write(
                     lambda tx, q=_load_cypher(rule_id), p=params: tx.run(q, **p).single()
                 )
-                print(lambda tx, q=_load_cypher(rule_id), p=params: tx.run(q, **p).single())
-                print(record)
-                
+                logger.debug("rule_engine: %s record=%s", rule_id, record)
             except Neo4jError:
                 logger.exception("rule_engine: %s FAILED", rule_id)
                 raise
@@ -140,11 +141,16 @@ def execute_rules(rule_ids: List[str], scope: Dict[str, Any],
             duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
 
             logger.info("rule_engine: %s executed writes=%d (%dms)", rule_id, writes, duration_ms)
-            results.append({
-                "rule_id": rule_id, "rule_file": RULE_FILES[rule_id].name,
-                "executed": True, "writes": writes,
-                "skipped_reason": None, "duration_ms": duration_ms,
-            })
+            results.append(
+                {
+                    "rule_id": rule_id,
+                    "rule_file": RULE_FILES[rule_id].name,
+                    "executed": True,
+                    "writes": writes,
+                    "skipped_reason": None,
+                    "duration_ms": duration_ms,
+                }
+            )
 
     return results
 

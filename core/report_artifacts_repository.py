@@ -80,12 +80,16 @@ def save_report(
             row = cur.fetchone()
         logger.info(
             "report_artifacts insert OK for case_id=%s id=%s status=%s",
-            case_id, row["id"] if row else None, status,
+            case_id,
+            row["id"] if row else None,
+            status,
         )
         return dict(row) if row else None
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
-            "report_artifacts insert FAILED for case_id=%s: %s", case_id, exc,
+            "report_artifacts insert FAILED for case_id=%s: %s",
+            case_id,
+            exc,
         )
         return None
 
@@ -103,7 +107,8 @@ def get_latest_report(case_id: str) -> Optional[Dict[str, Any]]:
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "report_artifacts lookup FAILED (outage) for case_id=%s: %s",
-            case_id, exc,
+            case_id,
+            exc,
         )
         return None
 
@@ -126,7 +131,8 @@ def list_reports(case_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "report_artifacts history lookup FAILED (outage) for case_id=%s: %s",
-            case_id, exc,
+            case_id,
+            exc,
         )
         return []
 

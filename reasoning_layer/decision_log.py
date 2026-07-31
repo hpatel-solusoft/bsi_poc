@@ -52,9 +52,7 @@ def _envelope(result: Dict[str, Any], sources: List[str]) -> dict:
     the same way every other direct-call result is merged."""
     return {
         "result": result,
-        "provenance": graph_provenance(
-            "reasoning_layer.decision_log.build_decision_log", sources=sources
-        ),
+        "provenance": graph_provenance("reasoning_layer.decision_log.build_decision_log", sources=sources),
     }
 
 
@@ -81,9 +79,7 @@ def _plan_modification_entry(plan_override: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _rejected_connection_entry(
-    rejected_connections: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+def _rejected_connection_entry(rejected_connections: List[Dict[str, Any]]) -> Dict[str, Any]:
     """One AGGREGATE decision-log entry standing in for every reviewed/
     excluded connection — never one entry per connection. Per-connection
     detail (who, when, why) already lives in the Reviewed and Excluded
@@ -169,8 +165,7 @@ def build_decision_log(
     made ..." graceful-degradation branch.
     """
     rejected_connections = [
-        entry for entry in (rejected_connections or [])
-        if entry.get("status") == "rejected"
+        entry for entry in (rejected_connections or []) if entry.get("status") == "rejected"
     ]
 
     entries: List[Dict[str, Any]] = []
@@ -182,9 +177,7 @@ def build_decision_log(
 
     if rejected_connections:
         entries.append(_rejected_connection_entry(rejected_connections))
-        sources.append(
-            "reasoning_layer.report_generation.assemble_related_network (rejected entries)"
-        )
+        sources.append("reasoning_layer.report_generation.assemble_related_network (rejected entries)")
 
     entries.sort(key=_chronological_sort_key)
 
@@ -196,7 +189,9 @@ def build_decision_log(
     result["decision_log_markdown"] = render_decision_log_markdown(entries)
     logger.info(
         "build_decision_log: entries=%d plan_modified=%s rejected_connection_count=%d",
-        len(entries), plan_override is not None, len(rejected_connections),
+        len(entries),
+        plan_override is not None,
+        len(rejected_connections),
     )
     return _envelope(result, sources)
 

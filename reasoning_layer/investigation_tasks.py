@@ -193,16 +193,18 @@ def build_rule_aware_tasks(
                 logger.warning("build_rule_aware_tasks: unfilled placeholder in %r", template)
                 task_type = template
 
-            tasks.append({
-                "source_rule": rule_id,
-                "task_type": task_type,
-                "priority": mapping["priority"],
-                # Carried through so the UI can show WHY this task appeared
-                # and how much weight the graph put behind it.
-                "detects": mapping["detects"],
-                "confidence": entry.get("confidence"),
-                "corroborated": bool(entry.get("corroborated", False)),
-            })
+            tasks.append(
+                {
+                    "source_rule": rule_id,
+                    "task_type": task_type,
+                    "priority": mapping["priority"],
+                    # Carried through so the UI can show WHY this task appeared
+                    # and how much weight the graph put behind it.
+                    "detects": mapping["detects"],
+                    "confidence": entry.get("confidence"),
+                    "corroborated": bool(entry.get("corroborated", False)),
+                }
+            )
 
     logger.info(
         "build_rule_aware_tasks: %d rule-aware task(s) from %d fired rule(s)",
@@ -288,7 +290,8 @@ def parse_declared_step_source(
     else:
         logger.warning(
             "parse_declared_step_source: step text missing the mandated "
-            "(Source: ...) tag — labelling llm_generated: %r", text[:120],
+            "(Source: ...) tag — labelling llm_generated: %r",
+            text[:120],
         )
 
     if source == _SOURCE_RULE_AWARE and source_rule:
@@ -339,8 +342,7 @@ def tag_step_sources(
         tagged.append(annotated)
 
     logger.info(
-        "tag_step_sources: %d step(s) tagged from declared source "
-        "(rule_aware=%d catalog=%d llm=%d)",
+        "tag_step_sources: %d step(s) tagged from declared source " "(rule_aware=%d catalog=%d llm=%d)",
         len(tagged),
         sum(1 for s in tagged if s["source"] == _SOURCE_RULE_AWARE),
         sum(1 for s in tagged if s["source"] == _SOURCE_CATALOG),

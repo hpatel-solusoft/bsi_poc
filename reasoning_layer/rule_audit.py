@@ -241,7 +241,8 @@ def get_rule_audit(case_id: str) -> dict:
     else:
         logger.warning(
             "get_rule_audit: case_id=%s has no Subject flagged is_primary — "
-            "has ETL run for this case? Returning an empty audit.", case_id,
+            "has ETL run for this case? Returning an empty audit.",
+            case_id,
         )
         scope = {"scope_subject_ids": [], "scope_case_ids": [case_id]}
 
@@ -276,12 +277,14 @@ def get_rule_audit(case_id: str) -> dict:
                 for row in rows
                 if row["subject_id_a"] is not None
             ]
-            rules.append({
-                "rule_id": rule_id,
-                "rule_description": rule_names.get(rule_id, rule_id),
-                "fired": len(inferred_relationships) > 0,
-                "inferred_relationships": inferred_relationships,
-            })
+            rules.append(
+                {
+                    "rule_id": rule_id,
+                    "rule_description": rule_names.get(rule_id, rule_id),
+                    "fired": len(inferred_relationships) > 0,
+                    "inferred_relationships": inferred_relationships,
+                }
+            )
 
     result = {
         "case_id": case_id,
@@ -290,7 +293,9 @@ def get_rule_audit(case_id: str) -> dict:
     }
     logger.info(
         "get_rule_audit: case_id=%s primary_subject_id=%s rules_fired=%d/%d",
-        case_id, primary_subject_id,
-        sum(1 for r in rules if r["fired"]), len(rules),
+        case_id,
+        primary_subject_id,
+        sum(1 for r in rules if r["fired"]),
+        len(rules),
     )
     return _envelope(result)

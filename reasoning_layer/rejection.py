@@ -101,6 +101,7 @@ from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
+
 class InferenceNotFoundError(LookupError):
     """
     Raised when no currently-ACTIVE inferred fact matches rule_id within
@@ -116,12 +117,12 @@ class InferenceNotFoundError(LookupError):
 
 
 # --- Families: how "the rule's findings" are located and marked ---
-_FAMILY_SYMMETRIC_EDGE = "symmetric_edge"       # Rules 1, 3, 5
+_FAMILY_SYMMETRIC_EDGE = "symmetric_edge"  # Rules 1, 3, 5
 _FAMILY_SUBJECT_CASE_EDGE = "subject_case_edge"  # Rules 7, 10
-_FAMILY_NETWORK_EDGE = "network_edge"           # Rules 2, 4, 6, 9
-_FAMILY_SUBJECT_FLAG = "subject_flag"           # Rule 11
-_FAMILY_CASE_FLAG = "case_flag"                 # Rules 8, 13
-_FAMILY_ALLEGATION_FLAG = "allegation_flag"     # Rule 12
+_FAMILY_NETWORK_EDGE = "network_edge"  # Rules 2, 4, 6, 9
+_FAMILY_SUBJECT_FLAG = "subject_flag"  # Rule 11
+_FAMILY_CASE_FLAG = "case_flag"  # Rules 8, 13
+_FAMILY_ALLEGATION_FLAG = "allegation_flag"  # Rule 12
 
 
 @dataclass(frozen=True)
@@ -176,9 +177,7 @@ def _build_cached_instance_matcher(spec: _RuleSpec, items: List[Dict[str, Option
     """
     if spec.family == _FAMILY_SYMMETRIC_EDGE:
         pairs = {frozenset((it["subject_id_a"], it["subject_id_b"])) for it in items}
-        return lambda inst: frozenset(
-            (inst.get("subject_id"), inst.get("related_subject_id"))
-        ) in pairs
+        return lambda inst: frozenset((inst.get("subject_id"), inst.get("related_subject_id"))) in pairs
 
     if spec.family == _FAMILY_SUBJECT_CASE_EDGE:
         pairs = {(it["subject_id_a"], it["subject_id_b"]) for it in items}
@@ -191,8 +190,11 @@ def _build_cached_instance_matcher(spec: _RuleSpec, items: List[Dict[str, Option
         # rules_fired.py's Rule_02/04/06/09 queries), so network_key alone
         # is the reliable match key — not subject_id.
         network_keys = {
-            (it["subject_id_b"].split(":", 1)[1] if it["subject_id_b"] and ":" in it["subject_id_b"]
-             else it["subject_id_b"])
+            (
+                it["subject_id_b"].split(":", 1)[1]
+                if it["subject_id_b"] and ":" in it["subject_id_b"]
+                else it["subject_id_b"]
+            )
             for it in items
         }
         return lambda inst: inst.get("related_network_key") in network_keys
@@ -358,7 +360,8 @@ def _resolve_case_scope(session, case_id: str) -> Dict[str, Any]:
     else:
         logger.warning(
             "reject_inference: case_id=%s has no Subject flagged is_primary — "
-            "has ETL run for this case? Treating scope as empty.", case_id,
+            "has ETL run for this case? Treating scope as empty.",
+            case_id,
         )
         scope = {"scope_subject_ids": [], "scope_case_ids": [case_id]}
     scope["primary_subject_id"] = primary_subject_id
@@ -366,8 +369,14 @@ def _resolve_case_scope(session, case_id: str) -> Dict[str, Any]:
 
 
 def _locate_and_reject(
-    session, rule_id: str, spec: _RuleSpec, case_id: str, scope: Dict[str, Any],
-    reason: str, investigator_id: str, rejected_at: str,
+    session,
+    rule_id: str,
+    spec: _RuleSpec,
+    case_id: str,
+    scope: Dict[str, Any],
+    reason: str,
+    investigator_id: str,
+    rejected_at: str,
 ) -> List[Dict[str, Optional[str]]]:
     """
     Runs the one bulk locate-and-SET statement for this rule's family and
@@ -380,12 +389,17 @@ def _locate_and_reject(
     if spec.family == _FAMILY_SYMMETRIC_EDGE:
         query = _BULK_REJECT_SYMMETRIC_EDGE.format(rel_type=spec.relationship_type)
         rows = session.run(
-            query, rule_id=rule_id, scope_subject_ids=scope_subject_ids,
-            reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
+            query,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
+            reason=reason,
+            investigator_id=investigator_id,
+            rejected_at=rejected_at,
         ).data()
         return [
             {
-                "subject_id_a": r["subject_id_a"], "subject_id_b": r["subject_id_b"],
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": r["subject_id_b"],
                 "from_key": min(r["subject_id_a"], r["subject_id_b"]),
                 "to_key": max(r["subject_id_a"], r["subject_id_b"]),
             }
@@ -395,19 +409,31 @@ def _locate_and_reject(
     if spec.family == _FAMILY_SUBJECT_CASE_EDGE:
         query = _BULK_REJECT_SUBJECT_CASE_EDGE.format(rel_type=spec.relationship_type)
         rows = session.run(
-            query, rule_id=rule_id, scope_subject_ids=scope_subject_ids,
-            reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
+            query,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
+            reason=reason,
+            investigator_id=investigator_id,
+            rejected_at=rejected_at,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": r["subject_id_b"],
-             "from_key": r["subject_id_a"], "to_key": r["subject_id_b"]}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": r["subject_id_b"],
+                "from_key": r["subject_id_a"],
+                "to_key": r["subject_id_b"],
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_NETWORK_EDGE:
         rows = session.run(
-            _BULK_REJECT_NETWORK_EDGE, rule_id=rule_id, scope_subject_ids=scope_subject_ids,
-            reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
+            _BULK_REJECT_NETWORK_EDGE,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
+            reason=reason,
+            investigator_id=investigator_id,
+            rejected_at=rejected_at,
         ).data()
         return [
             {
@@ -421,36 +447,60 @@ def _locate_and_reject(
 
     if spec.family == _FAMILY_SUBJECT_FLAG:
         rows = session.run(
-            _BULK_REJECT_SUBJECT_FLAG, rule_id=rule_id, scope_subject_ids=scope_subject_ids,
-            reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
+            _BULK_REJECT_SUBJECT_FLAG,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
+            reason=reason,
+            investigator_id=investigator_id,
+            rejected_at=rejected_at,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": None,
-             "from_key": r["subject_id_a"], "to_key": r["subject_id_a"]}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": None,
+                "from_key": r["subject_id_a"],
+                "to_key": r["subject_id_a"],
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_CASE_FLAG:
         query = _BULK_REJECT_CASE_FLAG[rule_id]
         rows = session.run(
-            query, rule_id=rule_id, case_id=case_id,
+            query,
+            rule_id=rule_id,
+            case_id=case_id,
             subject_id_a=scope.get("primary_subject_id"),
-            reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
+            reason=reason,
+            investigator_id=investigator_id,
+            rejected_at=rejected_at,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": case_id,
-             "from_key": r["subject_id_a"], "to_key": case_id}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": case_id,
+                "from_key": r["subject_id_a"],
+                "to_key": case_id,
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_ALLEGATION_FLAG:
         rows = session.run(
-            _BULK_REJECT_ALLEGATION_FLAG, rule_id=rule_id, case_id=case_id,
-            reason=reason, investigator_id=investigator_id, rejected_at=rejected_at,
+            _BULK_REJECT_ALLEGATION_FLAG,
+            rule_id=rule_id,
+            case_id=case_id,
+            reason=reason,
+            investigator_id=investigator_id,
+            rejected_at=rejected_at,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": r["allegation_id"],
-             "from_key": r["subject_id_a"], "to_key": r["allegation_id"]}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": r["allegation_id"],
+                "from_key": r["subject_id_a"],
+                "to_key": r["allegation_id"],
+            }
             for r in rows
         ]
 
@@ -463,7 +513,8 @@ def _envelope(result: Dict[str, Any]) -> dict:
     return {
         "result": result,
         "provenance": graph_provenance(
-            "reasoning_layer.rejection.reject_inference", ["Neo4j write — :Rejection"],
+            "reasoning_layer.rejection.reject_inference",
+            ["Neo4j write — :Rejection"],
         ),
     }
 
@@ -530,8 +581,7 @@ def reject_inference(case_id: str, rule_id: str, reason: str, investigator_id: s
     spec = _RULE_SPECS.get(rule_id)
     if spec is None:
         raise ValueError(
-            f"Unknown or non-rejectable rule_id={rule_id!r}. "
-            f"Must be one of: {RULE_IDS_REJECTABLE}"
+            f"Unknown or non-rejectable rule_id={rule_id!r}. " f"Must be one of: {RULE_IDS_REJECTABLE}"
         )
 
     rejected_at = datetime.now(timezone.utc).isoformat()
@@ -539,13 +589,21 @@ def reject_inference(case_id: str, rule_id: str, reason: str, investigator_id: s
     with get_session() as session:
         scope = _resolve_case_scope(session, case_id)
         instances = _locate_and_reject(
-            session, rule_id, spec, case_id, scope, reason, investigator_id, rejected_at,
+            session,
+            rule_id,
+            spec,
+            case_id,
+            scope,
+            reason,
+            investigator_id,
+            rejected_at,
         )
 
         if not instances:
             logger.info(
-                "reject_inference: NOT FOUND case_id=%s rule_id=%s — "
-                "no active fact in scope to reject", case_id, rule_id,
+                "reject_inference: NOT FOUND case_id=%s rule_id=%s — " "no active fact in scope to reject",
+                case_id,
+                rule_id,
             )
             raise InferenceNotFoundError(
                 f"No active inferred facts found for rule_id={rule_id!r} in "
@@ -558,19 +616,29 @@ def reject_inference(case_id: str, rule_id: str, reason: str, investigator_id: s
             session.run(
                 _MERGE_REJECTION,
                 relationship_type=spec.relationship_type,
-                from_key=instance["from_key"], to_key=instance["to_key"],
-                investigator_id=investigator_id, rejected_at=rejected_at,
-                reason=reason, rule_id=rule_id, case_id=case_id,
+                from_key=instance["from_key"],
+                to_key=instance["to_key"],
+                investigator_id=investigator_id,
+                rejected_at=rejected_at,
+                reason=reason,
+                rule_id=rule_id,
+                case_id=case_id,
             )
-            rejected_items.append({
-                "subject_id_a": instance["subject_id_a"],
-                "subject_id_b": instance["subject_id_b"],
-            })
+            rejected_items.append(
+                {
+                    "subject_id_a": instance["subject_id_a"],
+                    "subject_id_b": instance["subject_id_b"],
+                }
+            )
 
     logger.info(
         "reject_inference: REJECTED case_id=%s rule_id=%s relationship_type=%s "
         "investigator_id=%s count=%d",
-        case_id, rule_id, spec.relationship_type, investigator_id, len(rejected_items),
+        case_id,
+        rule_id,
+        spec.relationship_type,
+        investigator_id,
+        len(rejected_items),
     )
 
     # Sync the cached rules_fired snapshot (CS-4 + case_ai_summary_store) so
@@ -723,8 +791,14 @@ RETURN count(*) AS deleted
 
 
 def _locate_and_revert(
-    session, rule_id: str, spec: _RuleSpec, case_id: str, scope: Dict[str, Any],
-    investigator_id: str, reason: str, reverted_at: str,
+    session,
+    rule_id: str,
+    spec: _RuleSpec,
+    case_id: str,
+    scope: Dict[str, Any],
+    investigator_id: str,
+    reason: str,
+    reverted_at: str,
 ) -> List[Dict[str, Optional[str]]]:
     scope_subject_ids = scope["scope_subject_ids"]
     audit_params = dict(investigator_id=investigator_id, reason=reason, reverted_at=reverted_at)
@@ -732,69 +806,106 @@ def _locate_and_revert(
     if spec.family == _FAMILY_SYMMETRIC_EDGE:
         query = _REVERT_SYMMETRIC_EDGE.format(rel_type=spec.relationship_type)
         rows = session.run(
-            query, rule_id=rule_id, scope_subject_ids=scope_subject_ids, **audit_params,
+            query,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
+            **audit_params,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": r["subject_id_b"],
-             "from_key": min(r["subject_id_a"], r["subject_id_b"]),
-             "to_key": max(r["subject_id_a"], r["subject_id_b"])}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": r["subject_id_b"],
+                "from_key": min(r["subject_id_a"], r["subject_id_b"]),
+                "to_key": max(r["subject_id_a"], r["subject_id_b"]),
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_SUBJECT_CASE_EDGE:
         query = _REVERT_SUBJECT_CASE_EDGE.format(rel_type=spec.relationship_type)
         rows = session.run(
-            query, rule_id=rule_id, scope_subject_ids=scope_subject_ids, **audit_params,
+            query,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
+            **audit_params,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": r["subject_id_b"],
-             "from_key": r["subject_id_a"], "to_key": r["subject_id_b"]}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": r["subject_id_b"],
+                "from_key": r["subject_id_a"],
+                "to_key": r["subject_id_b"],
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_NETWORK_EDGE:
         rows = session.run(
-            _REVERT_NETWORK_EDGE, rule_id=rule_id, scope_subject_ids=scope_subject_ids,
+            _REVERT_NETWORK_EDGE,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
             **audit_params,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"],
-             "subject_id_b": f'{r["network_type"]}:{r["network_key"]}',
-             "from_key": r["subject_id_a"],
-             "to_key": f'{r["network_type"]}:{r["network_key"]}'}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": f'{r["network_type"]}:{r["network_key"]}',
+                "from_key": r["subject_id_a"],
+                "to_key": f'{r["network_type"]}:{r["network_key"]}',
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_SUBJECT_FLAG:
         rows = session.run(
-            _REVERT_SUBJECT_FLAG, rule_id=rule_id, scope_subject_ids=scope_subject_ids,
+            _REVERT_SUBJECT_FLAG,
+            rule_id=rule_id,
+            scope_subject_ids=scope_subject_ids,
             **audit_params,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": None,
-             "from_key": r["subject_id_a"], "to_key": r["subject_id_a"]}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": None,
+                "from_key": r["subject_id_a"],
+                "to_key": r["subject_id_a"],
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_CASE_FLAG:
         query = _REVERT_CASE_FLAG[rule_id]
         rows = session.run(
-            query, rule_id=rule_id, case_id=case_id,
-            subject_id_a=scope.get("primary_subject_id"), **audit_params,
+            query,
+            rule_id=rule_id,
+            case_id=case_id,
+            subject_id_a=scope.get("primary_subject_id"),
+            **audit_params,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": case_id,
-             "from_key": r["subject_id_a"], "to_key": case_id}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": case_id,
+                "from_key": r["subject_id_a"],
+                "to_key": case_id,
+            }
             for r in rows
         ]
 
     if spec.family == _FAMILY_ALLEGATION_FLAG:
         rows = session.run(
-            _REVERT_ALLEGATION_FLAG, rule_id=rule_id, case_id=case_id, **audit_params,
+            _REVERT_ALLEGATION_FLAG,
+            rule_id=rule_id,
+            case_id=case_id,
+            **audit_params,
         ).data()
         return [
-            {"subject_id_a": r["subject_id_a"], "subject_id_b": r["allegation_id"],
-             "from_key": r["subject_id_a"], "to_key": r["allegation_id"]}
+            {
+                "subject_id_a": r["subject_id_a"],
+                "subject_id_b": r["allegation_id"],
+                "from_key": r["subject_id_a"],
+                "to_key": r["allegation_id"],
+            }
             for r in rows
         ]
 
@@ -845,13 +956,21 @@ def revert_rejection(case_id: str, rule_id: str, investigator_id: str, reason: s
     with get_session() as session:
         scope = _resolve_case_scope(session, case_id)
         instances = _locate_and_revert(
-            session, rule_id, spec, case_id, scope, investigator_id, reason, reverted_at,
+            session,
+            rule_id,
+            spec,
+            case_id,
+            scope,
+            investigator_id,
+            reason,
+            reverted_at,
         )
 
         if not instances:
             logger.info(
-                "revert_rejection: NOT FOUND case_id=%s rule_id=%s — "
-                "no rejected fact to revert", case_id, rule_id,
+                "revert_rejection: NOT FOUND case_id=%s rule_id=%s — " "no rejected fact to revert",
+                case_id,
+                rule_id,
             )
             raise InferenceNotFoundError(
                 f"No rejected {spec.relationship_type} fact found for {rule_id} "
@@ -863,18 +982,27 @@ def revert_rejection(case_id: str, rule_id: str, investigator_id: str, reason: s
             session.run(
                 _DELETE_REJECTION,
                 relationship_type=spec.relationship_type,
-                from_key=instance["from_key"], to_key=instance["to_key"],
-                rule_id=rule_id, case_id=case_id,
+                from_key=instance["from_key"],
+                to_key=instance["to_key"],
+                rule_id=rule_id,
+                case_id=case_id,
             )
-            reverted_items.append({
-                "subject_id_a": instance["subject_id_a"],
-                "subject_id_b": instance["subject_id_b"],
-            })
+            reverted_items.append(
+                {
+                    "subject_id_a": instance["subject_id_a"],
+                    "subject_id_b": instance["subject_id_b"],
+                }
+            )
 
     logger.info(
         "revert_rejection: case_id=%s rule_id=%s relationship_type=%s "
         "investigator_id=%s reason=%s count=%d",
-        case_id, rule_id, spec.relationship_type, investigator_id, reason, len(reverted_items),
+        case_id,
+        rule_id,
+        spec.relationship_type,
+        investigator_id,
+        reason,
+        len(reverted_items),
     )
 
     # Sync the cached rules_fired snapshot (CS-4 + case_ai_summary_store) so

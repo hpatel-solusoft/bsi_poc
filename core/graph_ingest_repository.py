@@ -62,6 +62,7 @@ def ensure_table() -> None:
     except (psycopg2.Error, DatabaseUnavailableError, OSError) as exc:
         logger.error("graph_ingest_state: ensure_table failed (non-fatal): %s", exc)
 
+
 _MARK_STARTED = """
     INSERT INTO graph_ingest_state (case_id, status, started_at, attempts)
     VALUES (%(case_id)s, 'loading', now(), 1)
@@ -116,22 +117,27 @@ def _write(sql: str, params: Dict[str, Any], label: str) -> None:
 
 
 def mark_started(case_id: str) -> None:
+    """Record that graph ingestion has started for this case."""
     _write(_MARK_STARTED, {"case_id": case_id}, "mark_started")
 
 
 def mark_loaded(case_id: str, counts: Dict[str, int]) -> None:
+    """Record that the case's data has been loaded into Neo4j, with per-entity node counts."""
     _write(_MARK_LOADED, {"case_id": case_id, "counts": json.dumps(counts)}, "mark_loaded")
 
 
 def mark_reasoned(case_id: str) -> None:
+    """Record that the reasoning rule pipeline has run against this case's graph data."""
     _write(_MARK_REASONED, {"case_id": case_id}, "mark_reasoned")
 
 
 def mark_failed(case_id: str, error: str) -> None:
+    """Record that graph ingestion failed for this case, with a truncated error message."""
     _write(_MARK_FAILED, {"case_id": case_id, "error": error[:2000]}, "mark_failed")
 
 
 def get_state(case_id: str) -> Optional[Dict[str, Any]]:
+    """The current graph-ingestion state row for this case, or None if never ingested."""
     try:
         with get_cursor(dict_cursor=True) as cur:
             cur.execute(_SELECT_ONE, {"case_id": case_id})

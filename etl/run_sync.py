@@ -51,8 +51,11 @@ def _case_ids_from_args(args) -> List[str]:
         if not path.exists():
             print(f"File not found: {path}")
             sys.exit(1)
-        case_ids += [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
-                     if line.strip() and not line.startswith("#")]
+        case_ids += [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
     # De-duplicate while preserving order: ingesting the same case twice in
     # one batch is harmless (every write is a MERGE) but wastes an entire
     # AppWorks fetch, and in a backfill that is not nothing.
@@ -77,19 +80,24 @@ def _print_status() -> int:
 
 
 def main(argv: List[str]) -> int:
+    """CLI entry point: parse args and dispatch to the requested run_sync subcommand."""
     parser = argparse.ArgumentParser(
         prog="python -m etl.run_sync",
         description="Ingest AppWorks cases into Neo4j and run the reasoning rule pipeline.",
     )
     parser.add_argument("case_ids", nargs="*", help="One or more AppWorks case ids")
     parser.add_argument("--file", help="Path to a newline-separated file of case ids")
-    parser.add_argument("--no-reason", action="store_true",
-                        help="Load into Neo4j only; do not run Wave 1/2 rules")
-    parser.add_argument("--subjects", choices=["primary", "all"], default="primary",
-                        help="Which subjects to run the pipeline for. 'primary' mirrors what an "
-                             "investigator opening the case triggers; 'all' is the POC/demo preload.")
-    parser.add_argument("--status", action="store_true",
-                        help="Print what is currently in the graph and exit")
+    parser.add_argument(
+        "--no-reason", action="store_true", help="Load into Neo4j only; do not run Wave 1/2 rules"
+    )
+    parser.add_argument(
+        "--subjects",
+        choices=["primary", "all"],
+        default="primary",
+        help="Which subjects to run the pipeline for. 'primary' mirrors what an "
+        "investigator opening the case triggers; 'all' is the POC/demo preload.",
+    )
+    parser.add_argument("--status", action="store_true", help="Print what is currently in the graph and exit")
     args = parser.parse_args(argv)
 
     # Both stores are needed: Neo4j to write the graph, Postgres for
@@ -124,9 +132,11 @@ def main(argv: List[str]) -> int:
     print()
     print(json.dumps(report, indent=2, default=str))
     print()
-    print(f"Loaded {report['cases_loaded']}/{report['cases_requested']} case(s); "
-          f"reasoned over {report['pipeline_reasoned']} subject(s); "
-          f"{report['pipeline_reasoning_failed']} reasoning failure(s).")
+    print(
+        f"Loaded {report['cases_loaded']}/{report['cases_requested']} case(s); "
+        f"reasoned over {report['pipeline_reasoned']} subject(s); "
+        f"{report['pipeline_reasoning_failed']} reasoning failure(s)."
+    )
 
     # Non-zero on any failure so a cron job or CI step notices.
     failed = report["cases_load_failed"] or report["pipeline_reasoning_failed"]

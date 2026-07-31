@@ -61,12 +61,15 @@ def upsert_case_session(
             )
         logger.info(
             "case_ai_summary_store upsert OK for case_id=%s (source=%s)",
-            case_id, source,
+            case_id,
+            source,
         )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "case_ai_summary_store upsert FAILED for case_id=%s (source=%s): %s",
-            case_id, source, exc,
+            case_id,
+            source,
+            exc,
         )
 
 
@@ -93,7 +96,9 @@ def get_case_session(case_id: str) -> Optional[Dict[str, Any]]:
 
     logger.info(
         "case_ai_summary_store HIT for case_id=%s (source=%s, updated_at=%s)",
-        case_id, row["source"], row["updated_at"],
+        case_id,
+        row["source"],
+        row["updated_at"],
     )
     return {
         "case_id": row["case_id"],

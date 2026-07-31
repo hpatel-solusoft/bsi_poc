@@ -78,7 +78,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +112,27 @@ _PRIOR_GUILTY_RELATIONSHIP_TYPES: Tuple[str, ...] = ("HAS_PRIOR_GUILTY_CASE",)
 # not all the risk rules". risk_indicators / active_rules (the per-rule
 # breakdown) are dropped by omission.
 _RISK_ASSESSMENT_SCORE_FIELDS: Tuple[str, ...] = (
-    "case_id", "subject_id", "risk_score", "risk_tier",
-    "base_risk_score", "base_risk_tier", "fraud_types",
-    "total_points", "max_points", "neo4j_signals", "risk_tier_reason",
+    "case_id",
+    "subject_id",
+    "risk_score",
+    "risk_tier",
+    "base_risk_score",
+    "base_risk_tier",
+    "fraud_types",
+    "total_points",
+    "max_points",
+    "neo4j_signals",
+    "risk_tier_reason",
 )
 
 # Fields kept per similar-case match: the similarity signal + what matched.
 # Case-list identifiers (case_id, complaint_no, dates, fraud_amount,
 # match_reasons, wf_id, ...) are dropped by omission.
 _SIMILAR_CASE_MATCH_FIELDS: Tuple[str, ...] = (
-    "similarity_score", "matched_allegation_types", "allegation_type", "summary",
+    "similarity_score",
+    "matched_allegation_types",
+    "allegation_type",
+    "summary",
 )
 
 # investigation_plan is trimmed to just the steps — plan_id, fraud_types,
@@ -200,7 +211,8 @@ def _trim_similar_cases(similar_cases: Any) -> Any:
 
     trimmed_matches = [
         {k: v for k, v in m.items() if k in _SIMILAR_CASE_MATCH_FIELDS}
-        for m in matches if isinstance(m, dict)
+        for m in matches
+        if isinstance(m, dict)
     ]
     count = similar_cases.get("total_candidates_scored", len(matches))
     return {"count": count, "matches": trimmed_matches}
@@ -272,7 +284,9 @@ def _trim_network_connections_summary(summary: Any) -> Any:
         return summary
     trimmed = []
     for entry in summary:
-        if isinstance(entry, dict) and str(entry.get("source_rule") or "").startswith(_PRIOR_GUILTY_RULE_PREFIXES):
+        if isinstance(entry, dict) and str(entry.get("source_rule") or "").startswith(
+            _PRIOR_GUILTY_RULE_PREFIXES
+        ):
             entry = dict(entry)
             entry.pop("members", None)
         trimmed.append(entry)
@@ -320,8 +334,9 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     """
     if not isinstance(case_data, dict):
         logger.warning(
-            "build_report_llm_context: case_id=%s received non-dict case_data (%s) — "
-            "returning unchanged", case_id, type(case_data).__name__,
+            "build_report_llm_context: case_id=%s received non-dict case_data (%s) — " "returning unchanged",
+            case_id,
+            type(case_data).__name__,
         )
         return case_data
 
@@ -383,7 +398,12 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     logger.info(
         "build_report_llm_context: case_id=%s before_keys=%s after_keys=%s "
         "before_bytes=%d after_bytes=%d reduction=%.1f%%",
-        case_id, before_keys, after_keys, before_bytes, after_bytes, reduction_pct,
+        case_id,
+        before_keys,
+        after_keys,
+        before_bytes,
+        after_bytes,
+        reduction_pct,
     )
 
     # Explicit debug print of the exact JSON that will be serialised into
@@ -394,8 +414,10 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     print(f"[report_llm_context] case_id={case_id or 'unknown'}")
     print(f"[report_llm_context] BEFORE keys ({len(before_keys)}): {before_keys}")
     print(f"[report_llm_context] AFTER  keys ({len(after_keys)}): {after_keys}")
-    print(f"[report_llm_context] BEFORE size: {before_bytes} bytes | AFTER size: {after_bytes} bytes "
-          f"| reduction: {reduction_pct:.1f}%")
+    print(
+        f"[report_llm_context] BEFORE size: {before_bytes} bytes | AFTER size: {after_bytes} bytes "
+        f"| reduction: {reduction_pct:.1f}%"
+    )
     print("[report_llm_context] FINAL JSON going to the LLM prompt:")
     print(json.dumps(context, indent=2, default=str))
     print("=" * 100)

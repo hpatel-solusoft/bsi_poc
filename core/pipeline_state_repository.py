@@ -96,7 +96,9 @@ def get_run_state(case_id: str, subject_id: str) -> Optional[Dict[str, Any]]:
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "pipeline_execution_state lookup FAILED (outage) case_id=%s subject_id=%s: %s",
-            case_id, subject_id, exc,
+            case_id,
+            subject_id,
+            exc,
         )
         return None
 
@@ -107,10 +109,13 @@ def get_run_state(case_id: str, subject_id: str) -> Optional[Dict[str, Any]]:
     # A cleared run is treated as "never run" by the caller (Section 9.5) —
     # surface cleared_at so pipeline.py can log why it's re-running.
     logger.info(
-        "pipeline_execution_state HIT case_id=%s subject_id=%s status=%s "
-        "wave1=%s wave2=%s cleared_at=%s",
-        case_id, subject_id, row["status"], row["wave1_status"],
-        row["wave2_status"], row["cleared_at"],
+        "pipeline_execution_state HIT case_id=%s subject_id=%s status=%s " "wave1=%s wave2=%s cleared_at=%s",
+        case_id,
+        subject_id,
+        row["status"],
+        row["wave1_status"],
+        row["wave2_status"],
+        row["cleared_at"],
     )
     return dict(row)
 
@@ -131,12 +136,15 @@ def start_run(case_id: str, subject_id: str) -> None:
 
 
 def mark_wave1_complete(case_id: str, subject_id: str) -> None:
+    """Record Wave 1 rule execution (Step 2) as complete for this case+subject."""
     try:
         with get_cursor(dict_cursor=False) as cur:
             cur.execute(_MARK_WAVE1_COMPLETE_SQL, {"case_id": case_id, "subject_id": subject_id})
         logger.info("pipeline WAVE1 complete case_id=%s subject_id=%s", case_id, subject_id)
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
-        logger.error("pipeline mark_wave1_complete FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc)
+        logger.error(
+            "pipeline mark_wave1_complete FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc
+        )
         raise
 
 
@@ -153,17 +161,22 @@ def mark_extraction_complete(case_id: str, subject_id: str) -> None:
             cur.execute(_MARK_EXTRACTION_COMPLETE_SQL, {"case_id": case_id, "subject_id": subject_id})
         logger.info("pipeline EXTRACTION complete case_id=%s subject_id=%s", case_id, subject_id)
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
-        logger.error("pipeline mark_extraction_complete FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc)
+        logger.error(
+            "pipeline mark_extraction_complete FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc
+        )
         raise
 
 
 def mark_wave2_complete(case_id: str, subject_id: str) -> None:
+    """Record Wave 2 rule execution as complete, marking the overall pipeline run 'completed'."""
     try:
         with get_cursor(dict_cursor=False) as cur:
             cur.execute(_MARK_WAVE2_COMPLETE_SQL, {"case_id": case_id, "subject_id": subject_id})
         logger.info("pipeline WAVE2 complete case_id=%s subject_id=%s (run completed)", case_id, subject_id)
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
-        logger.error("pipeline mark_wave2_complete FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc)
+        logger.error(
+            "pipeline mark_wave2_complete FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc
+        )
         raise
 
 
@@ -179,7 +192,9 @@ def mark_failed(case_id: str, subject_id: str) -> None:
             cur.execute(_MARK_FAILED_SQL, {"case_id": case_id, "subject_id": subject_id})
         logger.warning("pipeline run FAILED case_id=%s subject_id=%s", case_id, subject_id)
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
-        logger.error("pipeline mark_failed ITSELF failed case_id=%s subject_id=%s: %s", case_id, subject_id, exc)
+        logger.error(
+            "pipeline mark_failed ITSELF failed case_id=%s subject_id=%s: %s", case_id, subject_id, exc
+        )
 
 
 def clear_run(case_id: str, subject_id: str, reason: str) -> None:

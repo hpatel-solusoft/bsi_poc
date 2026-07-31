@@ -1,18 +1,19 @@
+import copy
 import json
 import logging
-import copy
-from typing import Dict, Any
+
 logger = logging.getLogger(__name__)
 
 from config.prompts import (
     COPILOT_TOOL_PROMPT,
-    intake_SYSTEM_PROMPT,
+    EXTRACTION_STAGE_PROMPT,
     PLAN_PROMPT,
+    REPORT_GENERATION_PROMPT,
     RISK_ASSESSMENT_PROMPT,
     SIMILAR_CASES_PROMPT,
-    EXTRACTION_STAGE_PROMPT,
-    REPORT_GENERATION_PROMPT,
+    intake_SYSTEM_PROMPT,
 )
+
 # -----------------------------------------------------------------------
 # PROMPT RENDERING
 # -----------------------------------------------------------------------
@@ -30,21 +31,21 @@ def _render_prompt(template: str, values: dict) -> str:
     return prompt
 
 
-
 # -----------------------------------------------------------------------
 # PROMPT BUILDERS — one per ON-DEMAND route
 # Each builder reads its template from config/prompts.py and injects
 # runtime values. No prompt text lives here.
 # -----------------------------------------------------------------------
 
+
 def build_intake_system_prompt() -> str:
     """
-    SYSTEM prompt for the main investigation agent. 
-    This is the only prompt that does not require runtime values, as it contains only static instructions and guidelines for the agent's overall behavior and reasoning style. 
+    SYSTEM prompt for the main investigation agent.
+    This is the only prompt that does not require runtime values, as it contains only static instructions and guidelines for the agent's overall behavior and reasoning style.
     All tool-specific prompts are ON-DEMAND and receive case data for context injection
     """
     return intake_SYSTEM_PROMPT
-    
+
 
 def build_similar_cases_prompt(case_data: dict) -> str:
     """
@@ -79,18 +80,18 @@ def build_plan_prompt(case_data: dict) -> str:
     ON-DEMAND /plan prompt.
     full context is injected for strategy generation.
     """
-    
 
     return _render_prompt(
         PLAN_PROMPT,
         {
-            "case_context":  json.dumps(case_data, indent=2),
+            "case_context": json.dumps(case_data, indent=2),
         },
     )
 
 
-def build_extraction_prompt(subject_id: str, narrative_records: list,
-                           structural_relationships: list | None = None) -> str:
+def build_extraction_prompt(
+    subject_id: str, narrative_records: list, structural_relationships: list | None = None
+) -> str:
     """
     Narrative Extraction prompt (Python Implementation Reference,
     Section 5.3 Step 3). Called from reasoning_layer/extraction_stage.py,
@@ -104,13 +105,15 @@ def build_extraction_prompt(subject_id: str, narrative_records: list,
     return _render_prompt(
         EXTRACTION_STAGE_PROMPT,
         {
-            "subject_id":        subject_id,
+            "subject_id": subject_id,
             "narrative_records": json.dumps(narrative_records, indent=2, default=str),
             # The structural relationships Wave 1 just asserted, offered as
             # confirmable candidates. json.dumps is the caller's job, not the
             # prompt's — the prompt is a plain string with placeholders.
             "structural_relationships": json.dumps(
-                structural_relationships or [], indent=2, default=str,
+                structural_relationships or [],
+                indent=2,
+                default=str,
             ),
         },
     )
@@ -137,17 +140,17 @@ def build_copilot_prompt(case_id: str, case_data: dict) -> str:
     ):
         if not isinstance(context.get("investigation_plan"), dict):
             context["investigation_plan"] = {}
-        context["investigation_plan"]["investigation_steps"]  = human_plan["steps"]
-        context["investigation_plan"]["_steps_source"]        = "human_approved"
-        context["investigation_plan"]["_approved_by"]         = human_plan.get("modified_by", "")
-        context["investigation_plan"]["_approved_on"]         = human_plan.get("modified_on", "")
-        context["investigation_plan"]["_approval_comment"]    = human_plan.get("comment", "")
+        context["investigation_plan"]["investigation_steps"] = human_plan["steps"]
+        context["investigation_plan"]["_steps_source"] = "human_approved"
+        context["investigation_plan"]["_approved_by"] = human_plan.get("modified_by", "")
+        context["investigation_plan"]["_approved_on"] = human_plan.get("modified_on", "")
+        context["investigation_plan"]["_approval_comment"] = human_plan.get("comment", "")
 
     return _render_prompt(
         COPILOT_TOOL_PROMPT,
         {
-            "case_id":                           case_id,
-            "case_context":   json.dumps(context, indent=2),
+            "case_id": case_id,
+            "case_context": json.dumps(context, indent=2),
         },
     )
 

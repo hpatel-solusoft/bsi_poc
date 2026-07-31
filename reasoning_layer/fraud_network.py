@@ -113,11 +113,13 @@ _PEER_REL_TYPES: Tuple[str, ...] = (
 # result["graph"] has no such restriction: it carries the membership
 # edges too, because a full graph view that hides how a subject joined
 # a network is not a full graph view.
-_STRUCTURAL_EDGE_TYPES = frozenset({
-    "SHARES_EMPLOYER_WITH",
-    "SHARES_ADDRESS_WITH",
-    "SHARES_ALIAS_PATTERN_WITH",
-})
+_STRUCTURAL_EDGE_TYPES = frozenset(
+    {
+        "SHARES_EMPLOYER_WITH",
+        "SHARES_ADDRESS_WITH",
+        "SHARES_ALIAS_PATTERN_WITH",
+    }
+)
 
 # Statuses an inferred fact can carry. "reverted" exists because
 # rejection.revert_rejection writes it; it is included in the graph so
@@ -157,8 +159,15 @@ _LABEL_KEYS: Dict[str, Tuple[str, ...]] = {
 # a secondary label the id stays deterministic instead of depending on
 # whatever order the server happened to return labels() in.
 _LABEL_PRIORITY: Tuple[str, ...] = (
-    "Case", "Subject", "Allegation", "Employer", "Address", "Alias",
-    "FraudNetwork", "Commentary", "Rejection",
+    "Case",
+    "Subject",
+    "Allegation",
+    "Employer",
+    "Address",
+    "Alias",
+    "FraudNetwork",
+    "Commentary",
+    "Rejection",
 )
 
 
@@ -277,6 +286,7 @@ RETURN
 # Value coercion
 # ---------------------------------------------------------------------
 
+
 def _to_jsonable(value: Any) -> Any:
     """
     Coerce a Neo4j property value into something json.dumps and Pydantic
@@ -318,6 +328,7 @@ def _clean_properties(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 # Node identity and presentation
 # ---------------------------------------------------------------------
 
+
 def _primary_label(labels: Sequence[str]) -> str:
     """The one label a node is presented as. Falls back to whatever the
     server returned first so an unmodelled label still renders."""
@@ -346,11 +357,7 @@ def _display_name(label: str, props: Dict[str, Any], key: str) -> str:
     properties still renders as something clickable rather than blank.
     """
     if label == "Subject":
-        person = " ".join(
-            str(props[f]).strip()
-            for f in ("first_name", "last_name")
-            if props.get(f)
-        ).strip()
+        person = " ".join(str(props[f]).strip() for f in ("first_name", "last_name") if props.get(f)).strip()
         return person or props.get("company_name") or key
     if label == "Case":
         number = props.get("complaint_number")
@@ -360,11 +367,7 @@ def _display_name(label: str, props: Dict[str, Any], key: str) -> str:
     if label == "Employer":
         return props.get("employer_name") or props.get("fein") or key
     if label == "Address":
-        line = ", ".join(
-            str(props[f]).strip()
-            for f in ("street", "city", "state", "zip")
-            if props.get(f)
-        )
+        line = ", ".join(str(props[f]).strip() for f in ("street", "city", "state", "zip") if props.get(f))
         return line or key
     if label == "Alias":
         return props.get("alias_value") or key
@@ -386,6 +389,7 @@ def _display_name(label: str, props: Dict[str, Any], key: str) -> str:
 # ---------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------
+
 
 def _build_nodes(raw_nodes: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     """
@@ -416,21 +420,23 @@ def _build_nodes(raw_nodes: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, An
         display_label = label
 
         ref_to_id[ref] = node_id
-        nodes.append({
-            "id": node_id,
-            "ref": ref,
-            "label": display_label,
-            "labels": labels,
-            "key": key,
-            "display_name": _display_name(label, props, key),
-            "is_case_subject": bool(row.get("is_case_subject")),
-            "stable_id": stable,
-            "properties": props,
-        })
+        nodes.append(
+            {
+                "id": node_id,
+                "ref": ref,
+                "label": display_label,
+                "labels": labels,
+                "key": key,
+                "display_name": _display_name(label, props, key),
+                "is_case_subject": bool(row.get("is_case_subject")),
+                "stable_id": stable,
+                "properties": props,
+            }
+        )
 
-    nodes.sort(key=lambda n: (_LABEL_PRIORITY.index(n["label"])
-                              if n["label"] in _LABEL_PRIORITY else 99,
-                              n["id"]))
+    nodes.sort(
+        key=lambda n: (_LABEL_PRIORITY.index(n["label"]) if n["label"] in _LABEL_PRIORITY else 99, n["id"])
+    )
     return nodes, ref_to_id
 
 
@@ -468,10 +474,7 @@ def _build_edges(
         rel_type = row.get("type")
         source_node = node_by_id.get(source_id, {})
         target_node = node_by_id.get(target_id, {})
-        subject_to_subject = (
-            source_node.get("label") == "Subject"
-            and target_node.get("label") == "Subject"
-        )
+        subject_to_subject = source_node.get("label") == "Subject" and target_node.get("label") == "Subject"
         rule_id = props.get("source_rule")
 
         edge: Dict[str, Any] = {
@@ -550,11 +553,13 @@ def _build_networks(
             subject, network = network, subject
         if not subject or not network or network.get("label") != "FraudNetwork":
             continue
-        membership_by_network.setdefault(network["id"], []).append({
-            "subject": subject,
-            "confidence": edge.get("confidence"),
-            "status": edge["status"],
-        })
+        membership_by_network.setdefault(network["id"], []).append(
+            {
+                "subject": subject,
+                "confidence": edge.get("confidence"),
+                "status": edge["status"],
+            }
+        )
 
     for network_id, members in membership_by_network.items():
         network_node = node_by_id[network_id]
@@ -585,16 +590,16 @@ def _build_networks(
             and e["target"] in member_ids
         ]
 
-        networks.append({
-            "network_type": props.get("network_type"),
-            "network_key": props.get("network_key"),
-            "formed_by_rule": props.get("formed_by_rule"),
-            "confidence": _network_confidence(
-                [(m["status"], m["confidence"]) for m in members]
-            ),
-            "nodes": block_nodes,
-            "edges": block_edges,
-        })
+        networks.append(
+            {
+                "network_type": props.get("network_type"),
+                "network_key": props.get("network_key"),
+                "formed_by_rule": props.get("formed_by_rule"),
+                "confidence": _network_confidence([(m["status"], m["confidence"]) for m in members]),
+                "nodes": block_nodes,
+                "edges": block_edges,
+            }
+        )
 
     networks.sort(key=lambda n: (str(n["network_type"]), str(n["network_key"])))
     return networks
@@ -729,12 +734,15 @@ def get_fraud_network(case_id: str) -> dict:
     if truncated:
         logger.warning(
             "get_fraud_network: case_id=%s truncated (nodes=%d/%d edges=%d/%d)",
-            case_id, len(nodes), _MAX_NODES, len(edges), _MAX_EDGES,
+            case_id,
+            len(nodes),
+            _MAX_NODES,
+            len(edges),
+            _MAX_EDGES,
         )
         nodes = nodes[:_MAX_NODES]
         kept = {n["id"] for n in nodes}
-        edges = [e for e in edges
-                 if e["source"] in kept and e["target"] in kept][:_MAX_EDGES]
+        edges = [e for e in edges if e["source"] in kept and e["target"] in kept][:_MAX_EDGES]
 
     result = {
         "case_id": case_id,
@@ -753,6 +761,10 @@ def get_fraud_network(case_id: str) -> dict:
     }
     logger.info(
         "get_fraud_network: case_id=%s found=%s nodes=%d edges=%d networks=%d",
-        case_id, result["case_found"], len(nodes), len(edges), len(networks),
+        case_id,
+        result["case_found"],
+        len(nodes),
+        len(edges),
+        len(networks),
     )
     return _envelope(result)

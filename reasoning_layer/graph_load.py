@@ -95,8 +95,7 @@ RETURN elementId(r) AS confirmed_ref
 """
 
 
-def load_extraction_output(case_id: str, subject_id: str,
-                           extraction_result: Dict[str, Any]) -> dict:
+def load_extraction_output(case_id: str, subject_id: str, extraction_result: Dict[str, Any]) -> dict:
     """
     Write every attribution and every corroboration in `extraction_result`.
 
@@ -139,12 +138,14 @@ def load_extraction_output(case_id: str, subject_id: str,
             ).single()
 
             if record is not None:
-                written.append({
-                    "allegation_id": allegation_id,
-                    "subject_id": attributed_subject_id,
-                    "confidence": attribution["confidence"],
-                    "rel_id": record["rel_id"],
-                })
+                written.append(
+                    {
+                        "allegation_id": allegation_id,
+                        "subject_id": attributed_subject_id,
+                        "confidence": attribution["confidence"],
+                        "rel_id": record["rel_id"],
+                    }
+                )
                 continue
 
             # The MERGE produced no row. Two possible reasons, and they must
@@ -153,7 +154,9 @@ def load_extraction_output(case_id: str, subject_id: str,
             # hallucination that passed schema validation because its SHAPE
             # was valid even though its VALUES were not).
             rejection = session.run(
-                _CHECK_REJECTED, allegation_id=allegation_id, subject_id=attributed_subject_id,
+                _CHECK_REJECTED,
+                allegation_id=allegation_id,
+                subject_id=attributed_subject_id,
             ).single()
 
             if rejection is not None:
@@ -161,24 +164,33 @@ def load_extraction_output(case_id: str, subject_id: str,
                     f"previously flagged and rejected by {rejection['rejected_by']} "
                     f"on {rejection['rejected_at']}"
                 )
-                suppressed.append({
-                    "allegation_id": allegation_id,
-                    "subject_id": attributed_subject_id,
-                    "note": note,
-                })
-                logger.info("graph_load: SUPPRESSED allegation_id=%s subject_id=%s — %s",
-                            allegation_id, attributed_subject_id, note)
+                suppressed.append(
+                    {
+                        "allegation_id": allegation_id,
+                        "subject_id": attributed_subject_id,
+                        "note": note,
+                    }
+                )
+                logger.info(
+                    "graph_load: SUPPRESSED allegation_id=%s subject_id=%s — %s",
+                    allegation_id,
+                    attributed_subject_id,
+                    note,
+                )
             else:
-                dropped.append({
-                    "allegation_id": allegation_id,
-                    "subject_id": attributed_subject_id,
-                    "reason": "allegation_id/subject_id not found in graph",
-                })
+                dropped.append(
+                    {
+                        "allegation_id": allegation_id,
+                        "subject_id": attributed_subject_id,
+                        "reason": "allegation_id/subject_id not found in graph",
+                    }
+                )
                 logger.warning(
                     "graph_load: DROPPED attribution allegation_id=%s subject_id=%s — matched "
                     "neither a real Allegation/Subject pair nor a Rejection; likely an "
                     "LLM-hallucinated id",
-                    allegation_id, attributed_subject_id,
+                    allegation_id,
+                    attributed_subject_id,
                 )
 
         # --- corroborations (Rule 14's input) ---
@@ -195,12 +207,18 @@ def load_extraction_output(case_id: str, subject_id: str,
                 logger.warning(
                     "graph_load: DROPPED corroboration comment_ref=%s relationship_ref=%s — "
                     "one or both do not exist in the graph",
-                    corroboration.get("comment_ref"), corroboration.get("relationship_ref"),
+                    corroboration.get("comment_ref"),
+                    corroboration.get("relationship_ref"),
                 )
 
     logger.info(
         "graph_load: case_id=%s subject_id=%s written=%d suppressed=%d dropped=%d corroborations=%d",
-        case_id, subject_id, len(written), len(suppressed), len(dropped), corroborations_linked,
+        case_id,
+        subject_id,
+        len(written),
+        len(suppressed),
+        len(dropped),
+        corroborations_linked,
     )
 
     return {

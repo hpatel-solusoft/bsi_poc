@@ -50,5 +50,7 @@ def log_agent_call(
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "agent_audit_log write failed for case_id=%s agent_name=%s: %s",
-            case_id, agent_name, exc,
+            case_id,
+            agent_name,
+            exc,
         )

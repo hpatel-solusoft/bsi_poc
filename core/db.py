@@ -60,8 +60,9 @@ def init_pool() -> None:
             DB_POOL_MAX_CONN,
             dsn=_build_dsn(),
         )
-        logger.info("PostgreSQL connection pool initialized (min=%s, max=%s)",
-                    DB_POOL_MIN_CONN, DB_POOL_MAX_CONN)
+        logger.info(
+            "PostgreSQL connection pool initialized (min=%s, max=%s)", DB_POOL_MIN_CONN, DB_POOL_MAX_CONN
+        )
     except psycopg2.OperationalError as exc:
         logger.error("Failed to initialize PostgreSQL connection pool: %s", exc)
         _connection_pool = None
@@ -85,7 +86,12 @@ def get_cursor(dict_cursor: bool = True) -> Iterator["psycopg2.extensions.cursor
     """
     if _connection_pool is None:
         init_pool()
-    assert _connection_pool is not None
+    if _connection_pool is None:
+        # init_pool() always either sets the pool or raises
+        # DatabaseUnavailableError — this should be unreachable, but an
+        # `assert` here would be silently stripped under `python -O`,
+        # so guard explicitly instead.
+        raise DatabaseUnavailableError("PostgreSQL connection pool failed to initialize")
 
     conn = _connection_pool.getconn()
     try:

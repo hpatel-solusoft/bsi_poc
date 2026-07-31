@@ -39,12 +39,12 @@ from __future__ import annotations
 import logging
 import statistics
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer import pipeline
 from reasoning_layer.neo4j_client import get_session
-from utils.provenance import graph_provenance, REASONING_PIPELINE, GRAPH_QUERY
+from utils.provenance import GRAPH_QUERY, REASONING_PIPELINE, graph_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +227,9 @@ def _compute_signals(session, subject_id: str) -> Dict[str, Any]:
     }
 
 
-def enrich_graph_context(case_id: str, subject_id: str, force: bool = False, reason: str = "api_reload_ai_summary") -> dict:
+def enrich_graph_context(
+    case_id: str, subject_id: str, force: bool = False, reason: str = "api_reload_ai_summary"
+) -> dict:
     """
     Context Enrichment processing (AI-13 / Section 9.1). For the given
     (case, subject):
@@ -286,12 +288,14 @@ def enrich_graph_context(case_id: str, subject_id: str, force: bool = False, rea
     logger.info(
         "enrich_graph_context: case_id=%s subject_id=%s networks=%d prior_guilty=%d "
         "shared=%d hub=%s rules_fired=%d/%d",
-        case_id, subject_id,
+        case_id,
+        subject_id,
         len(graph_context["fraud_networks"]),
         len(graph_context["prior_guilty_cases"]),
         len(graph_context["shared_connections"]),
         graph_context["is_cross_case_hub"],
-        fired_count, len(rules_fired),
+        fired_count,
+        len(rules_fired),
     )
 
     return {

@@ -10,92 +10,24 @@ PostgreSQL fallback (that lives in core/case_store.py and its repositories).
 import logging
 import os
 import time
-import psycopg2
-from agent_service.agent_runner import BSIAgentRunner
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, Optional
+
+import psycopg2
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from core.case_store import (
-    CASE_STORE,
-    fetch_copilot_history,
-    store_copilot_turn,
-    resolve_copilot_history,
-    resolve_case_data,
-    persist_case_session,
-    get_case_ai_summary_cache_updated_at,
-    get_cached_investigation_steps,
-    try_resolve_case_data,
-    get_cached_route_summary,
-    merge_agent_summary_cache,
-    AGENT_SUMMARY_CACHE_KEY,
-)
-from core.agent_audit_repository import log_agent_call
-from core.investigation_plan_override_repository import (
-    upsert_override,
-    get_override,
-    delete_override,
-    compute_plan_staleness,
-)
-from core.db import init_pool as init_db_pool, close_pool as close_db_pool, DatabaseUnavailableError
-from reasoning_layer.neo4j_client import (
-    init_driver as init_neo4j_driver,
-    close_driver as close_neo4j_driver,
-    GraphUnavailableError,
-)
-from reasoning_layer.context_enrichment import enrich_graph_context
-from reasoning_layer.similar_cases import find_structural_matches
-from reasoning_layer.report_generation import assemble_related_network
-from reasoning_layer.report_llm_context import build_report_llm_context
-from reasoning_layer.decision_log import build_decision_log
-from reasoning_layer.rejection import (
-    reject_inference,
-    revert_rejection,
-    InferenceNotFoundError,
-)
-from reasoning_layer.fraud_network import get_fraud_network
-from reasoning_layer.rule_audit import get_rule_audit
-from core.report_artifacts_repository import save_report, get_latest_report
-from utils.report_pdf_renderer import render_report_pdf, report_pdf_filename
 from neo4j.exceptions import Neo4jError
-from reasoning_layer.apply_schema import apply_schema
-from reasoning_layer.rule_engine import verify_rule_files
-from etl.ingest_service import ingest as run_graph_ingest
-from core import graph_ingest_repository
-from dotenv import load_dotenv
-from semantic_layer.entity_contracts import InvestigationPlan as InvestigationPlanContract
-from semantic_layer.entity_contracts import GeneratedReport as GeneratedReportContract
-from api.models import (
-    ConversationHistoryResponse, intakeRequest, RiskAssessmentRequest, SimilarCasesRequest, PlanRequest,
-    CopilotRequest, GraphIngestRequest,
-    ModifyInvestigationStepsRequest, ModifyInvestigationStepsResponse,
-    RevertToAiPlanRequest, RevertToAiPlanResponse,
-    InvestigationStepsResponse,
-    ReportGenerationRequest,
-    RejectInferenceRequest,
-    RevertRejectionRequest,
-    RevertRejectionResponse, RejectInferenceResponse,
-    FraudNetworkResponse,
-    RuleAuditResponse,
-)
+
+from agent_service.agent_runner import BSIAgentRunner
 from agent_service.prompt_builders import (
-    build_intake_system_prompt,
-    build_risk_assessment_prompt,
-    build_plan_prompt,
-    build_similar_cases_prompt,
     build_copilot_prompt,
+    build_intake_system_prompt,
+    build_plan_prompt,
     build_report_generation_prompt,
-)
-from api.response_builders import (
-    validate_ai_summary_contract,
-    render_markdown_html_with_sources,
-    render_markdown_html,
-    resolve_plan_agent_summary,
-    apply_step_override_to_summary,
-    replace_markdown_section,
-    build_confidence_summary,
-    fired_rules_only,
+    build_risk_assessment_prompt,
+    build_similar_cases_prompt,
 )
 from api.message_utils import (
     build_ai_summary,
@@ -104,13 +36,91 @@ from api.message_utils import (
     merge_direct_result,
     merge_provenance,
 )
+from api.models import (
+    ConversationHistoryResponse,
+    CopilotRequest,
+    FraudNetworkResponse,
+    GraphIngestRequest,
+    InvestigationStepsResponse,
+    ModifyInvestigationStepsRequest,
+    ModifyInvestigationStepsResponse,
+    PlanRequest,
+    RejectInferenceRequest,
+    RejectInferenceResponse,
+    ReportGenerationRequest,
+    RevertRejectionRequest,
+    RevertRejectionResponse,
+    RevertToAiPlanRequest,
+    RevertToAiPlanResponse,
+    RiskAssessmentRequest,
+    RuleAuditResponse,
+    SimilarCasesRequest,
+    intakeRequest,
+)
 from api.pipeline_execution import (
-    run_intake_direct_pipeline,
-    run_similar_cases_pipeline,
-    run_risk_assessment_pipeline,
-    run_plan_pipeline,
     prepare_plan_context,
-) 
+    run_intake_direct_pipeline,
+    run_plan_pipeline,
+    run_risk_assessment_pipeline,
+    run_similar_cases_pipeline,
+)
+from api.response_builders import (
+    apply_step_override_to_summary,
+    build_confidence_summary,
+    fired_rules_only,
+    render_markdown_html,
+    render_markdown_html_with_sources,
+    replace_markdown_section,
+    resolve_plan_agent_summary,
+    validate_ai_summary_contract,
+)
+from core import graph_ingest_repository
+from core.agent_audit_repository import log_agent_call
+from core.case_store import (
+    AGENT_SUMMARY_CACHE_KEY,
+    CASE_STORE,
+    fetch_copilot_history,
+    get_cached_investigation_steps,
+    get_cached_route_summary,
+    get_case_ai_summary_cache_updated_at,
+    merge_agent_summary_cache,
+    persist_case_session,
+    resolve_case_data,
+    resolve_copilot_history,
+    store_copilot_turn,
+    try_resolve_case_data,
+)
+from core.db import DatabaseUnavailableError
+from core.db import close_pool as close_db_pool
+from core.db import init_pool as init_db_pool
+from core.investigation_plan_override_repository import (
+    compute_plan_staleness,
+    delete_override,
+    get_override,
+    upsert_override,
+)
+from core.report_artifacts_repository import get_latest_report, save_report
+from etl.ingest_service import ingest as run_graph_ingest
+from reasoning_layer.apply_schema import apply_schema
+from reasoning_layer.decision_log import build_decision_log
+from reasoning_layer.fraud_network import get_fraud_network
+from reasoning_layer.neo4j_client import (
+    GraphUnavailableError,
+)
+from reasoning_layer.neo4j_client import close_driver as close_neo4j_driver
+from reasoning_layer.neo4j_client import init_driver as init_neo4j_driver
+from reasoning_layer.rejection import (
+    InferenceNotFoundError,
+    reject_inference,
+    revert_rejection,
+)
+from reasoning_layer.report_generation import assemble_related_network
+from reasoning_layer.report_llm_context import build_report_llm_context
+from reasoning_layer.rule_audit import get_rule_audit
+from reasoning_layer.rule_engine import verify_rule_files
+from semantic_layer.entity_contracts import GeneratedReport as GeneratedReportContract
+from utils.report_pdf_renderer import render_report_pdf, report_pdf_filename
+
 _runner: Optional[BSIAgentRunner] = None
 
 load_dotenv()
@@ -154,7 +164,8 @@ app.add_middleware(
 )
 logger.info(
     "CORS enabled — allow_origins=%s allow_credentials=%s",
-    _cors_allowed_origins, _cors_allow_credentials,
+    _cors_allowed_origins,
+    _cors_allow_credentials,
 )
 
 
@@ -270,6 +281,7 @@ def _get_runner() -> BSIAgentRunner:
         _runner = BSIAgentRunner()
     return _runner
 
+
 def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> tuple:
     """
     CS-4 lookup pattern used by all ON-DEMAND handlers.
@@ -323,10 +335,11 @@ def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> t
 # Endpoints
 # -----------------------------------------------------------------------
 
+
 @app.get("/health")
 def health():
+    """Liveness check — returns ok plus the current server timestamp."""
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
-
 
 
 @app.post("/graph/ingest")
@@ -412,7 +425,7 @@ def intake(req: intakeRequest):
     A Neo4j outage or missing subject degrades this to an empty
     graph_context rather than failing the whole route.
     Populates CS-4 CASE_STORE for all subsequent on-demand calls.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
     """
     start = time.time()
     try:
@@ -429,7 +442,8 @@ def intake(req: intakeRequest):
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "intake CACHE HIT for case_id=%s — answering from "
-                    "case_ai_summary_store, no LLM call made", req.case_id,
+                    "case_ai_summary_store, no LLM call made",
+                    req.case_id,
                 )
                 log_agent_call(
                     case_id=req.case_id,
@@ -443,20 +457,23 @@ def intake(req: intakeRequest):
                     "status": "completed",
                     "details": {
                         "agent_summary": render_markdown_html_with_sources(
-                            cached_summary, cached_case_data.get("provenance_trail", []),
+                            cached_summary,
+                            cached_case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
                             "network_match_flag": cached_case_data.get("network_match_flag"),
-                            "graph_context":      cached_case_data.get("graph_context"),
-                            "graph_signals":      cached_case_data.get("graph_signals"),
-                            "rules_fired":        fired_rules_only(cached_case_data.get("rules_fired")),
-                            "confidence_summary": build_confidence_summary(cached_case_data.get("rules_fired")),
+                            "graph_context": cached_case_data.get("graph_context"),
+                            "graph_signals": cached_case_data.get("graph_signals"),
+                            "rules_fired": fired_rules_only(cached_case_data.get("rules_fired")),
+                            "confidence_summary": build_confidence_summary(
+                                cached_case_data.get("rules_fired")
+                            ),
                         },
                         "meta": {
-                            "tool_calls_made":      0,
-                            "duration_seconds":     duration_seconds,
-                            "pipeline_status":      "cached",
-                            "reload_ai_summary":    req.reload_ai_summary,
+                            "tool_calls_made": 0,
+                            "duration_seconds": duration_seconds,
+                            "pipeline_status": "cached",
+                            "reload_ai_summary": req.reload_ai_summary,
                             "agent_summary_source": "db_cache",
                         },
                     },
@@ -467,13 +484,11 @@ def intake(req: intakeRequest):
 
         runner = _get_runner()
         # Scope to intake + enrichment only; similar cases is a separate route.
-        
+
         messages, provenance_trail, _ = runner.run_scoped(
             system_prompt=build_intake_system_prompt(),
-            user_message=(
-                f"intake case {req.case_id}."
-            ),
-            scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only; 
+            user_message=(f"intake case {req.case_id}."),
+            scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only;
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
@@ -482,7 +497,10 @@ def intake(req: intakeRequest):
         # api/pipeline_execution.py. subject_primary_id was injected into
         # complaint_intelligence by extract_tool_results above.
         sections, provenance_trail = run_intake_direct_pipeline(
-            req.case_id, req.reload_ai_summary, sections, provenance_trail,
+            req.case_id,
+            req.reload_ai_summary,
+            sections,
+            provenance_trail,
         )
 
         # Cache this run's agent_summary markdown (carrying forward any
@@ -491,7 +509,9 @@ def intake(req: intakeRequest):
         assistant_text = extract_agent_summary(messages)
         existing_case_data = try_resolve_case_data(req.case_id) or {}
         sections[AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
-            existing_case_data, "intake", assistant_text,
+            existing_case_data,
+            "intake",
+            assistant_text,
         )
 
         # CS-4: populate warm in-memory store with all sections + provenance.
@@ -504,7 +524,7 @@ def intake(req: intakeRequest):
         # PostgreSQL case_ai_summary_store and rehydrated there on the next
         # request instead of round-tripping through the client.
         ai_summary = {
-            "investigation":    sections,
+            "investigation": sections,
             "provenance_trail": provenance_trail,
         }
         persist_case_session(req.case_id, ai_summary)
@@ -532,19 +552,19 @@ def intake(req: intakeRequest):
                 # silently dropped before it reaches the screen.
                 "graph_findings": {
                     "network_match_flag": sections.get("network_match_flag"),
-                    "graph_context":      sections.get("graph_context"),
-                    "graph_signals":      sections.get("graph_signals"),
+                    "graph_context": sections.get("graph_context"),
+                    "graph_signals": sections.get("graph_signals"),
                     # Fired rules only. build_confidence_summary still
                     # receives the FULL block: it counts by confidence and
                     # already skips non-fired entries itself.
-                    "rules_fired":        fired_rules_only(sections.get("rules_fired")),
+                    "rules_fired": fired_rules_only(sections.get("rules_fired")),
                     "confidence_summary": build_confidence_summary(sections.get("rules_fired")),
                 },
                 "meta": {
-                    "tool_calls_made":      len(provenance_trail),
-                    "duration_seconds":     duration_seconds,
-                    "pipeline_status":      "reloaded" if req.reload_ai_summary else "ran",
-                    "reload_ai_summary":    req.reload_ai_summary,
+                    "tool_calls_made": len(provenance_trail),
+                    "duration_seconds": duration_seconds,
+                    "pipeline_status": "reloaded" if req.reload_ai_summary else "ran",
+                    "reload_ai_summary": req.reload_ai_summary,
                     "agent_summary_source": "llm",
                 },
             },
@@ -565,7 +585,6 @@ def intake(req: intakeRequest):
         logger.info("POST /intake completed for case_id=%s", req.case_id)
 
 
-
 @app.post("/similar_cases")
 def similar_cases(req: SimilarCasesRequest):
     """
@@ -573,17 +592,19 @@ def similar_cases(req: SimilarCasesRequest):
     Calls search_similar_cases to find historical cases with matching fraud patterns.
     Requires case_data from a prior /intake run (via CS-4 or ai_summary body).
     Explains historical case matches, pattern relevance, and archive findings.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
     """
     start = time.time()
 
     try:
-        
+
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info(
             "case_id=%s data_source=%s key_count=%d",
-            req.case_id, data_source, len(list(case_data.keys())),
+            req.case_id,
+            data_source,
+            len(list(case_data.keys())),
         )
 
         # Agent-summary cache (reload_ai_summary=False, default): if
@@ -597,7 +618,8 @@ def similar_cases(req: SimilarCasesRequest):
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "similar_cases CACHE HIT for case_id=%s — answering from "
-                    "case_ai_summary_store, no LLM call made", req.case_id,
+                    "case_ai_summary_store, no LLM call made",
+                    req.case_id,
                 )
                 log_agent_call(
                     case_id=req.case_id,
@@ -611,13 +633,14 @@ def similar_cases(req: SimilarCasesRequest):
                     "status": "completed",
                     "details": {
                         "agent_summary": render_markdown_html_with_sources(
-                            cached_summary, case_data.get("provenance_trail", []),
+                            cached_summary,
+                            case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
                             "similar_cases": case_data.get("similar_cases"),
                         },
                         "meta": {
-                            "data_source":          data_source,
+                            "data_source": data_source,
                             "agent_summary_source": "db_cache",
                         },
                     },
@@ -629,7 +652,10 @@ def similar_cases(req: SimilarCasesRequest):
         # (Section 8.3 AI-14, Section 9.2) — factored out to
         # api/pipeline_execution.py.
         agent_summary, similar_cases_data, similar_section, merged_provenance = run_similar_cases_pipeline(
-            req.case_id, case_data, runner, build_similar_cases_prompt,
+            req.case_id,
+            case_data,
+            runner,
+            build_similar_cases_prompt,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -649,9 +675,13 @@ def similar_cases(req: SimilarCasesRequest):
         # ai_summary["investigation"], the same place every other
         # investigation field lives, so it round-trips on the next fetch.
         ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
-            case_data, "similar_cases", agent_summary,
+            case_data,
+            "similar_cases",
+            agent_summary,
         )
-        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY]
+        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
+            AGENT_SUMMARY_CACHE_KEY
+        ]
         persist_case_session(req.case_id, ai_summary)
         log_agent_call(
             case_id=req.case_id,
@@ -678,7 +708,7 @@ def similar_cases(req: SimilarCasesRequest):
                     "similar_cases": similar_cases_data,
                 },
                 "meta": {
-                    "data_source":          data_source,
+                    "data_source": data_source,
                     "agent_summary_source": "llm",
                 },
             },
@@ -707,11 +737,11 @@ def risk_assessment(req: RiskAssessmentRequest):
     Requires case_data from a prior /intake + /similar_cases run
     (via CS-4 or ai_summary body).
     Explains case seriousness, triggered rules, and escalation thresholds.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
     """
     start = time.time()
     try:
-        
+
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
@@ -724,12 +754,16 @@ def risk_assessment(req: RiskAssessmentRequest):
         if not req.reload_ai_summary:
             cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("risk_assessment")
             cached_risk_assessment = case_data.get("risk_assessment")
-            if cached_summary is not None and isinstance(cached_risk_assessment, dict) \
-                    and "risk_score" in cached_risk_assessment:
+            if (
+                cached_summary is not None
+                and isinstance(cached_risk_assessment, dict)
+                and "risk_score" in cached_risk_assessment
+            ):
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "risk_assessment CACHE HIT for case_id=%s — answering from "
-                    "case_ai_summary_store, no LLM call made", req.case_id,
+                    "case_ai_summary_store, no LLM call made",
+                    req.case_id,
                 )
                 log_agent_call(
                     case_id=req.case_id,
@@ -743,24 +777,24 @@ def risk_assessment(req: RiskAssessmentRequest):
                     "status": "completed",
                     "details": {
                         "agent_summary": render_markdown_html_with_sources(
-                            cached_summary, case_data.get("provenance_trail", []),
+                            cached_summary,
+                            case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
-                            "neo4j_signals":   cached_risk_assessment.get("neo4j_signals"),
+                            "neo4j_signals": cached_risk_assessment.get("neo4j_signals"),
                             "base_risk_score": cached_risk_assessment.get("base_risk_score"),
-                            "base_risk_tier":  cached_risk_assessment.get("base_risk_tier"),
-                            "risk_score":      cached_risk_assessment.get("risk_score"),
-                            "risk_tier":       cached_risk_assessment.get("risk_tier"),
+                            "base_risk_tier": cached_risk_assessment.get("base_risk_tier"),
+                            "risk_score": cached_risk_assessment.get("risk_score"),
+                            "risk_tier": cached_risk_assessment.get("risk_tier"),
                         },
                         "meta": {
-                            "data_source":          data_source,
+                            "data_source": data_source,
                             "agent_summary_source": "db_cache",
                         },
                     },
                 }
 
         runner = _get_runner()
-        
 
         # --- EXPLICIT DEPENDENCY INJECTION ---
         # We package the backend state into a generic execution_context
@@ -775,7 +809,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                 "this case received its risk score."
             ),
             scope="RISK_ASSESSMENT",  # ← this scope includes intake + enrichment tools only
-            execution_context=execution_context
+            execution_context=execution_context,
         )
 
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
@@ -784,7 +818,12 @@ def risk_assessment(req: RiskAssessmentRequest):
         # recommendation-text normalization — factored out to
         # api/pipeline_execution.py.
         risk_assessment, risk_section, merged_provenance = run_risk_assessment_pipeline(
-            req.case_id, case_data, sections, tool_call_log, new_provenance, messages,
+            req.case_id,
+            case_data,
+            sections,
+            tool_call_log,
+            new_provenance,
+            messages,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -802,9 +841,13 @@ def risk_assessment(req: RiskAssessmentRequest):
         # investigation field lives, so it round-trips on the next fetch.
         assistant_text = extract_agent_summary(messages)
         ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
-            case_data, "risk_assessment", assistant_text,
+            case_data,
+            "risk_assessment",
+            assistant_text,
         )
-        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY]
+        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
+            AGENT_SUMMARY_CACHE_KEY
+        ]
         persist_case_session(req.case_id, ai_summary)
         log_agent_call(
             case_id=req.case_id,
@@ -828,14 +871,14 @@ def risk_assessment(req: RiskAssessmentRequest):
                 # LLM's prose about the final number. base_* are carried
                 # alongside so the graph contribution stays auditable.
                 "graph_findings": {
-                    "neo4j_signals":   risk_assessment.get("neo4j_signals"),
+                    "neo4j_signals": risk_assessment.get("neo4j_signals"),
                     "base_risk_score": risk_assessment.get("base_risk_score"),
-                    "base_risk_tier":  risk_assessment.get("base_risk_tier"),
-                    "risk_score":      risk_assessment.get("risk_score"),
-                    "risk_tier":       risk_assessment.get("risk_tier"),
+                    "base_risk_tier": risk_assessment.get("base_risk_tier"),
+                    "risk_score": risk_assessment.get("risk_score"),
+                    "risk_tier": risk_assessment.get("risk_tier"),
                 },
                 "meta": {
-                    "data_source":          data_source,
+                    "data_source": data_source,
                     "agent_summary_source": "llm",
                 },
             },
@@ -863,11 +906,11 @@ def plan(req: PlanRequest):
     Calls get_investigation_plan only.
     Requires risk_tier from prior /risk_assessment run (via CS-4 or ai_summary body).
     ai_summary is REQUIRED per v6 spec — server decides which source to use.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot | 
+    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
     """
     start = time.time()
     try:
-        
+
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
@@ -898,7 +941,11 @@ def plan(req: PlanRequest):
             if cached_summary is not None and isinstance(cached_plan, dict):
                 if override is not None:
                     cached_plan = {**cached_plan, "investigation_steps": override["modified_steps"]}
-                    plan_source, modified_by, modified_on = "User Modified", override["modified_by"], override["modified_on"]
+                    plan_source, modified_by, modified_on = (
+                        "User Modified",
+                        override["modified_by"],
+                        override["modified_on"],
+                    )
                     plan_stale = compute_plan_staleness(cache_updated_at_before_call, modified_on)
                     # The structured investigation_plan above now carries the
                     # override, but cached_summary is still the pre-override
@@ -906,7 +953,8 @@ def plan(req: PlanRequest):
                     # without this, the investigator reads AI-generated steps
                     # while graph_findings/meta already say User Modified.
                     cached_summary = apply_step_override_to_summary(
-                        cached_summary, override["modified_steps"],
+                        cached_summary,
+                        override["modified_steps"],
                     )
                 else:
                     plan_source, modified_by, modified_on, plan_stale = "AI Summerized", None, None, False
@@ -914,7 +962,8 @@ def plan(req: PlanRequest):
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "plan CACHE HIT for case_id=%s — answering from "
-                    "case_ai_summary_store, no LLM call made", req.case_id,
+                    "case_ai_summary_store, no LLM call made",
+                    req.case_id,
                 )
                 log_agent_call(
                     case_id=req.case_id,
@@ -928,18 +977,19 @@ def plan(req: PlanRequest):
                     "status": "completed",
                     "details": {
                         "agent_summary": render_markdown_html_with_sources(
-                            cached_summary, case_data.get("provenance_trail", []),
+                            cached_summary,
+                            case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
                             "rule_aware_tasks": cached_plan.get("rule_aware_tasks"),
-                            "rules_fired":      fired_rules_only(case_data.get("rules_fired")),
+                            "rules_fired": fired_rules_only(case_data.get("rules_fired")),
                         },
                         "meta": {
-                            "data_source":          data_source,
-                            "plan_source":          plan_source,
-                            "modified_by":          modified_by,
-                            "modified_on":          modified_on.isoformat() if modified_on else None,
-                            "plan_stale":           plan_stale,
+                            "data_source": data_source,
+                            "plan_source": plan_source,
+                            "modified_by": modified_by,
+                            "modified_on": modified_on.isoformat() if modified_on else None,
+                            "plan_stale": plan_stale,
                             "agent_summary_source": "db_cache",
                         },
                     },
@@ -948,7 +998,7 @@ def plan(req: PlanRequest):
         execution_context = {"ai_summary": req.ai_summary}
         runner = _get_runner()
         # Scope to plan retrieval only (Step 4)
-        
+
         # AI-16 (Section 8.5): build the rule-aware task recommendations from
         # the rules_fired already in context and hand them to the prompt, so
         # the agent selects investigation steps from both the rule-derived
@@ -962,19 +1012,30 @@ def plan(req: PlanRequest):
                 "appropriate on-demand tools to assemble the investigation plan."
             ),
             scope="INVESTIGATION_PLAN",  # ← this scope includes intake + enrichment tools only
-            execution_context=execution_context
+            execution_context=execution_context,
         )
 
-        sections = extract_tool_results(messages,runner.dispatcher.tool_to_section)
+        sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
         # Parse/validate the LLM's plan output and apply any human override
         # (Section D.6) — factored out to api/pipeline_execution.py.
         (
-            assistant_text, investigation_plan, plan_section, merged_provenance,
-            plan_source, modified_by, modified_on, plan_stale,
+            assistant_text,
+            investigation_plan,
+            plan_section,
+            merged_provenance,
+            plan_source,
+            modified_by,
+            modified_on,
+            plan_stale,
         ) = run_plan_pipeline(
-            req.case_id, case_data, sections, messages, new_provenance,
-            cache_updated_at_before_call, rule_aware_tasks,
+            req.case_id,
+            case_data,
+            sections,
+            messages,
+            new_provenance,
+            cache_updated_at_before_call,
+            rule_aware_tasks,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -996,8 +1057,11 @@ def plan(req: PlanRequest):
         # returned. Carries forward any other route's already-cached entry
         # for this case_id.
         resolved_agent_summary = resolve_plan_agent_summary(
-            assistant_text, investigation_plan, req.case_id,
-            case_data, merged_provenance,
+            assistant_text,
+            investigation_plan,
+            req.case_id,
+            case_data,
+            merged_provenance,
         )
         if plan_source == "User Modified":
             # run_plan_pipeline already swapped investigation_plan["investigation_steps"]
@@ -1005,12 +1069,17 @@ def plan(req: PlanRequest):
             # is still the fresh LLM turn's own steps — same gap as the
             # cache-hit path, fixed the same way.
             resolved_agent_summary = apply_step_override_to_summary(
-                resolved_agent_summary, investigation_plan.get("investigation_steps"),
+                resolved_agent_summary,
+                investigation_plan.get("investigation_steps"),
             )
         ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
-            case_data, "plan", resolved_agent_summary,
+            case_data,
+            "plan",
+            resolved_agent_summary,
         )
-        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY]
+        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
+            AGENT_SUMMARY_CACHE_KEY
+        ]
         persist_case_session(req.case_id, ai_summary)
         log_agent_call(
             case_id=req.case_id,
@@ -1039,14 +1108,14 @@ def plan(req: PlanRequest):
                 # not a graph finding, and it already travels on the plan.
                 "graph_findings": {
                     "rule_aware_tasks": investigation_plan.get("rule_aware_tasks"),
-                    "rules_fired":      fired_rules_only(case_data.get("rules_fired")),
+                    "rules_fired": fired_rules_only(case_data.get("rules_fired")),
                 },
                 "meta": {
-                    "data_source":          data_source,
-                    "plan_source":          plan_source,
-                    "modified_by":          modified_by,
-                    "modified_on":          modified_on.isoformat() if modified_on else None,
-                    "plan_stale":           plan_stale,
+                    "data_source": data_source,
+                    "plan_source": plan_source,
+                    "modified_by": modified_by,
+                    "modified_on": modified_on.isoformat() if modified_on else None,
+                    "plan_stale": plan_stale,
                     "agent_summary_source": "llm",
                 },
             },
@@ -1105,7 +1174,8 @@ def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyIn
         )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.exception(
-            "modify_investigation_steps FAILED to save for case_id=%s", req.case_id,
+            "modify_investigation_steps FAILED to save for case_id=%s",
+            req.case_id,
         )
         log_agent_call(
             case_id=req.case_id,
@@ -1120,7 +1190,8 @@ def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyIn
         ) from exc
     finally:
         logger.info(
-            "POST /plan/modify_investigation_steps completed for case_id=%s", req.case_id,
+            "POST /plan/modify_investigation_steps completed for case_id=%s",
+            req.case_id,
         )
 
 
@@ -1149,7 +1220,8 @@ def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
         )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.exception(
-            "revert_to_ai_plan FAILED for case_id=%s", req.case_id,
+            "revert_to_ai_plan FAILED for case_id=%s",
+            req.case_id,
         )
         log_agent_call(
             case_id=req.case_id,
@@ -1200,7 +1272,8 @@ def get_investigation_steps(case_id: str) -> InvestigationStepsResponse:
         investigation_steps = override["modified_steps"]
         logger.info(
             "GET /plan/modify_investigation_steps case_id=%s source=override steps=%d",
-            case_id, len(investigation_steps),
+            case_id,
+            len(investigation_steps),
         )
         return InvestigationStepsResponse(
             case_id=case_id,
@@ -1225,13 +1298,15 @@ def get_investigation_steps(case_id: str) -> InvestigationStepsResponse:
 
     logger.info(
         "GET /plan/modify_investigation_steps case_id=%s source=case_ai_summary_store steps=%d",
-        case_id, len(investigation_steps),
+        case_id,
+        len(investigation_steps),
     )
     return InvestigationStepsResponse(
         case_id=case_id,
         investigation_steps=investigation_steps,
         is_modify_investigation_steps=False,
     )
+
 
 @app.post("/generate_report")
 def generate_report(req: ReportGenerationRequest):
@@ -1267,7 +1342,9 @@ def generate_report(req: ReportGenerationRequest):
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info(
             "case_id=%s data_source=%s key_count=%d",
-            req.case_id, data_source, len(list(case_data.keys())),
+            req.case_id,
+            data_source,
+            len(list(case_data.keys())),
         )
 
         runner = _get_runner()
@@ -1303,17 +1380,24 @@ def generate_report(req: ReportGenerationRequest):
         except (ValueError, GraphUnavailableError, Neo4jError) as exc:
             logger.warning(
                 "related-network assembly unavailable for case_id=%s subject_id=%s — %s",
-                req.case_id, subject_id, exc,
+                req.case_id,
+                subject_id,
+                exc,
             )
             related = {
-                "subject_id": subject_id, "related_network": [],
+                "subject_id": subject_id,
+                "related_network": [],
                 "confidence_summary": {"high": 0, "medium": 0, "unresolved": 0},
-                "rejected_count": 0, "unavailable_reason": str(exc),
+                "rejected_count": 0,
+                "unavailable_reason": str(exc),
             }
             related_envelope = {
                 "result": related,
-                "provenance": {"sources": [], "retrieved_at": "",
-                               "computed_by": "reasoning_layer.report_generation.assemble_related_network"},
+                "provenance": {
+                    "sources": [],
+                    "retrieved_at": "",
+                    "computed_by": "reasoning_layer.report_generation.assemble_related_network",
+                },
             }
 
         # investigation_plan_overrides (Section D.6) must be reflected
@@ -1331,7 +1415,8 @@ def generate_report(req: ReportGenerationRequest):
             logger.warning(
                 "investigation_plan_overrides lookup failed for case_id=%s "
                 "during report generation — treating as no override: %s",
-                req.case_id, exc,
+                req.case_id,
+                exc,
             )
             plan_override = None
 
@@ -1439,8 +1524,7 @@ def generate_report(req: ReportGenerationRequest):
         # entries out of the Related Network read just above. No graph or
         # DB call of its own — see reasoning_layer/decision_log.py.
         rejected_connections = [
-            entry for entry in related.get("related_network", [])
-            if entry.get("status") == "rejected"
+            entry for entry in related.get("related_network", []) if entry.get("status") == "rejected"
         ]
         decision_log_envelope = build_decision_log(rejected_connections, plan_override)
         decision_log_result = decision_log_envelope["result"]
@@ -1497,13 +1581,19 @@ def generate_report(req: ReportGenerationRequest):
         # it does not decide inclusion (mirrors AI-14's similar_cases pattern).
         sections: dict = {}
         new_provenance = merge_direct_result(
-            sections, new_provenance, "related_network", related_envelope,
+            sections,
+            new_provenance,
+            "related_network",
+            related_envelope,
         )
         # Same treatment for the Decision & Override Log — deterministic
         # Python output, never anything the LLM decided (mirrors the
         # related_network merge immediately above).
         new_provenance = merge_direct_result(
-            sections, new_provenance, "decision_log", decision_log_envelope,
+            sections,
+            new_provenance,
+            "decision_log",
+            decision_log_envelope,
         )
 
         assistant_text = extract_agent_summary(messages)
@@ -1515,9 +1605,7 @@ def generate_report(req: ReportGenerationRequest):
 
         report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         generated_at = datetime.now(timezone.utc).isoformat()
-        confidence_summary = related.get(
-            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
-        )
+        confidence_summary = related.get("confidence_summary", {"high": 0, "medium": 0, "unresolved": 0})
         report_content = {
             "report_id": report_id,
             "case_id": req.case_id,
@@ -1559,7 +1647,8 @@ def generate_report(req: ReportGenerationRequest):
             "generated_at": generated_at,
             "details": {
                 "agent_summary": render_markdown_html_with_sources(
-                    assistant_text, merged_provenance,
+                    assistant_text,
+                    merged_provenance,
                 ),
                 "related_network": related.get("related_network", []),
                 "confidence_summary": confidence_summary,
@@ -1628,7 +1717,9 @@ def generate_report_pdf(req: ReportGenerationRequest):
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info(
             "case_id=%s data_source=%s key_count=%d",
-            req.case_id, data_source, len(list(case_data.keys())),
+            req.case_id,
+            data_source,
+            len(list(case_data.keys())),
         )
 
         runner = _get_runner()
@@ -1652,17 +1743,24 @@ def generate_report_pdf(req: ReportGenerationRequest):
         except (ValueError, GraphUnavailableError, Neo4jError) as exc:
             logger.warning(
                 "related-network assembly unavailable for case_id=%s subject_id=%s — %s",
-                req.case_id, subject_id, exc,
+                req.case_id,
+                subject_id,
+                exc,
             )
             related = {
-                "subject_id": subject_id, "related_network": [],
+                "subject_id": subject_id,
+                "related_network": [],
                 "confidence_summary": {"high": 0, "medium": 0, "unresolved": 0},
-                "rejected_count": 0, "unavailable_reason": str(exc),
+                "rejected_count": 0,
+                "unavailable_reason": str(exc),
             }
             related_envelope = {
                 "result": related,
-                "provenance": {"sources": [], "retrieved_at": "",
-                               "computed_by": "reasoning_layer.report_generation.assemble_related_network"},
+                "provenance": {
+                    "sources": [],
+                    "retrieved_at": "",
+                    "computed_by": "reasoning_layer.report_generation.assemble_related_network",
+                },
             }
 
         # investigation_plan_overrides (Section D.6) — fetched fresh here,
@@ -1673,7 +1771,8 @@ def generate_report_pdf(req: ReportGenerationRequest):
             logger.warning(
                 "investigation_plan_overrides lookup failed for case_id=%s "
                 "during report generation — treating as no override: %s",
-                req.case_id, exc,
+                req.case_id,
+                exc,
             )
             plan_override = None
 
@@ -1745,8 +1844,7 @@ def generate_report_pdf(req: ReportGenerationRequest):
         # --- Decision & Override Log assembly (Report Design ACTIONS #3) ---
         # Identical to /generate_report.
         rejected_connections = [
-            entry for entry in related.get("related_network", [])
-            if entry.get("status") == "rejected"
+            entry for entry in related.get("related_network", []) if entry.get("status") == "rejected"
         ]
         decision_log_envelope = build_decision_log(rejected_connections, plan_override)
         decision_log_result = decision_log_envelope["result"]
@@ -1781,24 +1879,23 @@ def generate_report_pdf(req: ReportGenerationRequest):
         # graph result, not anything the LLM produced.
         sections: dict = {}
         new_provenance = merge_direct_result(
-            sections, new_provenance, "related_network", related_envelope,
+            sections,
+            new_provenance,
+            "related_network",
+            related_envelope,
         )
         new_provenance = merge_direct_result(
-            sections, new_provenance, "decision_log", decision_log_envelope,
+            sections,
+            new_provenance,
+            "decision_log",
+            decision_log_envelope,
         )
 
         assistant_text = extract_agent_summary(messages)
 
-        merged_provenance = merge_provenance(
-            case_data.get("provenance_trail", []),
-            new_provenance,
-        )
-
         report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         generated_at = datetime.now(timezone.utc).isoformat()
-        confidence_summary = related.get(
-            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
-        )
+        confidence_summary = related.get("confidence_summary", {"high": 0, "medium": 0, "unresolved": 0})
         report_content = {
             "report_id": report_id,
             "case_id": req.case_id,
@@ -1822,8 +1919,11 @@ def generate_report_pdf(req: ReportGenerationRequest):
         # D.5: report_artifacts is a working/draft copy only — same
         # persistence as /generate_report, so both routes share the same
         # draft history for a given case_id. A write failure here must
-        # not fail this investigator-facing PDF download.
-        persisted = save_report(req.case_id, report_content, status="draft")
+        # not fail this investigator-facing PDF download. The PDF route
+        # has no JSON body to surface persisted-state metadata in (unlike
+        # /generate_report's "persisted_to_postgres"), so the return
+        # value is intentionally not captured here.
+        save_report(req.case_id, report_content, status="draft")
 
         log_agent_call(
             case_id=req.case_id,
@@ -1962,6 +2062,7 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
     finally:
         logger.info("POST /revert_rejection completed for case_id=%s", req.case_id)
 
+
 @app.get("/fraud_network/{case_id}", response_model=FraudNetworkResponse)
 def fraud_network_route(case_id: str) -> FraudNetworkResponse:
     """
@@ -2056,7 +2157,8 @@ def copilot(req: CopilotRequest):
             logger.info(
                 "copilot reload_ai_summary=True for case_id=%s — answering from the "
                 "freshest stored context; the reasoning pipeline is never re-triggered "
-                "from Copilot (Section 6.3)", req.case_id,
+                "from Copilot (Section 6.3)",
+                req.case_id,
             )
 
         # Modify Investigation Steps flow (Section D.6): looked up
@@ -2090,7 +2192,9 @@ def copilot(req: CopilotRequest):
         )
         logger.info(
             "case_id=%s case_data_source=%s conversation_history_source=%s",
-            req.case_id, case_data_source, history_source,
+            req.case_id,
+            case_data_source,
+            history_source,
         )
 
         runner = _get_runner()
@@ -2111,10 +2215,7 @@ def copilot(req: CopilotRequest):
         stored_provenance = case_data.get("provenance_trail", [])
         combined_provenance = merge_provenance(stored_provenance, new_provenance_trail)
 
-        sources_cited = [
-            f"retrieved {p.get('retrieved_at', '')}"
-            for p in combined_provenance
-        ]
+        sources_cited = [f"retrieved {p.get('retrieved_at', '')}" for p in combined_provenance]
         sources_cited_details = [
             {
                 "computed_by": p.get("computed_by", ""),
@@ -2186,8 +2287,6 @@ def copilot(req: CopilotRequest):
         logger.info("POST /copilot completed for case_id=%s", req.case_id)
 
 
-
-     
 @app.get("/copilot/{case_id}", response_model=ConversationHistoryResponse)
 def get_conversation_history(case_id: str):
     """
@@ -2197,11 +2296,11 @@ def get_conversation_history(case_id: str):
     question) since these are matched as (method, path) pairs, not by
     path alone: POST /copilot (exact) and GET /copilot/{case_id}
     (parameterized) are two distinct routes and never collide.
- 
+
     Returns conversation_history in the same user/assistant message shape
     /copilot returns, resolved from the CS-4 warm store first, then the
     PostgreSQL conversation_history table (D.2, rolling 20-turn window).
- 
+
     Read-only: no LLM, no prompt, no dispatcher — the same class of
     endpoint as /graph/ingest/status. A transcript-store outage surfaces
     as 503 (see core.case_store.fetch_copilot_history) rather than an
@@ -2211,7 +2310,9 @@ def get_conversation_history(case_id: str):
         conversation_history, history_source = fetch_copilot_history(case_id)
         logger.info(
             "GET /conversation_history case_id=%s source=%s turns=%d",
-            case_id, history_source, len(conversation_history),
+            case_id,
+            history_source,
+            len(conversation_history),
         )
         return {
             "case_id": case_id,

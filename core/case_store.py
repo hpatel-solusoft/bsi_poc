@@ -1,7 +1,8 @@
-from fastapi import HTTPException
 import logging
 import time
-from typing import Callable, Dict, Any, Optional, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from fastapi import HTTPException
 
 from config.settings import CONVERSATION_HISTORY_MAX_TURNS, TOP_LEVEL_SECTIONS
 from core import case_session_repository, conversation_repository
@@ -24,12 +25,13 @@ class TTLStore:
 
     def __init__(self, ttl_seconds: Optional[int]):
         self._data: Dict[str, Dict] = {}
-        self._ts:   Dict[str, float] = {}
+        self._ts: Dict[str, float] = {}
         self._ttl = ttl_seconds
 
     # -- TTL helpers --------------------------------------------------
 
     def alive(self, key: str) -> bool:
+        """Whether key exists and, if a TTL is configured, hasn't expired yet."""
         if key not in self._data:
             return False
         if self._ttl is None:
@@ -37,6 +39,7 @@ class TTLStore:
         return (time.monotonic() - self._ts.get(key, 0.0)) < self._ttl
 
     def evict(self, key: str) -> None:
+        """Remove key from the store, if present."""
         self._data.pop(key, None)
         self._ts.pop(key, None)
 
@@ -57,18 +60,20 @@ class TTLStore:
         return True
 
     def __getitem__(self, key: str) -> Dict:
-        if key not in self:          # triggers TTL check + eviction
+        if key not in self:  # triggers TTL check + eviction
             raise KeyError(key)
         return self._data[key]
 
     def __setitem__(self, key: str, value: Dict) -> None:
         self._data[key] = value
-        self._ts[key]   = time.monotonic()
+        self._ts[key] = time.monotonic()
 
     def get(self, key: str, default=None):
+        """TTL-aware dict.get() — default if key is missing or expired."""
         if key not in self:
             return default
         return self._data[key]
+
 
 CASE_STORE_TTL_SECONDS = None
 CASE_STORE: TTLStore = TTLStore(CASE_STORE_TTL_SECONDS)
@@ -115,8 +120,10 @@ def resolve_case_data(
         CASE_STORE[case_id] = case_data
         logger.info(
             "case_data RESOLVED case_id=%s source=%s (cache_source=%s, updated_at=%s)",
-            case_id, SOURCE_POSTGRES_FALLBACK,
-            cached_session.get("source"), cached_session.get("updated_at"),
+            case_id,
+            SOURCE_POSTGRES_FALLBACK,
+            cached_session.get("source"),
+            cached_session.get("updated_at"),
         )
         return case_data, SOURCE_POSTGRES_FALLBACK
 
@@ -334,7 +341,8 @@ def _recompute_rule_rollup(entry: Dict[str, Any]) -> None:
     confidences = [i.get("confidence") for i in active if i.get("confidence")]
     entry["confidence"] = (
         max(confidences, key=lambda c: _RULES_FIRED_CONFIDENCE_ORDER.get(c, 0))
-        if confidences else "Unresolved"
+        if confidences
+        else "Unresolved"
     )
     entry["fired"] = len(active) > 0
     entry["corroborated"] = any(i.get("corroborated") for i in active)
@@ -400,7 +408,8 @@ def update_rules_fired_instance_status(
         if not case_data:
             logger.info(
                 "update_rules_fired_instance_status: no cached snapshot yet for "
-                "case_id=%s — nothing to sync (Neo4j write already applied)", case_id,
+                "case_id=%s — nothing to sync (Neo4j write already applied)",
+                case_id,
             )
             return False
 
@@ -408,7 +417,8 @@ def update_rules_fired_instance_status(
         if not isinstance(rules_fired, list):
             logger.info(
                 "update_rules_fired_instance_status: no rules_fired block cached "
-                "for case_id=%s — nothing to sync", case_id,
+                "for case_id=%s — nothing to sync",
+                case_id,
             )
             return False
 
@@ -417,7 +427,8 @@ def update_rules_fired_instance_status(
             logger.info(
                 "update_rules_fired_instance_status: rule_id=%s not present in "
                 "cached rules_fired for case_id=%s — nothing to sync",
-                rule_id, case_id,
+                rule_id,
+                case_id,
             )
             return False
 
@@ -461,7 +472,9 @@ def update_rules_fired_instance_status(
             logger.info(
                 "update_rules_fired_instance_status: no matching instance found "
                 "for case_id=%s rule_id=%s action=%s — nothing to sync",
-                case_id, rule_id, action,
+                case_id,
+                rule_id,
+                action,
             )
             return False
 
@@ -474,14 +487,21 @@ def update_rules_fired_instance_status(
 
         logger.info(
             "update_rules_fired_instance_status: synced case_id=%s rule_id=%s "
-            "action=%s instances_updated=%d", case_id, rule_id, action, updated,
+            "action=%s instances_updated=%d",
+            case_id,
+            rule_id,
+            action,
+            updated,
         )
         return True
     except Exception:
         logger.exception(
             "update_rules_fired_instance_status: FAILED (non-fatal) for "
             "case_id=%s rule_id=%s action=%s — cached snapshot may be stale "
-            "until the next pipeline run", case_id, rule_id, action,
+            "until the next pipeline run",
+            case_id,
+            rule_id,
+            action,
         )
         return False
 
@@ -516,10 +536,7 @@ def validate_conversation_history(
         if role not in expected_roles:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"conversation_history[{idx}].role must be 'user' or "
-                    "'assistant'."
-                ),
+                detail=(f"conversation_history[{idx}].role must be 'user' or " "'assistant'."),
             )
         if not isinstance(content, str) or not content.strip():
             raise HTTPException(
@@ -528,6 +545,7 @@ def validate_conversation_history(
             )
         validated.append({"role": role, "content": content})
     return validated
+
 
 def resolve_copilot_history(
     case_id: str,
@@ -561,7 +579,9 @@ def resolve_copilot_history(
         COPILOT_HISTORY_STORE[case_id] = {"case_id": case_id, "messages": stored_messages}
         logger.info(
             "conversation_history RESOLVED case_id=%s source=%s turns=%d",
-            case_id, SOURCE_POSTGRES_FALLBACK, len(stored_messages),
+            case_id,
+            SOURCE_POSTGRES_FALLBACK,
+            len(stored_messages),
         )
         return stored_messages, SOURCE_POSTGRES_FALLBACK
 
@@ -572,7 +592,9 @@ def resolve_copilot_history(
     }
     logger.info(
         "conversation_history RESOLVED case_id=%s source=%s turns=%d",
-        case_id, SOURCE_CLIENT_SUPPLIED, len(supplied_history),
+        case_id,
+        SOURCE_CLIENT_SUPPLIED,
+        len(supplied_history),
     )
     return supplied_history, SOURCE_CLIENT_SUPPLIED
 
@@ -626,7 +648,9 @@ def fetch_copilot_history(case_id: str) -> Tuple[List[Dict[str, str]], str]:
     COPILOT_HISTORY_STORE[case_id] = {"case_id": case_id, "messages": messages}
     logger.info(
         "conversation_history FETCHED case_id=%s source=%s turns=%d",
-        case_id, SOURCE_POSTGRES_FALLBACK, len(messages),
+        case_id,
+        SOURCE_POSTGRES_FALLBACK,
+        len(messages),
     )
     return messages, SOURCE_POSTGRES_FALLBACK
 
@@ -659,10 +683,12 @@ def store_copilot_turn(
         )
 
     messages = validate_conversation_history(history_entry.get("messages", []))
-    messages.extend([
-        {"role": "user", "content": question},
-        {"role": "assistant", "content": answer},
-    ])
+    messages.extend(
+        [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer},
+        ]
+    )
     # Mirror the same rolling window enforced in Postgres so the in-memory
     # fast path cannot grow unbounded within a long-lived process.
     messages = messages[-CONVERSATION_HISTORY_MAX_TURNS:]

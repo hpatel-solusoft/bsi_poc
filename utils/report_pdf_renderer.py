@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 class ReportPdfRenderError(RuntimeError):
     """Raised when xhtml2pdf reports a render failure (result.err != 0)."""
 
+
 # ---------------------------------------------------------------------------
 # Print stylesheet — static only, no interactivity, no collapsible markup.
 # Deliberately separate from html_converter.py's _BSI_STYLE, which styles
@@ -200,23 +201,21 @@ def _escape(value: Optional[str]) -> str:
     defensively since they are interpolated directly into the HTML head."""
     if not value:
         return ""
-    return (
-        str(value)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _zebra_stripe_tables(html: str) -> str:
     """Tag every second <tr> inside each <tbody> with bsi-row-even, since
     xhtml2pdf does not support the :nth-child CSS selector used for this
     in a real browser engine."""
+
     def stripe_tbody(match: re.Match) -> str:
+        """Zebra-stripe one matched <tbody>'s rows by tagging every second <tr>."""
         open_tag, body, close_tag = match.group(1), match.group(2), match.group(3)
         counter = [0]
 
         def tag_row(row_match: re.Match) -> str:
+            """Add the bsi-row-even class to every second <tr> in sequence."""
             counter[0] += 1
             if counter[0] % 2 == 0:
                 attrs = row_match.group(1) or ""
@@ -250,7 +249,7 @@ def render_report_markdown_to_html(
         '<div class="bsi-report-header">'
         f'<div class="bsi-report-title">Investigation Report — {_escape(case_id)}</div>'
         f'<div class="bsi-report-meta">Report ID: {_escape(report_id)}'
-        f' &nbsp;|&nbsp; Generated: {_escape(generated_at)}</div>'
+        f" &nbsp;|&nbsp; Generated: {_escape(generated_at)}</div>"
         "</div>"
     )
 
@@ -258,12 +257,10 @@ def render_report_markdown_to_html(
     # <pdf:pagecount> tags inside the @frame-designated footer element
     # (see -pdf-frame-content: bsi-pdf-footer in _PRINT_STYLE), not
     # WeasyPrint's counter(page)/counter(pages) CSS content.
-    footer_html = (
-        '<div id="bsi-pdf-footer">Page <pdf:pagenumber /> of <pdf:pagecount /></div>'
-    )
+    footer_html = '<div id="bsi-pdf-footer">Page <pdf:pagenumber /> of <pdf:pagecount /></div>'
 
     return (
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
         f"<style>{_PRINT_STYLE}</style></head><body>"
         f"{footer_html}{header_html}{body_html}"
         "</body></html>"
@@ -291,25 +288,30 @@ def render_report_pdf(
     as every other failure mode on that route.
     """
     html_document = render_report_markdown_to_html(
-        markdown_text, case_id=case_id, report_id=report_id, generated_at=generated_at,
+        markdown_text,
+        case_id=case_id,
+        report_id=report_id,
+        generated_at=generated_at,
     )
     output = io.BytesIO()
     try:
         result = pisa.CreatePDF(io.StringIO(html_document), dest=output)
     except Exception:
         logger.exception(
-            "Report PDF render failed for case_id=%s report_id=%s", case_id, report_id,
+            "Report PDF render failed for case_id=%s report_id=%s",
+            case_id,
+            report_id,
         )
         raise
 
     if result.err:
         logger.error(
             "Report PDF render reported %d error(s) for case_id=%s report_id=%s",
-            result.err, case_id, report_id,
+            result.err,
+            case_id,
+            report_id,
         )
-        raise ReportPdfRenderError(
-            f"PDF render failed with {result.err} error(s) for case_id={case_id}"
-        )
+        raise ReportPdfRenderError(f"PDF render failed with {result.err} error(s) for case_id={case_id}")
 
     return output.getvalue()
 
@@ -321,6 +323,7 @@ def report_pdf_filename(case_id: str, report_id: str) -> str:
     (both server-generated, but defensively sanitised here) can break
     the Content-Disposition header.
     """
+
     def _clean(value: str) -> str:
         value = _STRIP_RE.sub("", value or "")
         return re.sub(r"[^A-Za-z0-9_\-]", "_", value) or "unknown"

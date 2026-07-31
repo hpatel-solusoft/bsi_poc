@@ -88,13 +88,17 @@ def upsert_override(
         modified_on = row["modified_on"]
         logger.info(
             "investigation_plan_overrides SAVED case_id=%s modified_by=%s steps=%d",
-            case_id, modified_by, len(modified_steps),
+            case_id,
+            modified_by,
+            len(modified_steps),
         )
         return modified_on
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "investigation_plan_overrides SAVE FAILED case_id=%s modified_by=%s: %s",
-            case_id, modified_by, exc,
+            case_id,
+            modified_by,
+            exc,
         )
         raise
 
@@ -119,7 +123,8 @@ def get_override(case_id: str) -> Optional[Dict[str, Any]]:
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
             "investigation_plan_overrides lookup FAILED (outage) case_id=%s: %s",
-            case_id, exc,
+            case_id,
+            exc,
         )
         return None
 
@@ -129,7 +134,9 @@ def get_override(case_id: str) -> Optional[Dict[str, Any]]:
 
     logger.info(
         "investigation_plan_overrides HIT case_id=%s modified_by=%s modified_on=%s",
-        case_id, row["modified_by"], row["modified_on"],
+        case_id,
+        row["modified_by"],
+        row["modified_on"],
     )
     return dict(row)
 
@@ -151,7 +158,8 @@ def delete_override(case_id: str) -> bool:
             deleted = cur.rowcount > 0
         logger.info(
             "investigation_plan_overrides REVERTED case_id=%s (existed=%s)",
-            case_id, deleted,
+            case_id,
+            deleted,
         )
         return deleted
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
