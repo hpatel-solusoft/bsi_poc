@@ -81,6 +81,7 @@ import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from reasoning_layer.neo4j_client import get_session
+from reasoning_layer.rejection import build_match_id
 from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
@@ -496,6 +497,15 @@ def _build_edges(
             edge["subject_id_a"] = source_node.get("key")
             edge["subject_id_b"] = target_node.get("key")
             edge["rule_id"] = rule_id
+            if rule_id:
+                # v3 instance-level Reject/Revert contract (AI-28/AI-33):
+                # the UI reads this straight off the clicked edge and
+                # echoes it back on POST /reject_inference or
+                # /revert_rejection, rather than reconstructing
+                # subject_id_a/subject_id_b/rule_id itself. Only present
+                # when rule_id is (i.e. edge["rejectable"] is true) —
+                # an ETL-sourced edge has no rule instance to identify.
+                edge["match_id"] = build_match_id(rule_id, edge["subject_id_a"], edge["subject_id_b"])
         edges.append(edge)
 
     edges.sort(key=lambda e: (str(e["relationship_type"]), e["source"], e["target"]))

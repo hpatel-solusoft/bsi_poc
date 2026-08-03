@@ -8,10 +8,11 @@ Endpoint Is Necessary" note is explicit: "The Rejection Handler only
 works well if investigators can first see all inferred facts in one
 place. Without this view, rejection decisions are made blind." This
 module is that view — the UI's Reject buttons read their
-subject_id_a/subject_id_b/rule_id/relationship_type parameters straight
-off entries returned here (or off fraud_network.py's edges, for the
-network-membership rules; both surfaces use the same field names on
-purpose so the UI never has to translate between them).
+match_id (or subject_id_a/subject_id_b/rule_id/relationship_type)
+parameters straight off entries returned here (or off
+fraud_network.py's edges, for the network-membership rules; both
+surfaces use the same field names on purpose so the UI never has to
+translate between them).
 
 WHY THIS IS A SEPARATE MODULE FROM rules_fired.py, NOT A REUSE OF IT:
 Same reasoning report_generation.py's own docstring gives for the same
@@ -37,6 +38,7 @@ from typing import Any, Dict, List
 
 from reasoning_layer import rule_registry
 from reasoning_layer.neo4j_client import get_session
+from reasoning_layer.rejection import build_match_id
 from reasoning_layer.scope import resolve_scope
 from utils.provenance import graph_provenance
 
@@ -206,7 +208,7 @@ def get_rule_audit(case_id: str) -> dict:
               "inferred_relationships": [
                 {subject_id_a, subject_id_b, relationship_type,
                  confidence, asserted_at, corroborated,
-                 status: "active" | "rejected"}
+                 status: "active" | "rejected", match_id}
               ],
             }
           ],
@@ -273,6 +275,16 @@ def get_rule_audit(case_id: str) -> dict:
                     "asserted_at": row["asserted_at"],
                     "corroborated": bool(row["corroborated"]),
                     "status": row["status"] or "active",
+                    # v3 instance-level Reject/Revert contract (AI-28/
+                    # AI-33): the UI reads this straight off the row and
+                    # echoes it back on POST /reject_inference or
+                    # /revert_rejection, rather than reconstructing
+                    # subject_id_a/subject_id_b/rule_id itself. Present
+                    # for every row here, since every rule_id this loop
+                    # visits is in RULE_IDS_REJECTABLE (rule_registry.
+                    # MODIFIER_RULE_ID — the one rule_id excluded above —
+                    # has no rejectable instance at all).
+                    "match_id": build_match_id(rule_id, row["subject_id_a"], row["subject_id_b"]),
                 }
                 for row in rows
                 if row["subject_id_a"] is not None

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from semantic_layer.entity_contracts import InvestigationStep
 
@@ -236,10 +236,14 @@ class GraphIngestRequest(BaseModel):
 class RevertRejectionRequest(BaseModel):
     """
     POST /revert_rejection — the Case Summary "Revert" button's HTTP
-    contract. Mirrors RejectInferenceRequest's contract: case_id +
-    rule_id + investigator_id + reason. Reverting is a bulk action, the
-    exact inverse of POST /reject_inference — it restores every
-    currently-rejected fact this rule produced for this case.
+    contract (Functional Specification D2 Input Contract, v3 — AI-28/
+    AI-33). Mirrors RejectInferenceRequest's contract: case_id + rule_id
+    + investigator_id + reason, PLUS identifying the exact instance to
+    revert — either match_id, or subject_id_a (+ subject_id_b where the
+    rule family has one). Reverting is the exact inverse of POST
+    /reject_inference and now targets exactly the ONE instance
+    identified, never every currently-rejected fact this rule produced.
+
     investigator_id and reason are required for the same audit-trail
     reason they're required on /reject_inference: this overrules a
     prior rejection decision, so who did it and why must be recorded.
@@ -249,6 +253,9 @@ class RevertRejectionRequest(BaseModel):
     rule_id: str
     investigator_id: str
     reason: str
+    match_id: Optional[str] = None
+    subject_id_a: Optional[str] = None
+    subject_id_b: Optional[str] = None
 
     @field_validator("case_id", "rule_id", "investigator_id", "reason")
     @classmethod
@@ -258,16 +265,37 @@ class RevertRejectionRequest(BaseModel):
             raise ValueError("must be a non-empty string.")
         return value
 
+    @model_validator(mode="after")
+    def must_identify_one_instance(self) -> "RevertRejectionRequest":
+        """
+        v3 contract (AI-28): there is no more bulk "every instance this
+        rule rejected for this case" mode — the caller must identify
+        exactly which instance to revert, either by match_id (the
+        opaque token rule_audit.py/fraud_network.py stamp onto every
+        row/edge) or by subject_id_a (the same field, present on every
+        one of those rows/edges directly).
+        """
+        if not (self.match_id and self.match_id.strip()) and not (
+            self.subject_id_a and self.subject_id_a.strip()
+        ):
+            raise ValueError(
+                "must identify the exact instance to revert: provide either "
+                "match_id, or subject_id_a (+ subject_id_b where the rule "
+                "family has one)."
+            )
+        return self
+
 
 class RevertedItem(BaseModel):
-    """One instance restored to active by a bulk revert."""
+    """One instance restored to active by a revert_rejection call."""
 
     subject_id_a: Optional[str] = None
     subject_id_b: Optional[str] = None
+    match_id: Optional[str] = None
 
 
 class RevertRejectionResponse(BaseModel):
-    """What the UI needs to flip the rule's rows back to un-rejected."""
+    """What the UI needs to flip the reverted row back to un-rejected."""
 
     reverted: bool
     case_id: str
@@ -285,23 +313,29 @@ class RevertRejectionResponse(BaseModel):
 class RejectInferenceRequest(BaseModel):
     """
     POST /reject_inference — the Human-in-the-Loop "Reject" button's
-    HTTP contract (Functional Specification D2 Input Contract, v2).
+    HTTP contract (Functional Specification D2 Input Contract, v3 —
+    AI-28/AI-33).
 
-    v2 contract: exactly the four fields the frontend can actually
-    supply for a rule row — case_id, rule_id, reason, investigator_id —
-    all required. There is no subject_id_a/subject_id_b/relationship_type
-    here any more: the frontend has no reliable way to know the internal
-    subject pairing a rule matched on for a given case, so this endpoint
-    now rejects every currently-active fact rule_id produced within
-    case_id's reasoning scope in one bulk operation, rather than one
-    caller-identified edge. See reasoning_layer/rejection.py's module
-    docstring for the full per-rule-family breakdown of what "every
-    fact this rule produced" means.
+    v3 contract: case_id, rule_id, reason, investigator_id — all
+    required, as before — PLUS identifying the exact match to act on:
+    either match_id, or subject_id_a (+ subject_id_b where the rule
+    family has one). A rule can match more than one pair of subjects
+    (e.g. A-B share an address, and separately A-C share an address);
+    an investigator may agree with one match and disagree with another,
+    so this endpoint now rejects exactly the ONE instance identified —
+    never every currently-active fact rule_id produced for the case.
 
-    reason is required (not optional) precisely because this is now a
-    bulk action — it is the only record of why a rule's entire output
-    for a case was overruled. investigator_id is required so the
-    :Rejection audit trail records who made that call — see
+    match_id and subject_id_a/subject_id_b are exactly the fields
+    reasoning_layer/rule_audit.py and reasoning_layer/fraud_network.py
+    already stamp onto every row/edge they return, so the frontend's
+    Reject button reads them straight off the clicked row — no
+    per-rule-family subject-pairing knowledge required on the client
+    side (see reasoning_layer/rejection.py's module docstring for that
+    encoding, which stays entirely server-side).
+
+    reason is required so there is always a record of why a specific
+    match was overruled. investigator_id is required so the :Rejection
+    audit trail records who made that call — see
     reasoning_layer/rejection.py's module docstring ATTRIBUTION NOTE.
     """
 
@@ -309,6 +343,9 @@ class RejectInferenceRequest(BaseModel):
     rule_id: str
     reason: str
     investigator_id: str
+    match_id: Optional[str] = None
+    subject_id_a: Optional[str] = None
+    subject_id_b: Optional[str] = None
 
     @field_validator("case_id", "rule_id", "reason", "investigator_id")
     @classmethod
@@ -318,16 +355,37 @@ class RejectInferenceRequest(BaseModel):
             raise ValueError("must be a non-empty string.")
         return value
 
+    @model_validator(mode="after")
+    def must_identify_one_instance(self) -> "RejectInferenceRequest":
+        """
+        v3 contract (AI-28): there is no more bulk "every currently-active
+        fact this rule produced" mode — the caller must identify exactly
+        which match to reject, either by match_id or by subject_id_a
+        (+ subject_id_b where the rule family has one). See
+        RevertRejectionRequest.must_identify_one_instance — identical
+        rule, the exact inverse action.
+        """
+        if not (self.match_id and self.match_id.strip()) and not (
+            self.subject_id_a and self.subject_id_a.strip()
+        ):
+            raise ValueError(
+                "must identify the exact match to reject: provide either "
+                "match_id, or subject_id_a (+ subject_id_b where the rule "
+                "family has one)."
+            )
+        return self
+
 
 class RejectedItem(BaseModel):
-    """One instance rejected by a bulk reject_inference call."""
+    """One instance rejected by a reject_inference call."""
 
     subject_id_a: Optional[str] = None
     subject_id_b: Optional[str] = None
+    match_id: Optional[str] = None
 
 
 class RejectInferenceResponse(BaseModel):
-    """Response for POST /reject_inference (D2 Output Contract, v2)."""
+    """Response for POST /reject_inference (D2 Output Contract, v3)."""
 
     accepted: bool
     case_id: str
@@ -396,7 +454,9 @@ class GraphEdge(BaseModel):
     subject_id_a / subject_id_b / rule_id are populated on
     subject-to-subject edges only; together with relationship_type they
     are exactly the POST /reject_inference parameters, pre-resolved so
-    the UI reads them off the clicked edge.
+    the UI reads them off the clicked edge. match_id (v3 contract,
+    AI-28/AI-33) is the same instance wrapped into one opaque token, for
+    a caller that would rather send that instead.
     """
 
     id: Optional[str] = None
@@ -411,6 +471,11 @@ class GraphEdge(BaseModel):
     subject_id_a: Optional[str] = None
     subject_id_b: Optional[str] = None
     rule_id: Optional[str] = None
+    # v3 instance-level Reject/Revert contract (AI-28/AI-33). Without
+    # this field, reasoning_layer.fraud_network._build_edges's match_id
+    # is computed correctly but silently dropped here, since a
+    # response_model strips any key it doesn't declare.
+    match_id: Optional[str] = None
     properties: Dict[str, Any] = {}
 
 
@@ -455,6 +520,11 @@ class InferredRelationship(BaseModel):
     asserted_at: Optional[str] = None
     corroborated: bool = False
     status: str
+    # v3 instance-level Reject/Revert contract (AI-28/AI-33). Without
+    # this field, reasoning_layer.rule_audit.get_rule_audit's match_id
+    # is computed correctly but silently dropped here, since a
+    # response_model strips any key it doesn't declare.
+    match_id: Optional[str] = None
 
 
 class RuleAuditEntry(BaseModel):

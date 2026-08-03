@@ -10,6 +10,12 @@
 // would quietly change a rule the spec keeps narrow on purpose — if
 // fuzzy alias matching is wanted, that is a spec change, not a Cypher
 // tweak.
+//
+// DIRECTED MERGE, UNDIRECTED READS: see rule_01_shared_employer.cypher's
+// comment of the same name — MERGE on an undirected pattern is not
+// guaranteed idempotent, so this merges in the fixed direction
+// a.subject_id < b.subject_id already establishes rather than leaving
+// Neo4j to pick.
 
 MATCH (a:Subject)-[:HAS_ALIAS]->(al:Alias)<-[:HAS_ALIAS]-(b:Subject)
 WHERE a.subject_id < b.subject_id
@@ -19,7 +25,7 @@ WHERE a.subject_id < b.subject_id
         WHERE rej.from_key IN [a.subject_id, b.subject_id]
           AND rej.to_key   IN [a.subject_id, b.subject_id]
       }
-MERGE (a)-[r:SHARES_ALIAS_PATTERN_WITH]-(b)
+MERGE (a)-[r:SHARES_ALIAS_PATTERN_WITH]->(b)
 ON CREATE SET r.first_asserted_at = $asserted_at
 SET r.confidence   = "High",
     r.alias_value  = al.alias_value,

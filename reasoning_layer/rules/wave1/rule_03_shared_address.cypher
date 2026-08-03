@@ -14,6 +14,12 @@
 // on (street, city, state, zip) only matches when two investigators
 // typed an address identically, which is not a safe assumption against
 // real data entry — see etl/GAP_ANALYSIS.md.
+//
+// DIRECTED MERGE, UNDIRECTED READS: see rule_01_shared_employer.cypher's
+// comment of the same name — MERGE on an undirected pattern is not
+// guaranteed idempotent, so this merges in the fixed direction
+// a.subject_id < b.subject_id already establishes rather than leaving
+// Neo4j to pick.
 
 MATCH (a:Subject)-[:HAS_ADDRESS]->(addr:Address)<-[:HAS_ADDRESS]-(b:Subject)
 WHERE a.subject_id < b.subject_id
@@ -23,7 +29,7 @@ WHERE a.subject_id < b.subject_id
         WHERE rej.from_key IN [a.subject_id, b.subject_id]
           AND rej.to_key   IN [a.subject_id, b.subject_id]
       }
-MERGE (a)-[r:SHARES_ADDRESS_WITH]-(b)
+MERGE (a)-[r:SHARES_ADDRESS_WITH]->(b)
 ON CREATE SET r.first_asserted_at = $asserted_at
 SET r.confidence   = CASE WHEN coalesce(r.corroborated, false) THEN "High" ELSE "Medium" END,
     r.address_key  = addr.address_key,

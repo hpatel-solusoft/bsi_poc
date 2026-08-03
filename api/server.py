@@ -2035,13 +2035,15 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
     D2 — Inference Rejection Handler. An investigator reviews a rule's
     findings on the Rule Audit panel (GET /rule_audit/{case_id}) or the
     Fraud Network screen (GET /fraud_network/{case_id}) and clicks
-    "Reject" on that rule for this case; the UI POSTs case_id, rule_id,
-    reason, and investigator_id — the fields it can actually supply,
-    matching the contract in reasoning_layer/rejection.py.
+    "Reject" on ONE specific row/edge; the UI POSTs case_id, rule_id,
+    reason, investigator_id, and that row's match_id (or its
+    subject_id_a/subject_id_b) — every field is read straight off the
+    clicked row, matching the v3 contract in reasoning_layer/rejection.py.
 
-    This rejects every currently-active fact rule_id produced within
-    case_id's reasoning scope (bulk, not a single caller-identified
-    edge — see rejection.py's module docstring for why).
+    This rejects exactly the ONE instance identified — never every
+    currently-active fact rule_id produced within case_id's reasoning
+    scope (that was the v2 bulk contract; see rejection.py's module
+    docstring for why it changed, AI-28/AI-33).
 
     No LLM involvement (D2 Boundaries). Does not touch CASE_STORE or
     investigation_plan_overrides — this is a Neo4j write only, handled
@@ -2054,6 +2056,9 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
             rule_id=req.rule_id,
             reason=req.reason,
             investigator_id=req.investigator_id,
+            match_id=req.match_id,
+            subject_id_a=req.subject_id_a,
+            subject_id_b=req.subject_id_b,
         )
         log_agent_call(
             case_id=req.case_id,
@@ -2084,17 +2089,20 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
 @app.post("/revert_rejection", response_model=RevertRejectionResponse)
 def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionResponse:
     """
-    Undo an inference rejection. The Revert button is shown ONLY when the
-    Case Summary / Rule Audit view already reports a rule as rejected for
-    this case, so this endpoint is the exact inverse of POST
-    /reject_inference and takes the same fields: case_id, rule_id,
-    investigator_id, and reason.
+    Undo the rejection of ONE specific instance. The Revert button is
+    shown on a row already reporting status "rejected" (Case Summary /
+    Rule Audit / Fraud Network view), so this endpoint is the exact
+    inverse of POST /reject_inference and takes the same fields:
+    case_id, rule_id, investigator_id, reason, plus that row's match_id
+    (or its subject_id_a/subject_id_b) to identify which rejected
+    instance to restore.
 
-    Restores every fact this rule rejected for this case back to active,
-    clears its rejection reason and audit fields, and deletes the
-    :Rejection guard node so the rule can fire again on the next
-    pipeline run. No LLM, no AppWorks, no CASE_STORE write — a Neo4j
-    write only, handled entirely by reasoning_layer.rejection.revert_rejection.
+    Restores that one instance back to active, clears its rejection
+    reason and audit fields, and deletes its :Rejection guard node so
+    the rule can fire again for it on the next pipeline run — every
+    OTHER instance this rule rejected for this case is untouched. No
+    LLM, no AppWorks, no CASE_STORE write — a Neo4j write only, handled
+    entirely by reasoning_layer.rejection.revert_rejection.
     """
     start = time.time()
     try:
@@ -2103,6 +2111,9 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
             rule_id=req.rule_id,
             investigator_id=req.investigator_id,
             reason=req.reason,
+            match_id=req.match_id,
+            subject_id_a=req.subject_id_a,
+            subject_id_b=req.subject_id_b,
         )
         log_agent_call(
             case_id=req.case_id,

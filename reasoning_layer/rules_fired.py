@@ -560,6 +560,45 @@ def _summarise(rule_id: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Collapse rows describing the SAME logical instance down to one,
+    keyed on the same identity fields _instance() itself keys an
+    instance on (_INSTANCE_KEYS: subject_id / related_subject_id /
+    related_case_id / related_network_key / allegation_type).
+
+    Defense in depth against duplicate PHYSICAL relationships in the
+    graph for the same logical fact. The known way this happens: MERGE
+    on an undirected relationship pattern — `MERGE (a)-[r:TYPE]-(b)` —
+    is not guaranteed idempotent (Cypher's own docs flag undirected
+    MERGE as unreliable); under some execution-plan orderings across
+    repeated pipeline runs it can create a second parallel relationship
+    for the same pair instead of matching the one already there. The
+    three symmetric-edge write rules (reasoning_layer/rules/wave1/
+    rule_01_shared_employer.cypher, rule_03_shared_address.cypher,
+    rule_05_alias_identity.cypher) now MERGE in a fixed, deterministic
+    direction (already enforced by their own `a.subject_id < b.subject_id`
+    guard) to stop NEW duplicates from forming — but that does nothing
+    for a duplicate a graph already has, so every _REL_RULES/_PROP_RULES
+    query is deduped here regardless of family, rather than trusting
+    each Cypher file to never produce one.
+
+    Keeps the FIRST row for a given key. Every query in _REL_RULES and
+    _PROP_RULES orders its results (ORDER BY subject_id, related_subject_id
+    or equivalent), so "first" is deterministic across repeated calls,
+    not an arbitrary pick.
+    """
+    seen = set()
+    deduped: List[Dict[str, Any]] = []
+    for row in rows:
+        key = tuple(row.get(k) for k in _INSTANCE_KEYS)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
 def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Build the full 14-entry rules_fired block for one pipeline run.
@@ -584,6 +623,7 @@ def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, A
         for rule_id in rule_registry.ALL_RULE_IDS:
             query = _REL_RULES.get(rule_id) or _PROP_RULES.get(rule_id)
             rows = session.run(query, **params).data()
+            rows = _dedupe_rows(rows)
             summary = _summarise(rule_id, rows)
             execution = executed_by_id.get(rule_id, {})
             block.append(

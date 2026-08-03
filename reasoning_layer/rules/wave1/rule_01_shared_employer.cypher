@@ -16,6 +16,18 @@
 // filters the pair out BEFORE the MERGE, so a rejected relationship
 // keeps its status:"rejected" and is never quietly flipped back to
 // active by a re-run.
+//
+// DIRECTED MERGE, UNDIRECTED READS: MERGE on an undirected pattern
+// (`MERGE (a)-[r:TYPE]-(b)`) is not guaranteed idempotent — under some
+// execution-plan orderings across repeated pipeline runs it can create
+// a second parallel relationship for the same pair instead of matching
+// the one already there, which is exactly what happened here before
+// this fix. a.subject_id < b.subject_id above already fixes which
+// subject is "a" on every run, so MERGE can safely target one
+// deterministic direction (a)->(b) instead — every reader (rules_fired.py,
+// rejection.py, fraud_network.py) matches this relationship with an
+// undirected pattern anyway, so storing it directed changes nothing
+// for them.
 
 MATCH (a:Subject)-[:EMPLOYED_BY]->(e:Employer)<-[:EMPLOYED_BY]-(b:Subject)
 WHERE a.subject_id < b.subject_id
@@ -25,7 +37,7 @@ WHERE a.subject_id < b.subject_id
         WHERE rej.from_key IN [a.subject_id, b.subject_id]
           AND rej.to_key   IN [a.subject_id, b.subject_id]
       }
-MERGE (a)-[r:SHARES_EMPLOYER_WITH]-(b)
+MERGE (a)-[r:SHARES_EMPLOYER_WITH]->(b)
 ON CREATE SET r.first_asserted_at = $asserted_at
 SET r.confidence   = CASE WHEN e.fein IS NOT NULL THEN "High" ELSE "Medium" END,
     r.match_basis  = CASE WHEN e.fein IS NOT NULL THEN "fein" ELSE "employer_name" END,
