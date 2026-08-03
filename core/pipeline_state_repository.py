@@ -10,11 +10,12 @@ which rules belong to it — that lives in reasoning_layer/pipeline.py.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, Optional
 
 import psycopg2
 
-from core.db import DatabaseUnavailableError, get_cursor
+from core.db import DatabaseUnavailableError, advisory_lock, get_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,64 @@ _CLEAR_SQL = """
     SET cleared_at = now(), cleared_reason = %(reason)s
     WHERE case_id = %(case_id)s AND subject_id = %(subject_id)s;
 """
+
+
+@contextmanager
+def pipeline_run_lock(case_id: str, subject_id: str) -> Iterator[None]:
+    """
+    Serialize reasoning pipeline runs for the SAME (case_id, subject_id)
+    pair — see core.db.advisory_lock's docstring for the concurrent-MERGE
+    duplicate-relationship race this closes. reasoning_layer/pipeline.py's
+    run_pipeline() wraps its entire check-then-act critical section
+    (get_run_state -> maybe start_run -> Wave 1/Extraction/Wave 2 -> mark
+    complete) in this, so two concurrent callers for the same pair can
+    never both decide "nothing running yet, I'll run it" and both
+    proceed to write to Neo4j at once. A second caller for the SAME pair
+    simply waits for the first to finish, then (per Principle 10) sees
+    it already completed and returns the cached result instead of
+    running again — the correct outcome, since both callers wanted the
+    same thing done, not two independent runs of it. Different pairs
+    never contend with each other.
+
+    Degrades OPEN on a PostgreSQL outage, same policy as every other
+    function in this module (see get_run_state's docstring): every rule
+    write underneath is already idempotent MERGE, so a spurious
+    concurrent run during a Postgres outage is wasteful, not unsafe —
+    losing the extra protection this lock adds must never itself block
+    case investigation.
+
+    CORRECTNESS NOTE, worth being explicit about: only a failure to
+    ACQUIRE the lock is caught and degraded-around here. Once the lock
+    is held, the caller's wrapped code (the `yield`) runs completely
+    outside any except block — an exception raised by the pipeline body
+    itself (a Neo4j failure, for instance) is deliberately left to
+    propagate untouched, past this function, to run_pipeline()'s own
+    try/except. Catching broadly around the whole `with` statement here
+    would risk mistaking a genuine pipeline failure for a lock-acquire
+    failure and silently re-running the entire pipeline body a second
+    time, unlocked — exactly the race this function exists to close.
+    """
+    lock_cm = advisory_lock(f"pipeline_run:{case_id}", subject_id)
+    have_lock = False
+    try:
+        lock_cm.__enter__()
+        have_lock = True
+    except (DatabaseUnavailableError, psycopg2.Error) as exc:
+        logger.warning(
+            "pipeline_run_lock: PostgreSQL unavailable — proceeding WITHOUT the "
+            "concurrency lock for case_id=%s subject_id=%s (%s). Every rule write "
+            "remains individually idempotent; a concurrent duplicate run is "
+            "possible but not unsafe.",
+            case_id,
+            subject_id,
+            exc,
+        )
+
+    try:
+        yield
+    finally:
+        if have_lock:
+            lock_cm.__exit__(None, None, None)
 
 
 def get_run_state(case_id: str, subject_id: str) -> Optional[Dict[str, Any]]:

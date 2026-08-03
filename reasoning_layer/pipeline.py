@@ -137,6 +137,31 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str
     reached from ETL itself). `reason` records which one, written to
     pipeline_execution_state.cleared_reason so the audit trail shows why a
     given run was invalidated.
+
+    CONCURRENCY: the entire check-then-act sequence below (get_run_state,
+    then maybe start_run + Wave 1/Extraction/Wave 2) runs under
+    core.pipeline_state_repository.pipeline_run_lock, keyed on
+    (case_id, subject_id). Without it, two concurrent callers for the
+    same pair (a double-clicked "Reload", two workers both handling the
+    same case) could each see "nothing running yet" and both proceed —
+    every rule write is idempotent MERGE, but Neo4j only guarantees that
+    within one transaction, so two concurrent runs could each create a
+    duplicate physical relationship for the same logical fact. See
+    pipeline_run_lock's own docstring for the full explanation. A second
+    caller for the same pair simply waits, then (per Principle 10 below)
+    sees the first one's completed run instead of duplicating it.
+    """
+    with pipeline_state_repository.pipeline_run_lock(case_id, subject_id):
+        return _run_pipeline_locked(case_id, subject_id, force, reason)
+
+
+def _run_pipeline_locked(case_id: str, subject_id: str, force: bool, reason: str) -> dict:
+    """
+    The six-step sequence itself, run while run_pipeline()'s caller
+    already holds pipeline_run_lock for (case_id, subject_id). Split out
+    from run_pipeline() only so lock acquisition is a single, obviously
+    correct line at the top of the public entry point — everything below
+    is unchanged from before the lock existed.
     """
     existing = pipeline_state_repository.get_run_state(case_id, subject_id)
     already_done = existing and existing.get("status") == "completed" and existing.get("cleared_at") is None

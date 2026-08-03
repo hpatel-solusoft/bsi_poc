@@ -1,40 +1,52 @@
 """
-One-time maintenance: collapse duplicate physical relationships that
-MERGE on an undirected pattern (`MERGE (a)-[r:TYPE]-(b)`) may have
-created for the same logical fact, before
-reasoning_layer/rules/wave1/rule_0{1,3,5}_*.cypher were fixed to MERGE
-in a fixed direction instead.
+One-time maintenance: collapse duplicate physical relationships that a
+concurrent pipeline run may have created for the same logical fact,
+before core.pipeline_state_repository.pipeline_run_lock closed the
+race that causes this (see that function's docstring for the full
+explanation).
+
+ROOT CAUSE, established across two rounds of investigation: this was
+first diagnosed as MERGE-on-an-undirected-relationship-pattern being
+unreliable (true, and fixed — see reasoning_layer/rules/wave1/
+rule_01_shared_employer.cypher's "DIRECTED MERGE, UNDIRECTED READS"
+comment) but that theory didn't explain a duplicate later found on
+Rule_07_Prior_Guilty, whose write query MERGEs a DIRECTED relationship
+with no undirected pattern anywhere in it. The actual, general-purpose
+cause: Neo4j's MERGE find-or-create check is only atomic WITHIN one
+transaction — two pipeline runs for the same (case_id, subject_id)
+executing concurrently can each see "doesn't exist yet" before either
+commits, and each create one. This affects every relationship a rule
+writes, not just the three symmetric-edge ones, which is why this
+script (unlike its predecessor) covers all of them.
 
 This is a data-repair script, not application code — nothing in the
 running app imports it. reasoning_layer/rules_fired.py's own
 _dedupe_rows() already hides any existing duplicate from every API
 response, so running this script is NOT required for the app to behave
-correctly. Run it when convenient to remove the duplicate relationships
-from the graph itself — e.g. so a raw Cypher query against the database
-(outside this app) doesn't see them, and so
-reasoning_layer.rejection.reject_inference/revert_rejection's
-rejected_count/reverted_count reports 1 instead of 2 when both
-duplicates happen to satisfy the same target filter.
+correctly, and core.pipeline_state_repository.pipeline_run_lock now
+prevents new ones from forming. Run this when convenient to remove the
+duplicates from the graph itself — e.g. so a raw Cypher query against
+the database (outside this app) doesn't see them either.
 
 SAFE BY DESIGN:
   * Read-only dry run by default — prints what it WOULD delete and does
     nothing else. Pass --apply to actually delete.
-  * Only ever deletes a relationship — never a :Subject, :Employer,
-    :Address, or :Alias node, and never a :Rejection node (only the
-    keep-one's audit trail matters; a lost duplicate's fields, if they
-    ever differed, are not the ones the UI already reads).
-  * The relationship KEPT is deterministic: whichever one
-    reasoning_layer/rules_fired.py's own read queries would return
-    first (ORDER BY subject_id, related_subject_id — ties broken by
-    Neo4j's internal relationship id, oldest first), so this always
-    keeps the same one the API has already been showing.
+  * Only ever deletes a relationship — never a node, and never a
+    :Rejection node.
+  * The relationship KEPT is deterministic: the one Neo4j created
+    first (ordered by first_asserted_at, falling back to elementId as
+    a stable tiebreaker for the rare case two duplicates share a
+    timestamp) — i.e. whichever one is more likely to be the one an
+    investigator has already seen and possibly acted on (rejected,
+    corroborated, etc.), so a manual audit trail on the "real" instance
+    is never the one silently dropped.
   * Idempotent: running it again after a clean graph finds nothing to
     do.
 
 USAGE:
-    python scripts/dedupe_symmetric_edges.py                 # dry run
-    python scripts/dedupe_symmetric_edges.py --apply          # all cases
-    python scripts/dedupe_symmetric_edges.py --apply --case-id 658407433
+    python scripts/dedupe_duplicate_relationships.py                  # dry run, whole graph
+    python scripts/dedupe_duplicate_relationships.py --apply           # whole graph
+    python scripts/dedupe_duplicate_relationships.py --apply --case-id 658407433
 """
 
 from __future__ import annotations
@@ -42,35 +54,75 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import dataclass
 
 from reasoning_layer.neo4j_client import get_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("dedupe_symmetric_edges")
+logger = logging.getLogger("dedupe_duplicate_relationships")
 
-# The three symmetric-edge relationship types affected by the undirected
-# MERGE anti-pattern (see reasoning_layer/rules/wave1/rule_01_shared_employer
-# .cypher's "DIRECTED MERGE, UNDIRECTED READS" comment for the full
-# explanation). MEMBER_OF_FRAUD_NETWORK, HAS_PRIOR_GUILTY_CASE, etc. are
-# directed relationships (Subject->Case, Subject->FraudNetwork) and were
-# never at risk of this — only these three ever used an undirected MERGE.
-_RELATIONSHIP_TYPES = (
-    "SHARES_EMPLOYER_WITH",
-    "SHARES_ADDRESS_WITH",
-    "SHARES_ALIAS_PATTERN_WITH",
+
+@dataclass(frozen=True)
+class _RelSpec:
+    rel_type: str
+    source_rule: str
+    # "symmetric": written via an undirected MERGE pattern historically
+    # (see rule_01/03/05's fix) — read as undirected, deduped on the
+    # UNORDERED endpoint pair.
+    # "directed": written via a directed MERGE — read as directed,
+    # deduped on the ORDERED (source, target) pair.
+    family: str
+
+
+# Every relationship type a rule's write .cypher actually MERGEs.
+# Deliberately excludes the case-flag/subject-flag/allegation-flag
+# families (Rules 08, 11, 12, 13) — those SET properties on an existing
+# node rather than creating a relationship, so there is no relationship
+# for this script to deduplicate; a concurrent double-write there is a
+# lost-update risk, not a duplicate-instance display bug, and is out of
+# this script's scope.
+_REL_SPECS = (
+    _RelSpec("SHARES_EMPLOYER_WITH", "Rule_01_Shared_Employer", "symmetric"),
+    _RelSpec("SHARES_ADDRESS_WITH", "Rule_03_Shared_Address", "symmetric"),
+    _RelSpec("SHARES_ALIAS_PATTERN_WITH", "Rule_05_Alias_Identity", "symmetric"),
+    _RelSpec("HAS_PRIOR_GUILTY_CASE", "Rule_07_Prior_Guilty", "directed"),
+    # APPEARS_IN_CASE is mixed-provenance (Section 3.2) — ETL-asserted
+    # edges have no source_rule and are never touched here; only the
+    # rule-derived ones (source_rule = "Rule_10_...") are in scope.
+    _RelSpec("APPEARS_IN_CASE", "Rule_10_Merged_Case_Propagation", "directed"),
+    _RelSpec("MEMBER_OF_FRAUD_NETWORK", "Rule_02_Employer_Fraud_Network", "directed"),
+    _RelSpec("MEMBER_OF_FRAUD_NETWORK", "Rule_04_Address_Fraud_Network", "directed"),
+    _RelSpec("MEMBER_OF_FRAUD_NETWORK", "Rule_06_Identity_Fraud_Network", "directed"),
+    _RelSpec("MEMBER_OF_FRAUD_NETWORK", "Rule_09_PCA_CheckSplit", "directed"),
 )
 
-_FIND_DUPLICATES_QUERY = """
-MATCH (a:Subject)-[r:{rel_type}]-(b:Subject)
-WHERE a.subject_id < b.subject_id
-  AND r.source_rule = $rule_id
+_FIND_DUPLICATES_SYMMETRIC = """
+MATCH (a)-[r:{rel_type}]-(b)
+WHERE r.source_rule = $rule_id
+  AND elementId(a) < elementId(b)
   {case_filter}
-WITH a.subject_id AS subject_id_a, b.subject_id AS subject_id_b,
+WITH elementId(a) AS a_id, elementId(b) AS b_id,
+     coalesce(a.subject_id, a.case_id) AS a_key,
+     coalesce(b.subject_id, b.case_id) AS b_key,
      collect(r) AS rels
 WHERE size(rels) > 1
-RETURN subject_id_a, subject_id_b,
-       [rel IN rels | elementId(rel)] AS rel_ids
-ORDER BY subject_id_a, subject_id_b
+RETURN a_key, b_key,
+       [rel IN rels | {{id: elementId(rel), first_asserted_at: rel.first_asserted_at}}] AS rel_infos
+ORDER BY a_key, b_key
+"""
+
+_FIND_DUPLICATES_DIRECTED = """
+MATCH (a)-[r:{rel_type}]->(b)
+WHERE r.source_rule = $rule_id
+  {case_filter}
+WITH elementId(a) AS a_id, elementId(b) AS b_id,
+     coalesce(a.subject_id, a.case_id) AS a_key,
+     coalesce(b.subject_id, b.case_id, b.network_key) AS b_key,
+     collect(r) AS rels
+WHERE size(rels) > 1
+RETURN a_key, b_key,
+       [rel IN rels | {{id: elementId(rel), first_asserted_at: rel.first_asserted_at}}] AS rel_infos
+ORDER BY a_key, b_key
 """
 
 _DELETE_RELATIONSHIP_QUERY = """
@@ -79,57 +131,56 @@ WHERE elementId(r) = $rel_id
 DELETE r
 """
 
-_RULE_ID_BY_TYPE = {
-    "SHARES_EMPLOYER_WITH": "Rule_01_Shared_Employer",
-    "SHARES_ADDRESS_WITH": "Rule_03_Shared_Address",
-    "SHARES_ALIAS_PATTERN_WITH": "Rule_05_Alias_Identity",
-}
+_CASE_FILTER = (
+    "AND (EXISTS {{ MATCH (a)-[:APPEARS_IN_CASE]->(:Case {{case_id: $case_id}}) }} "
+    "OR EXISTS {{ MATCH (b)-[:APPEARS_IN_CASE]->(:Case {{case_id: $case_id}}) }})"
+)
+
+
+def _sort_key(rel_info: dict) -> tuple:
+    # first_asserted_at is an ISO 8601 string (or None) — sorts correctly
+    # as text; a missing timestamp sorts last (never preferred as "keep").
+    return (rel_info.get("first_asserted_at") is None, rel_info.get("first_asserted_at") or "", rel_info["id"])
 
 
 def find_and_dedupe(apply: bool, case_id: str | None) -> int:
-    """
-    Returns the number of duplicate relationships removed (or that WOULD
-    be removed, in dry-run mode).
-    """
-    case_filter = (
-        "AND (EXISTS { MATCH (a)-[:APPEARS_IN_CASE]->(:Case {case_id: $case_id}) } "
-        "OR EXISTS { MATCH (b)-[:APPEARS_IN_CASE]->(:Case {case_id: $case_id}) })"
-        if case_id
-        else ""
-    )
+    """Returns the number of duplicate relationships removed (or that
+    WOULD be removed, in dry-run mode)."""
+    case_filter = _CASE_FILTER if case_id else ""
     total_removed = 0
 
     with get_session() as session:
-        for rel_type in _RELATIONSHIP_TYPES:
-            rule_id = _RULE_ID_BY_TYPE[rel_type]
-            query = _FIND_DUPLICATES_QUERY.format(rel_type=rel_type, case_filter=case_filter)
-            params = {"rule_id": rule_id}
+        for spec in _REL_SPECS:
+            template = _FIND_DUPLICATES_SYMMETRIC if spec.family == "symmetric" else _FIND_DUPLICATES_DIRECTED
+            query = template.format(rel_type=spec.rel_type, case_filter=case_filter)
+            params = {"rule_id": spec.source_rule}
             if case_id:
                 params["case_id"] = case_id
 
             groups = session.run(query, **params).data()
             if not groups:
-                logger.info("%s: no duplicates found", rel_type)
+                logger.info("%s (%s): no duplicates found", spec.rel_type, spec.source_rule)
                 continue
 
             for group in groups:
-                subject_id_a = group["subject_id_a"]
-                subject_id_b = group["subject_id_b"]
-                rel_ids = group["rel_ids"]
-                keep, *extras = rel_ids  # relationship ids in creation order
+                rel_infos = sorted(group["rel_infos"], key=_sort_key)
+                keep, *extras = rel_infos
                 logger.info(
-                    "%s: %s <-> %s has %d duplicate relationships — keeping %s, %s %d",
-                    rel_type,
-                    subject_id_a,
-                    subject_id_b,
-                    len(rel_ids),
-                    keep,
+                    "%s (%s): %s <-> %s has %d duplicate relationships — keeping %s "
+                    "(first_asserted_at=%s), %s %d",
+                    spec.rel_type,
+                    spec.source_rule,
+                    group["a_key"],
+                    group["b_key"],
+                    len(rel_infos),
+                    keep["id"],
+                    keep.get("first_asserted_at"),
                     "would remove" if not apply else "removing",
                     len(extras),
                 )
-                for rel_id in extras:
+                for rel_info in extras:
                     if apply:
-                        session.run(_DELETE_RELATIONSHIP_QUERY, rel_id=rel_id)
+                        session.run(_DELETE_RELATIONSHIP_QUERY, rel_id=rel_info["id"])
                     total_removed += 1
 
     return total_removed
@@ -145,7 +196,7 @@ def main() -> int:
     parser.add_argument(
         "--case-id",
         default=None,
-        help="Limit to one case's primary subject's relationships instead of the whole graph.",
+        help="Limit to relationships touching this case instead of scanning the whole graph.",
     )
     args = parser.parse_args()
 

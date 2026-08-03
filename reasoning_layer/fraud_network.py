@@ -449,14 +449,31 @@ def _build_edges(
     """
     Turn raw relationship rows into rendered edges.
 
-    Every subject-to-subject edge also carries the four parameters POST
-    /reject_inference wants (subject_id_a, subject_id_b,
-    relationship_type, rule_id) pre-resolved onto the edge, so the UI's
-    Reject button can read them straight off the clicked edge instead of
+    Every subject-to-subject edge (Rule_01/03/05/07/10's family) AND
+    every subject-to-network membership edge (MEMBER_OF_FRAUD_NETWORK,
+    Rule_02/04/06/09's family) carries the parameters POST
+    /reject_inference wants (subject_id_a, subject_id_b, relationship_type,
+    rule_id, match_id) pre-resolved onto the edge, so the UI's Reject
+    button can read them straight off the clicked edge instead of
     reverse-engineering them from node ids. `rejectable` is the flag
     that tells the frontend whether to render the button at all: an
     ETL-sourced fact (APPEARS_IN_CASE, EMPLOYED_BY) is not an inference
     and there is nothing to reject about it.
+
+    MEMBERSHIP EDGES, SPECIFICALLY (AI-28 completeness fix): these used
+    to be excluded here entirely — `subject_to_subject` was false for a
+    Subject->FraudNetwork edge, so rejectable/subject_id_a/subject_id_b/
+    match_id were never set, even though reasoning_layer/rule_audit.py's
+    query for the SAME rule family (Rule_02/04/06/09) already returns
+    one row per member with a working match_id. A caller reading only
+    this endpoint's graph.edges (rather than /rule_audit) had no way to
+    target one specific member's own membership. Fixed by treating
+    Subject->FraudNetwork edges the same way: subject_id_a is the
+    member's own key; subject_id_b is the FraudNetwork node's own `key`
+    property, which is ALREADY the "<network_type>:<network_key>"
+    composite build_match_id expects for this family (see the
+    FraudNetwork node's `key` in the case subgraph — it's built that way
+    at ingestion, not reconstructed here).
     """
     edges: List[Dict[str, Any]] = []
 
@@ -475,7 +492,12 @@ def _build_edges(
         rel_type = row.get("type")
         source_node = node_by_id.get(source_id, {})
         target_node = node_by_id.get(target_id, {})
-        subject_to_subject = source_node.get("label") == "Subject" and target_node.get("label") == "Subject"
+        source_label = source_node.get("label")
+        target_label = target_node.get("label")
+        subject_to_subject = source_label == "Subject" and target_label == "Subject"
+        member_to_network = (
+            rel_type == "MEMBER_OF_FRAUD_NETWORK" and source_label == "Subject" and target_label == "FraudNetwork"
+        )
         rule_id = props.get("source_rule")
 
         edge: Dict[str, Any] = {
@@ -490,22 +512,29 @@ def _build_edges(
             "status": props.get("status") or "active",
             "source_rule": rule_id,
             "inferred": bool(rule_id),
-            "rejectable": bool(subject_to_subject and rule_id),
+            "rejectable": bool((subject_to_subject or member_to_network) and rule_id),
             "properties": props,
         }
         if subject_to_subject:
             edge["subject_id_a"] = source_node.get("key")
             edge["subject_id_b"] = target_node.get("key")
             edge["rule_id"] = rule_id
-            if rule_id:
-                # v3 instance-level Reject/Revert contract (AI-28/AI-33):
-                # the UI reads this straight off the clicked edge and
-                # echoes it back on POST /reject_inference or
-                # /revert_rejection, rather than reconstructing
-                # subject_id_a/subject_id_b/rule_id itself. Only present
-                # when rule_id is (i.e. edge["rejectable"] is true) —
-                # an ETL-sourced edge has no rule instance to identify.
-                edge["match_id"] = build_match_id(rule_id, edge["subject_id_a"], edge["subject_id_b"])
+        elif member_to_network:
+            edge["subject_id_a"] = source_node.get("key")
+            # The FraudNetwork node's own `key` is already the
+            # "<network_type>:<network_key>" composite — see this
+            # function's docstring.
+            edge["subject_id_b"] = target_node.get("key")
+            edge["rule_id"] = rule_id
+        if (subject_to_subject or member_to_network) and rule_id:
+            # v3 instance-level Reject/Revert contract (AI-28/AI-33):
+            # the UI reads this straight off the clicked edge and
+            # echoes it back on POST /reject_inference or
+            # /revert_rejection, rather than reconstructing
+            # subject_id_a/subject_id_b/rule_id itself. Only present
+            # when rule_id is (i.e. edge["rejectable"] is true) —
+            # an ETL-sourced edge has no rule instance to identify.
+            edge["match_id"] = build_match_id(rule_id, edge["subject_id_a"], edge["subject_id_b"])
         edges.append(edge)
 
     edges.sort(key=lambda e: (str(e["relationship_type"]), e["source"], e["target"]))

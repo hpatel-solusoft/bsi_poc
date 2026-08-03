@@ -104,3 +104,77 @@ def get_cursor(dict_cursor: bool = True) -> Iterator["psycopg2.extensions.cursor
         raise
     finally:
         _connection_pool.putconn(conn)
+
+
+@contextmanager
+def advisory_lock(key1: str, key2: str) -> Iterator[None]:
+    """
+    Hold a PostgreSQL session-level advisory lock keyed on (key1, key2)
+    for the lifetime of this context manager, serializing any other
+    caller — in this process, another thread, or another connected
+    process entirely — trying to acquire the SAME (key1, key2) pair at
+    the same time. Blocks until acquired; always released on exit,
+    success or error.
+
+    THE RACE THIS CLOSES: reasoning_layer/rule_engine.py's rule writes
+    are idempotent MERGE, but Neo4j MERGE's find-or-create check is only
+    atomic WITHIN one transaction — two concurrent callers running the
+    reasoning pipeline for the same (case_id, subject_id) (a
+    double-clicked "Reload", two app workers both picking up the same
+    case, etc.) can each see "no existing relationship" before either
+    commits, and each create one — producing a duplicate physical
+    relationship for the same logical fact, regardless of whether the
+    write query's MERGE pattern is directed or undirected.
+    reasoning_layer.rules_fired._dedupe_rows() hides any such duplicate
+    from the UI as a safety net, but this lock is what stops the
+    duplicate from being written in the first place — see
+    core.pipeline_state_repository.pipeline_run_lock, the caller that
+    actually uses this around a pipeline run's full critical section.
+
+    SESSION-scoped, not transaction-scoped (pg_advisory_lock, not
+    pg_advisory_xact_lock) — deliberately: the critical section this is
+    built to guard spans several independent get_cursor() calls, each
+    its own committed transaction, so a transaction-scoped lock would
+    release the moment the FIRST of those committed, defeating the
+    point. A session-scoped lock instead needs a connection held OUTSIDE
+    get_cursor()'s per-call auto-commit-and-return pattern for as long
+    as the lock is held — which is exactly what this function does:
+    checks a connection out of the pool directly
+    (_connection_pool.getconn()) rather than via get_cursor(), and only
+    returns it to the pool once the lock has been released, in a
+    finally block, so a crash or exception can never leak either the
+    lock or the connection.
+
+    hashtext(key1), hashtext(key2) are PostgreSQL's own string-to-int32
+    hash — an occasional collision only means two DIFFERENT key pairs
+    briefly contend for the same lock (a spurious wait, never a
+    correctness problem), vanishingly unlikely at the cardinality this
+    guards (case_id x subject_id pairs).
+
+    Raises DatabaseUnavailableError if the pool cannot be reached —
+    callers that consider the lock a nice-to-have rather than a hard
+    requirement (see pipeline_run_lock) should catch this and proceed
+    without it rather than blocking case investigation on a Postgres
+    outage.
+    """
+    if _connection_pool is None:
+        init_pool()
+    if _connection_pool is None:
+        raise DatabaseUnavailableError("PostgreSQL connection pool failed to initialize")
+
+    conn = _connection_pool.getconn()
+    lock_acquired = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext(%s), hashtext(%s));", (key1, key2))
+        conn.commit()
+        lock_acquired = True
+        yield
+    finally:
+        try:
+            if lock_acquired:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(hashtext(%s), hashtext(%s));", (key1, key2))
+                conn.commit()
+        finally:
+            _connection_pool.putconn(conn)
