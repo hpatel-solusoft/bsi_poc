@@ -137,6 +137,32 @@ _STRUCTURAL_TO_NETWORK: Dict[str, str] = {
 
 _RULE_NUMBERS: Dict[str, int] = {rule_id: int(rule_id.split("_")[1]) for rule_id in _RULE_LABELS}
 
+# Mirrors rules_fired._CONFIDENCE_ORDER. Duplicated rather than imported:
+# rules_fired imports this module (for enrich_instance/render_block), so an
+# import the other way would be circular. Both constants encode the same
+# fact about the domain — "High" outranks "Medium" outranks anything else —
+# and the ordering itself is what matters, not where the number lives.
+_CONFIDENCE_RANK: Dict[str, int] = {"High": 2, "Medium": 1}
+
+
+def _match_strength(instance: Dict[str, Any]) -> tuple:
+    """Sort key for ranking same-status matches by evidentiary strength.
+
+    Used only to choose which match becomes a rule's headline
+    `inference_summary` — never to decide which matches exist or which are
+    shown once an investigator expands the rule.
+
+    Higher confidence outranks lower ("High" > "Medium" > "Unresolved"/
+    unknown), and at equal confidence a corroborated match outranks one
+    that is not. Anything else — which subject, which timestamp — is not
+    part of "strongest" and is deliberately left out of the key, so ties
+    fall through to the caller's own (stable) ordering rather than an
+    invented tie-break here.
+    """
+    confidence_rank = _CONFIDENCE_RANK.get(instance.get("confidence"), 0)
+    corroborated = bool(instance.get("corroborated"))
+    return (confidence_rank, corroborated)
+
 
 def rule_label(rule_id: str) -> str:
     """The graph relationship type this rule asserts. Unchanged contract —
@@ -989,23 +1015,29 @@ def render_block(block: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 instance.pop("inference")
 
         # Rule-level narrative: the single line a summary view shows without
-        # expanding the instances. First instance for a single match; a count
-        # plus the first for several, so the summary never silently implies
-        # there was only one.
-        # Prefer a LIVE finding for the collapsed summary line. A rule with
-        # one rejected and one active instance should summarise as the active
-        # one; leading with the rejected line would read, at a glance, as if
-        # the whole rule had been withdrawn.
-        rendered = [
-            i["inference"] for i in instances if i.get("inference") and i.get("status", "active") == "active"
-        ] or [i["inference"] for i in instances if i.get("inference")]
-        if not rendered:
+        # expanding the instances. The headline is the STRONGEST candidate
+        # match, not whichever instance the query happened to return first
+        # — a weak match sitting first in Neo4j's result order must not
+        # bury a stronger one for the same rule behind "expand" (see
+        # _match_strength for what "strongest" means).
+        #
+        # Prefer a LIVE finding for the collapsed summary line, unchanged
+        # from before. A rule with one rejected and one active instance
+        # should summarise as the active one; leading with the rejected
+        # line would read, at a glance, as if the whole rule had been
+        # withdrawn. Strength only ranks WITHIN that active/rejected
+        # grouping — it never lets a rejected match outrank an active one.
+        active = [i for i in instances if i.get("inference") and i.get("status", "active") == "active"]
+        candidates = sorted(active, key=_match_strength, reverse=True) or [
+            i for i in instances if i.get("inference")
+        ]
+        if not candidates:
             entry["inference_summary"] = None
-        elif len(rendered) == 1:
-            entry["inference_summary"] = rendered[0]
+        elif len(candidates) == 1:
+            entry["inference_summary"] = candidates[0]["inference"]
         else:
             entry["inference_summary"] = (
-                f"{rendered[0]} ({len(rendered) - 1} further "
-                f"{'match' if len(rendered) == 2 else 'matches'} of this rule on this case.)"
+                f"{candidates[0]['inference']} ({len(candidates) - 1} further "
+                f"{'match' if len(candidates) == 2 else 'matches'} of this rule on this case.)"
             )
     return block

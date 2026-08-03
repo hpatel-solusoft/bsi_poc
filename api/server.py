@@ -58,6 +58,10 @@ from api.models import (
     intakeRequest,
 )
 from api.pipeline_execution import (
+    fetch_live_graph_findings,
+    fetch_live_risk_signals,
+    fetch_live_rule_aware_tasks,
+    fetch_live_similar_cases,
     prepare_plan_context,
     run_intake_direct_pipeline,
     run_plan_pipeline,
@@ -104,6 +108,7 @@ from etl.ingest_service import ingest as run_graph_ingest
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.decision_log import build_decision_log
 from reasoning_layer.fraud_network import get_fraud_network
+from reasoning_layer.investigation_tasks import build_rule_aware_tasks
 from reasoning_layer.neo4j_client import (
     GraphUnavailableError,
 )
@@ -439,6 +444,17 @@ def intake(req: intakeRequest):
             if cached is not None:
                 cached_case_data, cached_summary = cached
                 CASE_STORE[req.case_id] = cached_case_data
+                # graph_findings is ALWAYS a live Neo4j read, cache hit or
+                # not — cached_case_data never carries network_match_flag/
+                # graph_context/graph_signals/rules_fired (see
+                # core.persistence_filters.strip_graph_derived_fields), so
+                # an investigator who just rejected an inference sees it
+                # reflected immediately instead of reading whatever
+                # snapshot existed when the tab was first opened.
+                subject_id = (cached_case_data.get("complaint_intelligence") or {}).get(
+                    "subject_primary_id"
+                )
+                live_findings = fetch_live_graph_findings(req.case_id, subject_id)
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "intake CACHE HIT for case_id=%s — answering from "
@@ -461,12 +477,12 @@ def intake(req: intakeRequest):
                             cached_case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
-                            "network_match_flag": cached_case_data.get("network_match_flag"),
-                            "graph_context": cached_case_data.get("graph_context"),
-                            "graph_signals": cached_case_data.get("graph_signals"),
-                            "rules_fired": fired_rules_only(cached_case_data.get("rules_fired")),
+                            "network_match_flag": live_findings.get("network_match_flag"),
+                            "graph_context": live_findings.get("graph_context"),
+                            "graph_signals": live_findings.get("graph_signals"),
+                            "rules_fired": fired_rules_only(live_findings.get("rules_fired")),
                             "confidence_summary": build_confidence_summary(
-                                cached_case_data.get("rules_fired")
+                                live_findings.get("rules_fired")
                             ),
                         },
                         "meta": {
@@ -614,7 +630,13 @@ def similar_cases(req: SimilarCasesRequest):
         # lookup and falls through to a fresh agent run below.
         if not req.reload_ai_summary:
             cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("similar_cases")
-            if cached_summary is not None and case_data.get("similar_cases") is not None:
+            if cached_summary is not None:
+                # similar_cases is ALWAYS a live Neo4j read, cache hit or
+                # not — case_data never carries the structural matches
+                # section at all (it is entirely graph-derived; see
+                # core.persistence_filters.strip_graph_derived_fields), so
+                # this tab reflects the graph as it stands right now.
+                live_similar_cases = fetch_live_similar_cases(req.case_id)
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "similar_cases CACHE HIT for case_id=%s — answering from "
@@ -637,7 +659,7 @@ def similar_cases(req: SimilarCasesRequest):
                             case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
-                            "similar_cases": case_data.get("similar_cases"),
+                            "similar_cases": live_similar_cases,
                         },
                         "meta": {
                             "data_source": data_source,
@@ -759,6 +781,31 @@ def risk_assessment(req: RiskAssessmentRequest):
                 and isinstance(cached_risk_assessment, dict)
                 and "risk_score" in cached_risk_assessment
             ):
+                # neo4j_signals / risk_score / risk_tier are ALWAYS
+                # recomputed live from Neo4j, cache hit or not.
+                # cached_risk_assessment.risk_score/risk_tier are the
+                # untouched AppWorks BASE values here — Postgres/CS-4
+                # persist base_risk_score/base_risk_tier under those plain
+                # keys precisely so there is a clean starting point to
+                # re-augment from (see
+                # core.persistence_filters.strip_graph_derived_fields).
+                # base_risk_score/base_risk_tier are preferred when
+                # present (a warm same-process CASE_STORE entry from the
+                # LLM run that just populated it still carries the real
+                # augmented dict, with both keys).
+                subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+                base_risk_score = cached_risk_assessment.get(
+                    "base_risk_score", cached_risk_assessment.get("risk_score")
+                )
+                base_risk_tier = cached_risk_assessment.get(
+                    "base_risk_tier", cached_risk_assessment.get("risk_tier")
+                )
+                live_risk = fetch_live_risk_signals(
+                    req.case_id,
+                    subject_id,
+                    base_risk_score,
+                    base_risk_tier,
+                )
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
                     "risk_assessment CACHE HIT for case_id=%s — answering from "
@@ -781,11 +828,11 @@ def risk_assessment(req: RiskAssessmentRequest):
                             case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
-                            "neo4j_signals": cached_risk_assessment.get("neo4j_signals"),
-                            "base_risk_score": cached_risk_assessment.get("base_risk_score"),
-                            "base_risk_tier": cached_risk_assessment.get("base_risk_tier"),
-                            "risk_score": cached_risk_assessment.get("risk_score"),
-                            "risk_tier": cached_risk_assessment.get("risk_tier"),
+                            "neo4j_signals": live_risk.get("neo4j_signals"),
+                            "base_risk_score": live_risk.get("base_risk_score", base_risk_score),
+                            "base_risk_tier": live_risk.get("base_risk_tier", base_risk_tier),
+                            "risk_score": live_risk.get("risk_score"),
+                            "risk_tier": live_risk.get("risk_tier"),
                         },
                         "meta": {
                             "data_source": data_source,
@@ -972,6 +1019,18 @@ def plan(req: PlanRequest):
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
                 )
+                # rule_aware_tasks / rules_fired are ALWAYS a live Neo4j
+                # read, cache hit or not — cached_plan never carries
+                # rule_aware_tasks and case_data never carries rules_fired
+                # at all (see core.persistence_filters.strip_graph_derived_fields),
+                # so a rejected inference removes the task it justified
+                # immediately instead of waiting for a full case reload.
+                subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+                live_findings = fetch_live_graph_findings(req.case_id, subject_id)
+                live_rule_aware_tasks = build_rule_aware_tasks(
+                    live_findings.get("rules_fired", []),
+                    live_findings.get("graph_context") or {},
+                )
                 return {
                     "case_id": req.case_id,
                     "status": "completed",
@@ -981,8 +1040,8 @@ def plan(req: PlanRequest):
                             case_data.get("provenance_trail", []),
                         ),
                         "graph_findings": {
-                            "rule_aware_tasks": cached_plan.get("rule_aware_tasks"),
-                            "rules_fired": fired_rules_only(case_data.get("rules_fired")),
+                            "rule_aware_tasks": live_rule_aware_tasks,
+                            "rules_fired": fired_rules_only(live_findings.get("rules_fired")),
                         },
                         "meta": {
                             "data_source": data_source,
@@ -1003,7 +1062,7 @@ def plan(req: PlanRequest):
         # the rules_fired already in context and hand them to the prompt, so
         # the agent selects investigation steps from both the rule-derived
         # tasks and the BSI catalogue tasks its scoped tool returns.
-        case_data_for_prompt, rule_aware_tasks = prepare_plan_context(case_data)
+        case_data_for_prompt, rule_aware_tasks = prepare_plan_context(req.case_id, case_data)
 
         messages, new_provenance, _ = runner.run_scoped(
             system_prompt=build_plan_prompt(case_data_for_prompt),
@@ -1089,6 +1148,15 @@ def plan(req: PlanRequest):
             status="success",
         )
 
+        # rules_fired for the response is a live Neo4j read, same as the
+        # rule_aware_tasks above — case_data (resolved before this
+        # request) never carries rules_fired at all (see
+        # core.persistence_filters.strip_graph_derived_fields).
+        plan_subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+        live_plan_rules_fired = fetch_live_graph_findings(req.case_id, plan_subject_id).get(
+            "rules_fired", []
+        )
+
         return {
             "case_id": req.case_id,
             "status": "completed",
@@ -1108,7 +1176,7 @@ def plan(req: PlanRequest):
                 # not a graph finding, and it already travels on the plan.
                 "graph_findings": {
                     "rule_aware_tasks": investigation_plan.get("rule_aware_tasks"),
-                    "rules_fired": fired_rules_only(case_data.get("rules_fired")),
+                    "rules_fired": fired_rules_only(live_plan_rules_fired),
                 },
                 "meta": {
                     "data_source": data_source,

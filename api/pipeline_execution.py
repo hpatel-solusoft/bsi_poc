@@ -45,6 +45,139 @@ from semantic_layer.entity_contracts import (
 logger = logging.getLogger(__name__)
 
 
+def fetch_live_graph_findings(
+    case_id: str,
+    subject_id: Optional[str],
+    reload_ai_summary: bool = False,
+) -> Dict[str, Any]:
+    """
+    Fetch THIS request's live network_match_flag / graph_context /
+    graph_signals / rules_fired straight from Neo4j — the Case Summary
+    tab's graph_findings block, and the shared building block every
+    other live-fetch helper in this module (fetch_live_risk_signals,
+    fetch_live_rule_aware_tasks) uses for rules_fired/graph_context.
+
+    Postgres (case_ai_summary_store) and the CS-4 warm CASE_STORE never
+    hold these fields (core.persistence_filters.strip_graph_derived_fields
+    strips them before every write) — this is the only source for them.
+    Called on EVERY /intake request, whether or not this request also
+    invoked the LLM: a cache hit (agent_summary served from the
+    narrative cache, no LLM re-run) still calls this, so an investigator
+    who just rejected an inferred finding sees it reflected immediately
+    instead of reading whatever snapshot happened to exist when the tab
+    was first opened.
+
+    Delegates to run_intake_direct_pipeline (check_network_match +
+    enrich_graph_context) with a synthetic single-key sections dict, so
+    the exact same non-blocking degrade-to-empty behavior applies
+    whether this is called from a fresh LLM turn or a cache-hit reply.
+    """
+    if not subject_id or not str(subject_id).strip():
+        return {
+            "network_match_flag": None,
+            "graph_context": None,
+            "graph_signals": None,
+            "rules_fired": [],
+        }
+    sections: Dict[str, Any] = {"complaint_intelligence": {"subject_primary_id": subject_id}}
+    sections, _ = run_intake_direct_pipeline(case_id, reload_ai_summary, sections, [])
+    return {
+        "network_match_flag": sections.get("network_match_flag"),
+        "graph_context": sections.get("graph_context"),
+        "graph_signals": sections.get("graph_signals"),
+        "rules_fired": sections.get("rules_fired", []),
+    }
+
+
+def fetch_live_similar_cases(case_id: str) -> Dict[str, Any]:
+    """
+    Fetch THIS request's live structural similar-case matches straight
+    from Neo4j (AI-14) — the Similar Cases tab's graph_findings block.
+    Never cached: called on every /similar_cases request, cache hit or
+    not, so the tab reflects the graph as it stands right now rather
+    than whatever matches existed when the narrative write-up was first
+    generated and cached.
+    """
+    try:
+        return find_structural_matches(case_id)["result"]
+    except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+        logger.warning(
+            "structural similar-case matching unavailable for case_id=%s — %s",
+            case_id,
+            exc,
+        )
+        return {
+            "matches": [],
+            "source": "structural_graph",
+            "total_candidates_scored": 0,
+            "unavailable_reason": str(exc),
+        }
+
+
+def fetch_live_risk_signals(
+    case_id: str,
+    subject_id: Optional[str],
+    base_risk_score: Optional[float],
+    base_risk_tier: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Recompute THIS request's live Neo4j graph risk signals (AI-15) on
+    top of the AppWorks base score, without re-running
+    calculate_risk_metrics. base_risk_score/base_risk_tier are the
+    untouched AppWorks values (never graph-augmented) — the only part of
+    risk_assessment that is safe to have come from a cache, since
+    Postgres/CS-4 persist base_risk_score/base_risk_tier under the plain
+    risk_score/risk_tier keys precisely so a cache hit has a clean,
+    un-augmented starting point to re-augment from here (see
+    core.persistence_filters.strip_graph_derived_fields).
+
+    Used both by the fresh-LLM-run path (run_risk_assessment_pipeline)
+    and by the /risk_assessment cache-hit path, so a rejected inference
+    is reflected in risk_score/risk_tier/neo4j_signals immediately —
+    these are never persisted, so this is the only way to obtain them.
+    """
+    base_result = {
+        "risk_score": base_risk_score if base_risk_score is not None else 0.0,
+        "risk_tier": base_risk_tier,
+    }
+    if not subject_id or not str(subject_id).strip():
+        return base_result
+
+    try:
+        rules_fired = fetch_live_graph_findings(case_id, subject_id).get("rules_fired", [])
+        graph_env = apply_graph_risk_signals(case_id, subject_id, base_result, rules_fired)
+        return graph_env["result"]
+    except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+        logger.warning(
+            "graph risk signals unavailable for case_id=%s subject_id=%s — %s; "
+            "returning AppWorks base score only",
+            case_id,
+            subject_id,
+            exc,
+        )
+        degraded = dict(base_result)
+        degraded["neo4j_signals"] = {"unavailable_reason": str(exc)}
+        return degraded
+
+
+def fetch_live_rule_aware_tasks(
+    case_id: str,
+    subject_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Recompute THIS request's live rule-aware task recommendations (AI-16)
+    from Neo4j. Used by both prepare_plan_context (fresh /plan run) and
+    the /plan cache-hit path, so a rejected inference removes the task
+    it justified immediately instead of waiting for a full case reload —
+    rule_aware_tasks is never persisted (core.persistence_filters.
+    strip_graph_derived_fields), so this is the only source for it.
+    """
+    if not subject_id or not str(subject_id).strip():
+        return []
+    findings = fetch_live_graph_findings(case_id, subject_id)
+    return build_rule_aware_tasks(findings.get("rules_fired", []), findings.get("graph_context") or {})
+
+
 def run_intake_direct_pipeline(
     case_id: str,
     reload_ai_summary: bool,
@@ -168,20 +301,7 @@ def run_similar_cases_pipeline(
     # LLM's role is now to EXPLAIN what the graph found, never to select
     # it (Section 8.3). Non-blocking: a graph outage degrades to an
     # empty, clearly-unavailable section rather than failing the route.
-    try:
-        structural = find_structural_matches(case_id)["result"]
-    except (ValueError, GraphUnavailableError, Neo4jError) as exc:
-        logger.warning(
-            "structural similar-case matching unavailable for case_id=%s — %s",
-            case_id,
-            exc,
-        )
-        structural = {
-            "matches": [],
-            "source": "structural_graph",
-            "total_candidates_scored": 0,
-            "unavailable_reason": str(exc),
-        }
+    structural = fetch_live_similar_cases(case_id)
 
     # Inject the computed matches into the case context the prompt
     # serialises, so the LLM explains THESE matches (Turn 2 in Section
@@ -267,11 +387,19 @@ def run_risk_assessment_pipeline(
     subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
     if subject_id:
         try:
+            # rules_fired is fetched LIVE from Neo4j here, never read from
+            # case_data — case_data may be stale (it was resolved before
+            # this request, from the CS-4 warm store or its Postgres
+            # fallback, neither of which caches rules_fired at all — see
+            # core.persistence_filters.strip_graph_derived_fields) and the
+            # compound-escalation signal below must reflect any
+            # reject/revert made since the case was last opened.
+            live_rules_fired = fetch_live_graph_findings(case_id, subject_id).get("rules_fired", [])
             graph_env = apply_graph_risk_signals(
                 case_id,
                 subject_id,
                 risk_assessment,
-                case_data.get("rules_fired", []),
+                live_rules_fired,
             )
             risk_assessment = graph_env["result"]
             # Section 8.4 provenance requirement: keep the AppWorks base
@@ -334,25 +462,27 @@ def run_risk_assessment_pipeline(
 
 
 def prepare_plan_context(
+    case_id: str,
     case_data: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     /plan pre-LLM work (Section 8.5 AI-16). Builds the rule-aware task
-    recommendations from the rules_fired block Context Enrichment (AI-13)
-    already placed in context, and returns the case context to serialise
-    into the plan prompt alongside them.
+    recommendations from a LIVE Neo4j read (fetch_live_rule_aware_tasks),
+    not from whatever rules_fired/graph_context happened to be sitting
+    in case_data — case_data comes from the CS-4 warm store or its
+    Postgres fallback, and neither ever caches those fields (see
+    core.persistence_filters.strip_graph_derived_fields), so trusting
+    them here would silently reintroduce the stale-graph-data bug this
+    module exists to avoid.
 
-    No new database connection and no AppWorks call: Section 8.5 requires
-    this to work entirely from context. A case with no rules_fired yields
-    an empty list, and the plan degrades to generic LLM synthesis exactly
-    as it did before.
+    A case with no resolvable subject_primary_id (or no rules fired)
+    yields an empty list, and the plan degrades to generic LLM synthesis
+    exactly as it did before.
 
     Returns (case_data_for_prompt, rule_aware_tasks).
     """
-    rule_aware_tasks = build_rule_aware_tasks(
-        case_data.get("rules_fired", []),
-        case_data.get("graph_context", {}),
-    )
+    subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
+    rule_aware_tasks = fetch_live_rule_aware_tasks(case_id, subject_id)
     # The LLM selects investigation_steps from BOTH candidate pools: these
     # rule-derived tasks (injected here) and the catalogue tasks it fetches
     # through its own scoped tool.

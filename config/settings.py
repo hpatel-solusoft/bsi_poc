@@ -40,6 +40,42 @@ TOP_LEVEL_SECTIONS = frozenset(
 )
 
 # ----------------------------------------------------------------
+# Neo4j-derived fields that must NEVER be persisted to PostgreSQL
+# (case_ai_summary_store) or reused across requests without a fresh
+# Neo4j read. Case Summary, Similar Cases, Risk Assessment, and
+# Investigation Plan all recompute these live on every request (see
+# api.pipeline_execution.fetch_live_graph_findings /
+# fetch_live_similar_cases / fetch_live_risk_signals /
+# fetch_live_rule_aware_tasks); only the LLM-authored narrative text
+# for each tab (core.case_store.AGENT_SUMMARY_CACHE_KEY) is cached.
+# Enforced centrally by core.persistence_filters.strip_graph_derived_fields.
+# ----------------------------------------------------------------
+
+# investigation.* keys — Case Summary tab's graph findings (AI-12/AI-13).
+GRAPH_DERIVED_INVESTIGATION_KEYS = frozenset(
+    {
+        "network_match_flag",
+        "graph_context",
+        "graph_signals",
+        "rules_fired",
+    }
+)
+
+# Top-level sections that are entirely Neo4j-derived — Similar Cases
+# tab's structural graph matches (AI-14).
+GRAPH_DERIVED_TOP_LEVEL_SECTIONS = frozenset({"similar_cases"})
+
+# risk_assessment.* keys — Risk Assessment tab's graph signal add-ons
+# (AI-15). risk_score/risk_tier are handled separately (see
+# core.persistence_filters.strip_graph_derived_fields) since they are
+# augmented in place rather than added under a new key.
+GRAPH_DERIVED_RISK_ASSESSMENT_KEYS = frozenset({"neo4j_signals"})
+
+# investigation_plan.* keys — Investigation Plan tab's rule-derived
+# task recommendations (AI-16).
+GRAPH_DERIVED_PLAN_KEYS = frozenset({"rule_aware_tasks"})
+
+# ----------------------------------------------------------------
 # Agent Operational Store (PostgreSQL) — Data Persistence and
 # Synchronisation Specification v1.0, Section D.
 # Connection details (POSTGRES_HOST/PORT/DB/USER/PASSWORD or
