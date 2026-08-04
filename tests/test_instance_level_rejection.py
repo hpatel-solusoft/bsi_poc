@@ -148,6 +148,45 @@ class FakeSymmetricEdgeGraph:
             self.rejection_nodes.discard((params["from_key"], params["to_key"]))
             return [{"deleted": 1}]
 
+        # --- AI-30 cascade queries (reasoning_layer/cascade.py) ---
+        # reject_inference/revert_rejection now call cascade.cascade_reject/
+        # cascade_revert immediately after their own write (same session),
+        # which re-checks DOWNSTREAM_DEPENDENTS' condition for every subject
+        # the rejected/reverted instance touches. Rule_01 has Rule_02 as a
+        # downstream dependent (SHARES_EMPLOYER_WITH), so every
+        # reject_inference/revert_rejection call in this test graph now
+        # also issues cascade's own read/write queries below — none of
+        # which this test graph's scenarios ever actually trigger an
+        # auto-invalidation/reinstatement from (every subject here keeps at
+        # least one other active SHARES_EMPLOYER_WITH edge throughout), but
+        # the queries themselves still have to be answered instead of
+        # falling through to the "unexpected query" guard at the bottom.
+        if "RETURN count(r) > 0 AS still_active" in query:
+            subject_id = params["subject_id"]
+            still_active = any(
+                subject_id in pair and status == "active" for pair, status in self.edges.items()
+            )
+            return {"still_active": still_active}
+
+        if "was_auto_invalidated" in query:
+            # This fake graph never models MEMBER_OF_FRAUD_NETWORK at all —
+            # nothing it represents was ever auto-invalidated by cascade,
+            # so _reinstate's guard correctly finds nothing to do.
+            return {"was_auto_invalidated": False}
+
+        if "MEMBER_OF_FRAUD_NETWORK" in query:
+            # This fake graph has no :FraudNetwork nodes at all — a real
+            # Neo4j MATCHing this pattern against it would return zero
+            # rows too, so "nothing to update" is the honest answer, not a
+            # test shortcut. Exercised when cascade's condition re-check
+            # finds a subject (e.g. C, once A-C is its only
+            # SHARES_EMPLOYER_WITH edge and that gets rejected) with no
+            # other active edge of the type Rule_02 reads — the walk then
+            # tries to auto-invalidate Rule_02's membership for that
+            # subject, which correctly no-ops here since this graph never
+            # asserted one in the first place.
+            return {"updated": 0}
+
         raise AssertionError(f"unexpected query in test: {query.strip()[:200]}")
 
     def _locate_and_set(self, params: Dict[str, Any], new_status: str, from_status: str):

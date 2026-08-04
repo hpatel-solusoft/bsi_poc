@@ -219,8 +219,42 @@ def test_rules_fired():
 
     def responder(query, params):
         if "SHARES_EMPLOYER_WITH" in query:
-            return {"n": 2, "confidences": ["Medium", "High"], "corroborated": True}
-        return {"n": 0, "confidences": [], "corroborated": False}
+            # Two distinct active instances for the same rule — the row
+            # shape rules_fired.py's own Cypher actually returns (see
+            # _REL_RULES["Rule_01_Shared_Employer"]), not a pre-aggregated
+            # summary — build_rules_fired() does its own confidence/
+            # corroborated roll-up over these rows via _summarise().
+            return [
+                {
+                    "subject_id": "S1",
+                    "first_name": "Primary",
+                    "last_name": "Subject",
+                    "related_subject_id": "S2",
+                    "related_first_name": "Related",
+                    "related_last_name": "Two",
+                    "confidence": "Medium",
+                    "corroborated": False,
+                    "status": "active",
+                    "asserted_at": "2026-01-01T00:00:00+00:00",
+                    "rejection": {},
+                    "detail": {"fein": "000000001"},
+                },
+                {
+                    "subject_id": "S1",
+                    "first_name": "Primary",
+                    "last_name": "Subject",
+                    "related_subject_id": "S3",
+                    "related_first_name": "Related",
+                    "related_last_name": "Three",
+                    "confidence": "High",
+                    "corroborated": True,
+                    "status": "active",
+                    "asserted_at": "2026-01-02T00:00:00+00:00",
+                    "rejection": {},
+                    "detail": {"fein": "000000002"},
+                },
+            ]
+        return []
 
     session = FakeSession(responder)
     scope = {

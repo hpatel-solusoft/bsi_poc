@@ -21,7 +21,13 @@ Contract, per entry (A.4):
 Everything beyond those four fields (evidence_count, instances, wave,
 skipped_reason) is additive and safe for existing consumers to ignore —
 but it is what makes /rule_audit and the investigator-facing "why did
-this fire" panel possible without a second round of queries.
+this fire" panel possible without a second round of queries. Each entry
+in `instances` additionally carries asserted_at, subject_id_a,
+subject_id_b, relationship_type and match_id (frontend follow-up to
+AI-28/AI-33) — the same instance-targeting fields rule_audit.py already
+puts on every row it returns — so a caller can POST /reject_inference
+or /revert_rejection straight off an /intake response without a second
+call to GET /rule_audit first.
 
 Does NOT own: rule execution (rule_engine.py) or rule content.
 """
@@ -31,8 +37,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from reasoning_layer import rule_inference, rule_registry
+from reasoning_layer import rejection, rule_inference, rule_registry
 from reasoning_layer.neo4j_client import get_session
+from reasoning_layer.rejection import build_match_id
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +61,7 @@ _REL_RULES: Dict[str, str] = {
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
-               coalesce(r.status, "active") AS status,
+               coalesce(r.status, "active") AS status, toString(r.asserted_at) AS asserted_at,
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
@@ -74,7 +81,7 @@ _REL_RULES: Dict[str, str] = {
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
-               coalesce(r.status, "active") AS status,
+               coalesce(r.status, "active") AS status, toString(r.asserted_at) AS asserted_at,
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
@@ -91,7 +98,7 @@ _REL_RULES: Dict[str, str] = {
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
-               coalesce(r.status, "active") AS status,
+               coalesce(r.status, "active") AS status, toString(r.asserted_at) AS asserted_at,
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
@@ -106,7 +113,7 @@ _REL_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                c.case_id AS related_case_id,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
-               coalesce(r.status, "active") AS status,
+               coalesce(r.status, "active") AS status, toString(r.asserted_at) AS asserted_at,
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
@@ -141,6 +148,7 @@ _REL_RULES: Dict[str, str] = {
              CASE WHEN any(rel IN scope_rels
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
              head([rel IN scope_rels
                    WHERE coalesce(rel.status, "active") = "rejected" |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
@@ -158,10 +166,10 @@ _REL_RULES: Dict[str, str] = {
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, status, rejection, m, mm,
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active")
@@ -169,7 +177,7 @@ _REL_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
-               status AS status, rejection AS rejection,
+               status AS status, toString(asserted_at_raw) AS asserted_at, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -198,6 +206,7 @@ _REL_RULES: Dict[str, str] = {
              CASE WHEN any(rel IN scope_rels
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
              head([rel IN scope_rels
                    WHERE coalesce(rel.status, "active") = "rejected" |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
@@ -215,10 +224,10 @@ _REL_RULES: Dict[str, str] = {
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, status, rejection, m, mm,
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active")
@@ -226,7 +235,7 @@ _REL_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
-               status AS status, rejection AS rejection,
+               status AS status, toString(asserted_at_raw) AS asserted_at, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -255,6 +264,7 @@ _REL_RULES: Dict[str, str] = {
              CASE WHEN any(rel IN scope_rels
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
              head([rel IN scope_rels
                    WHERE coalesce(rel.status, "active") = "rejected" |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
@@ -272,10 +282,10 @@ _REL_RULES: Dict[str, str] = {
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, status, rejection, m, mm,
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active")
@@ -283,7 +293,7 @@ _REL_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
-               status AS status, rejection AS rejection,
+               status AS status, toString(asserted_at_raw) AS asserted_at, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -312,6 +322,7 @@ _REL_RULES: Dict[str, str] = {
              CASE WHEN any(rel IN scope_rels
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
+             head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
              head([rel IN scope_rels
                    WHERE coalesce(rel.status, "active") = "rejected" |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
@@ -329,10 +340,10 @@ _REL_RULES: Dict[str, str] = {
         OPTIONAL MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n)
         WHERE coalesce(mm.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (m)-[:APPEARS_IN_CASE]->(mc:Case)-[:HAS_ALLEGATION]->(mal:Allegation)
-        WITH a, n, confidence, corroborated, status, rejection, m, mm,
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        WITH a, n, confidence, corroborated, status, rejection, collect(DISTINCT {
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active")
@@ -340,7 +351,7 @@ _REL_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
                confidence AS confidence, corroborated AS corroborated,
-               status AS status, rejection AS rejection,
+               status AS status, toString(asserted_at_raw) AS asserted_at, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
@@ -354,7 +365,7 @@ _REL_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                c.case_id AS related_case_id,
                r.confidence AS confidence, coalesce(r.corroborated, false) AS corroborated,
-               coalesce(r.status, "active") AS status,
+               coalesce(r.status, "active") AS status, toString(r.asserted_at) AS asserted_at,
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
@@ -371,7 +382,7 @@ _REL_RULES: Dict[str, str] = {
                other.subject_id AS related_subject_id,
                other.first_name AS related_first_name, other.last_name AS related_last_name,
                "High" AS confidence, true AS corroborated,
-               coalesce(r.status, "active") AS status,
+               coalesce(r.status, "active") AS status, toString(r.asserted_at) AS asserted_at,
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
@@ -400,6 +411,7 @@ _PROP_RULES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                a.cross_case_confidence AS confidence, false AS corroborated,
                CASE WHEN a.cross_case_rejected = true THEN "rejected" ELSE "active" END AS status,
+               toString(a.cross_case_asserted_at) AS asserted_at,
                {rejected_by: a.cross_case_rejected_by, rejected_at: a.cross_case_rejected_at,
                 reason: a.cross_case_rejection_reason, reverted_by: a.cross_case_reverted_by,
                 reverted_at: a.cross_case_reverted_at,
@@ -412,9 +424,10 @@ _PROP_RULES: Dict[str, str] = {
         WHERE c.case_id = $case_id
           AND c.risk_escalation_source_rule = "Rule_08_Recidivist_Escalation"
           AND coalesce(c.risk_escalation_status, "active") IN ["active", "rejected"]
-        RETURN c.case_id AS related_case_id,
+        RETURN c.risk_escalation_subject_id AS subject_id, c.case_id AS related_case_id,
                c.risk_escalation_confidence AS confidence, false AS corroborated,
                coalesce(c.risk_escalation_status, "active") AS status,
+               toString(c.risk_escalation_asserted_at) AS asserted_at,
                {rejected_by: c.risk_escalation_rejected_by,
                 rejected_at: c.risk_escalation_rejected_at,
                 reason: c.risk_escalation_rejection_reason,
@@ -439,9 +452,11 @@ _PROP_RULES: Dict[str, str] = {
         WITH a, c, al, head(collect(e.name)) AS employer_name
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                c.case_id AS related_case_id, al.allegation_type AS allegation_type,
+               al.allegation_id AS allegation_id,
                al.wage_corroboration_confidence AS confidence,
                coalesce(al.wage_corroboration_verified, false) AS corroborated,
                coalesce(al.wage_corroboration_status, "active") AS status,
+               toString(al.wage_corroboration_asserted_at) AS asserted_at,
                {rejected_by: al.wage_corroboration_rejected_by,
                 rejected_at: al.wage_corroboration_rejected_at,
                 reason: al.wage_corroboration_rejection_reason,
@@ -457,9 +472,10 @@ _PROP_RULES: Dict[str, str] = {
         MATCH (c:Case {case_id: $case_id})
         WHERE c.fasttrack_recommendation_rule = "Rule_13_FastTrack_Escalation"
           AND coalesce(c.fasttrack_recommendation_status, "active") IN ["active", "rejected"]
-        RETURN c.case_id AS related_case_id,
+        RETURN $subject_id AS subject_id, c.case_id AS related_case_id,
                c.fasttrack_recommendation_confidence AS confidence, false AS corroborated,
                coalesce(c.fasttrack_recommendation_status, "active") AS status,
+               toString(c.fasttrack_recommendation_asserted_at) AS asserted_at,
                {rejected_by: c.fasttrack_recommendation_rejected_by,
                 rejected_at: c.fasttrack_recommendation_rejected_at,
                 reason: c.fasttrack_recommendation_rejection_reason,
@@ -493,7 +509,59 @@ _INSTANCE_KEYS = (
     "related_case_id",
     "related_network_key",
     "allegation_type",
+    "allegation_id",
 )
+
+
+def _stamp_member_match_ids(rule_id: str, detail: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    AI-28 completeness gap: the network family (Rule_02/04/06/09)
+    collapses every member into ONE instance row for one readable
+    narrative line (see the _REL_RULES network queries' own "Collapse
+    to ONE row per network" comment) — but that meant the row's single
+    top-level match_id could only ever target the ANCHOR member
+    (row["subject_id"]), unlike reasoning_layer/rule_audit.py and
+    reasoning_layer/fraud_network.py, which return one row PER member
+    and so already let an investigator reject/revert ANY specific
+    member directly. This stamps a member-specific match_id onto every
+    entry in detail["members"], decodable back to (rule_id, that
+    member's own subject_id, the network composite key) — byte-
+    identical to what rule_audit.py would build for that same member.
+
+    Degrades to leaving a member's match_id as None (never raises)
+    when network_type or network_key is missing or a member has no
+    subject_id — a display concern must never crash the whole
+    rules_fired build over one incomplete row. A no-op, returning
+    `detail` completely unchanged, when there is no "members" list at
+    all (every non-network-family rule's detail, and a malformed
+    network-family row).
+
+    Returns a NEW detail dict with a NEW members list of NEW member
+    dicts — the row/detail this module was handed, and its own
+    "members" list and dicts, are never mutated in place.
+    """
+    members = detail.get("members")
+    if not members:
+        return detail
+
+    network_type = detail.get("network_type")
+    network_key = detail.get("network_key")
+    network_composite = f"{network_type}:{network_key}" if network_type and network_key else None
+
+    stamped_members = []
+    for member in members:
+        member_copy = dict(member)
+        member_subject_id = member_copy.get("subject_id")
+        member_copy["match_id"] = (
+            build_match_id(rule_id, member_subject_id, network_composite)
+            if member_subject_id and network_composite
+            else None
+        )
+        stamped_members.append(member_copy)
+
+    new_detail = dict(detail)
+    new_detail["members"] = stamped_members
+    return new_detail
 
 
 def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -505,13 +573,46 @@ def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
     the employer FEIN, the network members. Without it "Rule 3 fired" tells
     an investigator that something matched but not what, which is not
     enough to accept or reject the inference.
+
+    AI-30 / frontend follow-up: also carries `asserted_at`, `subject_id_a`,
+    `subject_id_b`, `relationship_type` and `match_id` — exactly the fields
+    reasoning_layer/rule_audit.py already stamps onto every row it returns
+    — so the frontend can POST /reject_inference or /revert_rejection
+    straight off an /intake response's rules_fired.instances without a
+    second round trip to GET /rule_audit first just to obtain a match_id.
+    subject_id_a/subject_id_b/match_id are computed via
+    reasoning_layer.rejection.instance_endpoints/build_match_id, the same
+    per-rule-family encoding rule_audit.py and fraud_network.py already
+    use — see that function's docstring for the family-by-family mapping.
+    Omitted entirely for rule_ids rejection.py does not track as
+    rejectable (Rule 14, a confidence modifier with no independent
+    instance of its own), rather than emitting a match_id that would
+    always 404 if a caller tried to use it.
+
+    For the case-flag family (Rule 8/13), subject_id_a comes straight
+    off row["subject_id"] — Rule 8's query reads its own
+    risk_escalation_subject_id property; Rule 13's query returns the
+    $subject_id query parameter build_rules_fired binds from
+    scope["primary_subject_id"] (Rule 13 stamps no escalating-subject
+    id onto :Case itself — see that query's own comment). Either way,
+    no separate parameter is needed here: row["subject_id"] is already
+    whatever the right value is, or None if a primary subject was never
+    resolved, in which case match_id degrades to None rather than
+    building a token nobody could ever act on.
+
+    For the network family (Rule 2/4/6/9), every member in
+    detail["members"] additionally gets its OWN match_id via
+    _stamp_member_match_ids — see that function's docstring.
     """
     instance = {key: row[key] for key in _INSTANCE_KEYS if row.get(key) is not None}
     detail = {k: v for k, v in (row.get("detail") or {}).items() if v is not None and v != []}
     if detail:
+        detail = _stamp_member_match_ids(rule_id, detail)
         instance["detail"] = detail
     instance["confidence"] = row.get("confidence") or "Unresolved"
     instance["corroborated"] = bool(row.get("corroborated", False))
+    if row.get("asserted_at"):
+        instance["asserted_at"] = row["asserted_at"]
 
     # --- rejection state (Human-in-the-Loop, Section 5.2) ---
     # A rejected instance STAYS in the block. It used to be filtered out of
@@ -534,6 +635,24 @@ def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
     for name_key in ("first_name", "last_name", "related_first_name", "related_last_name"):
         if row.get(name_key) is not None:
             instance[name_key] = row[name_key]
+
+    # --- reject/revert targeting fields (v3 contract, AI-28/AI-33) ---
+    subject_id_a, subject_id_b = rejection.instance_endpoints(
+        rule_id,
+        case_id=row.get("related_case_id"),
+        subject_id=row.get("subject_id"),
+        related_subject_id=row.get("related_subject_id"),
+        related_case_id=row.get("related_case_id"),
+        network_type=detail.get("network_type"),
+        network_key=detail.get("network_key"),
+        allegation_id=row.get("allegation_id"),
+    )
+    if subject_id_a:
+        instance["subject_id_a"] = subject_id_a
+        instance["subject_id_b"] = subject_id_b
+        instance["relationship_type"] = rule_inference.rule_label(rule_id)
+        instance["match_id"] = build_match_id(rule_id, subject_id_a, subject_id_b)
+
     return rule_inference.enrich_instance(rule_id, instance)
 
 
@@ -652,6 +771,13 @@ def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, A
         "scope_subject_ids": scope["scope_subject_ids"],
         "scope_case_ids": scope["scope_case_ids"],
         "case_id": scope["case_id"],
+        # Rule 13 stamps no escalating-subject id onto :Case itself (see
+        # that query's own comment) — its RETURN reads this bound
+        # $subject_id parameter instead, so row["subject_id"] is
+        # populated for it exactly like every other rule, and
+        # _instance() needs no separate case_id/primary_subject_id
+        # threading to build its match_id.
+        "subject_id": scope.get("primary_subject_id"),
     }
 
     block: List[Dict[str, Any]] = []

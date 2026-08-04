@@ -99,9 +99,11 @@ _CASE_FLAG_FIELDS: Dict[str, Dict[str, Optional[str]]] = {
         "auto_invalidated": "risk_escalation_auto_invalidated",
         "invalidated_by": "risk_escalation_invalidated_by_rule_id",
         "invalidated_reason": "risk_escalation_invalidated_reason",
+        "invalidated_by_investigator": "risk_escalation_invalidated_by_investigator_id",
         "reinstated_by": "risk_escalation_reinstated_by_rule_id",
         "reinstated_reason": "risk_escalation_reinstated_reason",
         "reinstated_at": "risk_escalation_reinstated_at",
+        "reinstated_by_investigator": "risk_escalation_reinstated_by_investigator_id",
         "subject_field": "risk_escalation_subject_id",
     },
     "Rule_13_FastTrack_Escalation": {
@@ -109,9 +111,11 @@ _CASE_FLAG_FIELDS: Dict[str, Dict[str, Optional[str]]] = {
         "auto_invalidated": "fasttrack_recommendation_auto_invalidated",
         "invalidated_by": "fasttrack_recommendation_invalidated_by_rule_id",
         "invalidated_reason": "fasttrack_recommendation_invalidated_reason",
+        "invalidated_by_investigator": "fasttrack_recommendation_invalidated_by_investigator_id",
         "reinstated_by": "fasttrack_recommendation_reinstated_by_rule_id",
         "reinstated_reason": "fasttrack_recommendation_reinstated_reason",
         "reinstated_at": "fasttrack_recommendation_reinstated_at",
+        "reinstated_by_investigator": "fasttrack_recommendation_reinstated_by_investigator_id",
         # Rule 13 stamps no escalating-subject id onto :Case — it is
         # scoped to the case's PRIMARY subject only, not a subject the
         # graph records anywhere on the fact itself (see
@@ -158,6 +162,7 @@ SET r.status = "rejected",
     r.auto_invalidated = true,
     r.invalidated_by_rule_id = $upstream_rule_id,
     r.invalidated_reason = $reason,
+    r.invalidated_by_investigator_id = $investigator_id,
     r.rejected_at = $timestamp
 RETURN count(r) AS updated
 """
@@ -177,8 +182,9 @@ WHERE coalesce(r.status, "active") = "active"
 SET r.auto_invalidated = false,
     r.reinstated_by_rule_id = $upstream_rule_id,
     r.reinstated_reason = $reason,
+    r.reinstated_by_investigator_id = $investigator_id,
     r.reinstated_at = $timestamp
-REMOVE r.invalidated_by_rule_id, r.invalidated_reason
+REMOVE r.invalidated_by_rule_id, r.invalidated_reason, r.invalidated_by_investigator_id
 """
 
 _MEMBERSHIP_IS_ACTIVE_QUERY = """
@@ -197,8 +203,9 @@ SET r.status = "active",
     r.auto_invalidated = false,
     r.reinstated_by_rule_id = $upstream_rule_id,
     r.reinstated_reason = $reason,
+    r.reinstated_by_investigator_id = $investigator_id,
     r.reinstated_at = $timestamp
-REMOVE r.invalidated_by_rule_id, r.invalidated_reason
+REMOVE r.invalidated_by_rule_id, r.invalidated_reason, r.invalidated_by_investigator_id
 RETURN count(r) AS updated
 """
 
@@ -211,12 +218,21 @@ def _auto_invalidate(
     upstream_rule_id: str,
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str],
 ) -> bool:
     """
     Returns True if something was actually changed (the fact was active
     and is now auto-invalidated) — False if there was nothing to
     invalidate, e.g. it was already rejected (manually or by an earlier
     hop of this same walk).
+
+    `investigator_id` is the investigator who triggered the UPSTREAM
+    reject that caused this hop — stamped alongside invalidated_by_
+    rule_id/invalidated_reason so a downstream fact's own auto-
+    invalidation audit trail names who is ultimately responsible, not
+    just which rule. It is never a second, independent investigator
+    decision on the downstream fact itself (that is a manual /reject_
+    inference call, tracked separately via a real :Rejection node).
     """
     if downstream_rule_id in _NETWORK_TYPE_BY_RULE_ID:
         record = session.run(
@@ -226,6 +242,7 @@ def _auto_invalidate(
             upstream_rule_id=upstream_rule_id,
             reason=reason,
             timestamp=timestamp,
+            investigator_id=investigator_id,
         ).single()
         return bool(record and record["updated"])
 
@@ -239,7 +256,8 @@ def _auto_invalidate(
         SET c.{fields['status']} = "rejected",
             c.{fields['auto_invalidated']} = true,
             c.{fields['invalidated_by']} = $upstream_rule_id,
-            c.{fields['invalidated_reason']} = $reason
+            c.{fields['invalidated_reason']} = $reason,
+            c.{fields['invalidated_by_investigator']} = $investigator_id
         RETURN count(c) AS updated
         """
         record = session.run(
@@ -248,6 +266,7 @@ def _auto_invalidate(
             subject_id=subject_id,
             upstream_rule_id=upstream_rule_id,
             reason=reason,
+            investigator_id=investigator_id,
         ).single()
         return bool(record and record["updated"])
 
@@ -322,6 +341,7 @@ def _direct_reinstate(
     upstream_rule_id: str,
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str],
 ) -> bool:
     """
     Fallback used only when re-running downstream_rule_id's own write
@@ -342,6 +362,7 @@ def _direct_reinstate(
             upstream_rule_id=upstream_rule_id,
             reason=reason,
             timestamp=timestamp,
+            investigator_id=investigator_id,
         ).single()
         return bool(record and record["updated"])
 
@@ -354,12 +375,18 @@ def _direct_reinstate(
             c.{fields['auto_invalidated']} = false,
             c.{fields['reinstated_by']} = $upstream_rule_id,
             c.{fields['reinstated_reason']} = $reason,
+            c.{fields['reinstated_by_investigator']} = $investigator_id,
             c.{fields['reinstated_at']} = $timestamp
-        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']}
+        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']}, c.{fields['invalidated_by_investigator']}
         RETURN count(c) AS updated
         """
         record = session.run(
-            query, case_id=case_id, upstream_rule_id=upstream_rule_id, reason=reason, timestamp=timestamp
+            query,
+            case_id=case_id,
+            upstream_rule_id=upstream_rule_id,
+            reason=reason,
+            timestamp=timestamp,
+            investigator_id=investigator_id,
         ).single()
         return bool(record and record["updated"])
 
@@ -374,6 +401,7 @@ def _mark_reinstated(
     upstream_rule_id: str,
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str],
 ) -> None:
     """
     Runs immediately after rule_engine.execute_rules has re-fired
@@ -401,6 +429,7 @@ def _mark_reinstated(
             upstream_rule_id=upstream_rule_id,
             reason=reason,
             timestamp=timestamp,
+            investigator_id=investigator_id,
         )
         return
 
@@ -411,20 +440,25 @@ def _mark_reinstated(
         SET c.{fields['auto_invalidated']} = false,
             c.{fields['reinstated_by']} = $upstream_rule_id,
             c.{fields['reinstated_reason']} = $reason,
+            c.{fields['reinstated_by_investigator']} = $investigator_id,
             c.{fields['reinstated_at']} = $timestamp
-        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']}
+        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']}, c.{fields['invalidated_by_investigator']}
         """
-        session.run(query, case_id=case_id, upstream_rule_id=upstream_rule_id, reason=reason, timestamp=timestamp)
+        session.run(
+            query,
+            case_id=case_id,
+            upstream_rule_id=upstream_rule_id,
+            reason=reason,
+            timestamp=timestamp,
+            investigator_id=investigator_id,
+        )
         return
-
-    if downstream_rule_id in _CASE_FLAG_FIELDS:
-        fields = _CASE_FLAG_FIELDS[downstream_rule_id]
-        query = f"""
-        MATCH (c:Case {{case_id: $case_id}})
-        SET c.{fields['auto_invalidated']} = false
-        REMOVE c.{fields['invalidated_by']}
-        """
-        session.run(query, case_id=case_id)
+    # Every recognized downstream target is handled by one of the two
+    # branches above (_NETWORK_TYPE_BY_RULE_ID / _CASE_FLAG_FIELDS) — the
+    # same two maps _auto_invalidate and _direct_reinstate dispatch on.
+    # Falling through here would mean DOWNSTREAM_DEPENDENTS names a rule
+    # neither map knows about, which _auto_invalidate already logs a
+    # warning for and refuses to touch; there is nothing left to mark.
 
 
 _HAS_MANUAL_REJECTION_QUERY = """
@@ -493,6 +527,7 @@ def _reinstate(
     upstream_rule_id: str,
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str],
 ) -> bool:
     """
     Re-run downstream_rule_id's REAL write query for subject_id first —
@@ -568,7 +603,9 @@ def _reinstate(
     writes = int(record["writes"]) if record and record.get("writes") else 0
 
     if _is_downstream_fact_active(session, case_id, downstream_rule_id, subject_id):
-        _mark_reinstated(session, case_id, downstream_rule_id, subject_id, upstream_rule_id, reason, timestamp)
+        _mark_reinstated(
+            session, case_id, downstream_rule_id, subject_id, upstream_rule_id, reason, timestamp, investigator_id
+        )
         return True
 
     if _has_manual_rejection(session, case_id, downstream_rule_id, subject_id):
@@ -596,7 +633,9 @@ def _reinstate(
         case_id,
         subject_id,
     )
-    changed = _direct_reinstate(session, case_id, downstream_rule_id, subject_id, upstream_rule_id, reason, timestamp)
+    changed = _direct_reinstate(
+        session, case_id, downstream_rule_id, subject_id, upstream_rule_id, reason, timestamp, investigator_id
+    )
     if not changed:
         logger.warning(
             "cascade: reinstate FAILED for case_id=%s rule_id=%s subject_id=%s — "
@@ -617,6 +656,7 @@ def _walk(
     subject_ids: List[str],
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str],
     direction: str,
     changes: List[Dict[str, Any]],
     depth: int = 0,
@@ -636,7 +676,14 @@ def _walk(
 
             if direction == "reject" and not condition_holds:
                 changed = _auto_invalidate(
-                    session, case_id, downstream_rule_id, subject_id, upstream_rule_id, reason, timestamp
+                    session,
+                    case_id,
+                    downstream_rule_id,
+                    subject_id,
+                    upstream_rule_id,
+                    reason,
+                    timestamp,
+                    investigator_id,
                 )
                 if changed:
                     changes.append(
@@ -646,16 +693,32 @@ def _walk(
                             "action": "auto_invalidated",
                             "invalidated_by_rule_id": upstream_rule_id,
                             "reason": reason,
+                            # Full audit parity with a manual rejection's
+                            # own rejected_by/rejected_at fields — the
+                            # investigator who triggered the UPSTREAM
+                            # reject that caused this hop, and exactly
+                            # when this hop happened (never the upstream
+                            # rejected_at repeated blindly down every hop
+                            # of a multi-level chain, even though the
+                            # upstream call passes one shared `timestamp`
+                            # into every hop of a single cascade walk —
+                            # see reject_inference/revert_rejection, which
+                            # compute `timestamp` once and reuse it for
+                            # the whole walk).
+                            "investigator_id": investigator_id,
+                            "changed_at": timestamp,
                         }
                     )
                     logger.info(
                         "cascade: AUTO-INVALIDATED case_id=%s rule_id=%s subject_id=%s "
-                        "(condition broke: %s no longer active) invalidated_by=%s reason=%r",
+                        "(condition broke: %s no longer active) invalidated_by=%s "
+                        "investigator_id=%s reason=%r",
                         case_id,
                         downstream_rule_id,
                         subject_id,
                         relationship_type,
                         upstream_rule_id,
+                        investigator_id,
                         reason,
                     )
                     # Same original reason carries through every hop —
@@ -669,6 +732,7 @@ def _walk(
                         [subject_id],
                         reason,
                         timestamp,
+                        investigator_id,
                         direction,
                         changes,
                         depth + 1,
@@ -676,7 +740,14 @@ def _walk(
 
             elif direction == "revert" and condition_holds:
                 changed = _reinstate(
-                    session, case_id, downstream_rule_id, subject_id, upstream_rule_id, reason, timestamp
+                    session,
+                    case_id,
+                    downstream_rule_id,
+                    subject_id,
+                    upstream_rule_id,
+                    reason,
+                    timestamp,
+                    investigator_id,
                 )
                 if changed:
                     changes.append(
@@ -686,15 +757,18 @@ def _walk(
                             "action": "reinstated",
                             "invalidated_by_rule_id": None,
                             "reason": reason,
+                            "investigator_id": investigator_id,
+                            "changed_at": timestamp,
                         }
                     )
                     logger.info(
                         "cascade: REINSTATED case_id=%s rule_id=%s subject_id=%s "
-                        "(condition restored: %s active again) reason=%r",
+                        "(condition restored: %s active again) investigator_id=%s reason=%r",
                         case_id,
                         downstream_rule_id,
                         subject_id,
                         relationship_type,
+                        investigator_id,
                         reason,
                     )
                     _walk(
@@ -704,6 +778,7 @@ def _walk(
                         [subject_id],
                         reason,
                         timestamp,
+                        investigator_id,
                         direction,
                         changes,
                         depth + 1,
@@ -717,6 +792,7 @@ def cascade_reject(
     affected_subject_ids: List[str],
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Call once, immediately after reasoning_layer.rejection.reject_inference's
@@ -730,15 +806,22 @@ def cascade_reject(
     threaded onto every downstream fact this walk auto-invalidates
     (invalidated_reason), so a caller looking at the DOWNSTREAM fact
     alone can see why it's rejected without having to separately look
-    up the upstream rule's own rejection record.
+    up the upstream rule's own rejection record. `investigator_id` is
+    the same investigator who issued the upstream reject — stamped
+    onto every downstream fact's own invalidated_by_investigator_id
+    field, and echoed back on every entry in the returned list, so a
+    caller never has to cross-reference the upstream rejection record
+    just to learn who is responsible for a cascaded change.
 
     Returns a list of {rule_id, subject_id, action: "auto_invalidated",
-    invalidated_by_rule_id, reason} records — always non-silent, even
-    when nothing needed to change (an empty list, never a suppressed
-    side effect the caller can't see).
+    invalidated_by_rule_id, investigator_id, changed_at, reason}
+    records — always non-silent, even when nothing needed to change (an
+    empty list, never a suppressed side effect the caller can't see).
     """
     changes: List[Dict[str, Any]] = []
-    _walk(session, case_id, upstream_rule_id, affected_subject_ids, reason, timestamp, "reject", changes)
+    _walk(
+        session, case_id, upstream_rule_id, affected_subject_ids, reason, timestamp, investigator_id, "reject", changes
+    )
     return changes
 
 
@@ -749,6 +832,7 @@ def cascade_revert(
     affected_subject_ids: List[str],
     reason: str,
     timestamp: str,
+    investigator_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     The exact mirror of cascade_reject — see the module docstring's
@@ -759,8 +843,14 @@ def cascade_revert(
     investigator's own reason text for the upstream revert — threaded
     onto every downstream fact this walk reinstates
     (reinstated_reason), the same way cascade_reject threads the
-    rejection reason onto invalidated_reason.
+    rejection reason onto invalidated_reason. `investigator_id` mirrors
+    cascade_reject's own — the investigator who issued the upstream
+    revert, stamped onto every downstream fact's own
+    reinstated_by_investigator_id field and echoed on every returned
+    change entry.
     """
     changes: List[Dict[str, Any]] = []
-    _walk(session, case_id, upstream_rule_id, affected_subject_ids, reason, timestamp, "revert", changes)
+    _walk(
+        session, case_id, upstream_rule_id, affected_subject_ids, reason, timestamp, investigator_id, "revert", changes
+    )
     return changes

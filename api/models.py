@@ -308,6 +308,14 @@ class CascadeChange(BaseModel):
     multi-hop chain (Rule 1 -> Rule 2 -> Rule 8 all show the SAME
     reason, the one given for Rule 1), so a caller looking at any one
     downstream fact can see why it changed without a second lookup.
+    investigator_id is the investigator who issued the UPSTREAM reject/
+    revert that triggered this cascade hop (the same person named on
+    the top-level rejected_items/reverted_items entry, threaded down
+    every hop of a multi-level chain) — full audit parity with a
+    manually-rejected fact's own rejected_by field. changed_at is when
+    this specific hop was written (shared across every hop of one
+    cascade walk, since the whole walk happens inside the same reject/
+    revert call and is timestamped once).
     """
 
     rule_id: str
@@ -315,6 +323,8 @@ class CascadeChange(BaseModel):
     action: str
     invalidated_by_rule_id: Optional[str] = None
     reason: Optional[str] = None
+    investigator_id: Optional[str] = None
+    changed_at: Optional[str] = None
 
 
 class RevertRejectionResponse(BaseModel):
@@ -421,6 +431,7 @@ class RejectInferenceResponse(BaseModel):
     rejected_items: List[RejectedItem] = []
     rejected_at: str
     cascade_changes: List[CascadeChange] = []
+    model_config = {"extra": "allow"}
 
 
 # -----------------------------------------------------------------------

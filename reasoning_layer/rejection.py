@@ -216,6 +216,81 @@ def decode_match_id(match_id: str) -> Tuple[str, Optional[str], Optional[str]]:
     return rule_id, subject_id_a, subject_id_b
 
 
+def instance_endpoints(
+    rule_id: str,
+    *,
+    case_id: Optional[str] = None,
+    subject_id: Optional[str] = None,
+    related_subject_id: Optional[str] = None,
+    related_case_id: Optional[str] = None,
+    network_type: Optional[str] = None,
+    network_key: Optional[str] = None,
+    allegation_id: Optional[str] = None,
+    primary_subject_id: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Public helper used by reasoning_layer/rules_fired.py to compute the
+    same (subject_id_a, subject_id_b) pair reasoning_layer/rule_audit.py
+    and reasoning_layer/fraud_network.py already stamp onto every row/
+    edge they return — from the different row shape rules_fired.py's
+    own per-rule Cypher returns (subject_id/related_subject_id/
+    related_case_id/detail.network_type+network_key/allegation_id,
+    rather than rule_audit.py's own subject_id_a/subject_id_b columns).
+
+    build_match_id(rule_id, *instance_endpoints(...)) called on the
+    result is byte-for-byte the same token /rule_audit and
+    /fraud_network would issue for the identical fact — this is what
+    lets the frontend reject/revert directly off the /intake response's
+    rules_fired instances instead of making a second round trip to
+    /rule_audit first just to obtain a match_id.
+
+    This function mirrors _RULE_SPECS' family assignments exactly (the
+    per-family shape is the SAME encoding knowledge the module docstring
+    says lives in exactly one place — _RULE_SPECS itself; this is a
+    read-only derivation from it, not a second copy of the family list)
+    — see the family-by-family mapping below against
+    reasoning_layer/rule_audit.py's _REL_QUERIES/_PROP_QUERIES for the
+    side-by-side comparison:
+
+      symmetric_edge (1/3/5)    -> (subject_id, related_subject_id)
+      subject_case_edge (7/10)  -> (subject_id, related_case_id)
+      network_edge (2/4/6/9)    -> (subject_id, "<network_type>:<network_key>")
+      subject_flag (11)         -> (subject_id, None)
+      case_flag (8/13)          -> (subject_id or primary_subject_id, case_id)
+        Rule 8 stamps its own escalating subject onto the row
+        (subject_id); Rule 13 does not (see rules/wave2/
+        rule_13_fasttrack_escalation.cypher — it is scoped to the
+        PRIMARY subject only), so subject_id_a falls back to
+        primary_subject_id for it, exactly like
+        _BULK_REJECT_CASE_FLAG's Rule 13 branch does.
+      allegation_flag (12)      -> (subject_id, allegation_id)
+
+    Returns (None, None) for a rule_id this module does not track as
+    rejectable (e.g. Rule_14, a confidence modifier with no independent
+    instance of its own) — callers should skip building a match_id in
+    that case rather than passing a nonsense one through.
+    """
+    spec = _RULE_SPECS.get(rule_id)
+    if spec is None:
+        return None, None
+
+    if spec.family == _FAMILY_SYMMETRIC_EDGE:
+        return subject_id, related_subject_id
+    if spec.family == _FAMILY_SUBJECT_CASE_EDGE:
+        return subject_id, related_case_id
+    if spec.family == _FAMILY_NETWORK_EDGE:
+        if network_type and network_key:
+            return subject_id, f"{network_type}:{network_key}"
+        return subject_id, None
+    if spec.family == _FAMILY_SUBJECT_FLAG:
+        return subject_id, None
+    if spec.family == _FAMILY_CASE_FLAG:
+        return (subject_id or primary_subject_id), case_id
+    if spec.family == _FAMILY_ALLEGATION_FLAG:
+        return subject_id, allegation_id
+    return None, None  # pragma: no cover — every family above is handled
+
+
 def _resolve_target(
     rule_id: str,
     match_id: Optional[str],
@@ -773,6 +848,7 @@ def reject_inference(
             sorted(set(affected_subject_ids)),
             reason,
             rejected_at,
+            investigator_id,
         )
 
     logger.info(
@@ -1218,6 +1294,7 @@ def revert_rejection(
             sorted(set(affected_subject_ids)),
             reason,
             reverted_at,
+            investigator_id,
         )
 
     logger.info(
