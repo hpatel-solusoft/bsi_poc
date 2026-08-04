@@ -123,6 +123,95 @@ _CONFIG_VERSIONS: Dict[str, int] = {
 }
 
 
+# --------------------------------------------------------------------
+# Downstream dependents — which rule reads which OTHER rule's output.
+# --------------------------------------------------------------------
+#
+# This is deliberately a small, fixed table, not something derived from
+# the graph at runtime: the dependency between e.g. Rule_01 and Rule_02
+# is a fact about the Cypher (Rule_02's MATCH clause reads the
+# relationship type Rule_01 writes), not something that changes run to
+# run. It exists so that when an investigator rejects an inference,
+# rejection.py / rule_audit.py can tell them what ELSE to re-check —
+# rejecting Rule_01's SHARES_EMPLOYER_WITH edge should also flag
+# Rule_02's MEMBER_OF_FRAUD_NETWORK edge that was built on top of it,
+# for example.
+#
+# Keyed by the UPSTREAM rule_id. Each entry is a
+# {"rule_id": <downstream rule_id>, "relationship_type": <the relationship
+# type the downstream rule reads FROM the upstream rule's output>} dict.
+# relationship_type is what tests/verify.py greps the downstream rule's
+# own .cypher file for — if a rule is edited (relationship renamed,
+# dependency removed) and this map is not updated to match, the build
+# fails loudly instead of this table silently going stale.
+#
+# Sources, one per edge, so this can be re-verified by hand against the
+# .cypher files whenever either side changes:
+#   Rule_01 writes SHARES_EMPLOYER_WITH      -> Rule_02 MATCHes it directly.
+#   Rule_03 writes SHARES_ADDRESS_WITH       -> Rule_04 MATCHes it directly.
+#   Rule_05 writes SHARES_ALIAS_PATTERN_WITH -> Rule_06 MATCHes it directly.
+#   Rule_07 writes HAS_PRIOR_GUILTY_CASE     -> Rule_08 MATCHes it (as `pg`)
+#                                             -> Rule_13 MATCHes it (as `pg`)
+#   Rule_02/04/06/09 each write MEMBER_OF_FRAUD_NETWORK -> Rule_08 MATCHes
+#     it (as `mem`), regardless of which of the four networks produced it.
+#
+# Rule_09_PCA_CheckSplit is NOT a key here and must never become one: it
+# reads the RAW IS_CO_SUBJECT_WITH / HAS_WAGE_RECORD_WITH relationships
+# loaded straight from ETL, not another rule's inferred output (see its
+# own .cypher header — there is no Rule_XX -> Rule_09 edge in this
+# ontology). It DOES appear as an upstream key below, since Rule_08
+# reads what Rule_09 writes.
+DOWNSTREAM_DEPENDENTS: Dict[str, List[Dict[str, str]]] = {
+    "Rule_01_Shared_Employer": [
+        {"rule_id": "Rule_02_Employer_Fraud_Network", "relationship_type": "SHARES_EMPLOYER_WITH"},
+    ],
+    "Rule_03_Shared_Address": [
+        {"rule_id": "Rule_04_Address_Fraud_Network", "relationship_type": "SHARES_ADDRESS_WITH"},
+    ],
+    "Rule_05_Alias_Identity": [
+        {"rule_id": "Rule_06_Identity_Fraud_Network", "relationship_type": "SHARES_ALIAS_PATTERN_WITH"},
+    ],
+    "Rule_07_Prior_Guilty": [
+        {"rule_id": "Rule_08_Recidivist_Escalation", "relationship_type": "HAS_PRIOR_GUILTY_CASE"},
+        {"rule_id": "Rule_13_FastTrack_Escalation", "relationship_type": "HAS_PRIOR_GUILTY_CASE"},
+    ],
+    "Rule_02_Employer_Fraud_Network": [
+        {"rule_id": "Rule_08_Recidivist_Escalation", "relationship_type": "MEMBER_OF_FRAUD_NETWORK"},
+    ],
+    "Rule_04_Address_Fraud_Network": [
+        {"rule_id": "Rule_08_Recidivist_Escalation", "relationship_type": "MEMBER_OF_FRAUD_NETWORK"},
+    ],
+    "Rule_06_Identity_Fraud_Network": [
+        {"rule_id": "Rule_08_Recidivist_Escalation", "relationship_type": "MEMBER_OF_FRAUD_NETWORK"},
+    ],
+    "Rule_09_PCA_CheckSplit": [
+        {"rule_id": "Rule_08_Recidivist_Escalation", "relationship_type": "MEMBER_OF_FRAUD_NETWORK"},
+    ],
+}
+
+# Fail at import time, not at first use, if this table references a rule_id
+# that does not even exist in the wave lists — the same "fail loudly at
+# startup" posture _load_config() already takes for rules.yaml itself.
+# This cannot check the .cypher CONTENT (that needs rule_engine.RULE_FILES,
+# and rule_engine imports THIS module, so importing it back here would be
+# circular) — the .cypher content check lives in tests/verify.py instead,
+# in the same style as the existing wave-order checks.
+_unknown_dependency_rule_ids = sorted(
+    {upstream for upstream in DOWNSTREAM_DEPENDENTS if upstream not in set(ALL_RULE_IDS)}
+    | {
+        entry["rule_id"]
+        for entries in DOWNSTREAM_DEPENDENTS.values()
+        for entry in entries
+        if entry["rule_id"] not in set(ALL_RULE_IDS)
+    }
+)
+if _unknown_dependency_rule_ids:
+    raise ValueError(
+        "DOWNSTREAM_DEPENDENTS references rule_id(s) not defined in "
+        f"config/rules.yaml: {_unknown_dependency_rule_ids}"
+    )
+
+
 def get_rule_names() -> Dict[str, str]:
     """
     Public {rule_id: human-readable name} accessor, sourced from the

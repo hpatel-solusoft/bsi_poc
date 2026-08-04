@@ -294,6 +294,29 @@ class RevertedItem(BaseModel):
     match_id: Optional[str] = None
 
 
+class CascadeChange(BaseModel):
+    """
+    One downstream fact reasoning_layer/cascade.py's DOWNSTREAM_DEPENDENTS
+    walk (AI-30) auto-invalidated or reinstated as a side effect of this
+    reject/revert. action is "auto_invalidated" (reject direction —
+    invalidated_by_rule_id names which upstream rule broke the
+    downstream rule's condition) or "reinstated" (revert direction —
+    invalidated_by_rule_id is always null here, since a reinstated fact
+    is no longer invalidated by anything). reason is the investigator's
+    own reason text for the ORIGINAL upstream reject/revert action that
+    triggered this cascade hop — the same text all the way down a
+    multi-hop chain (Rule 1 -> Rule 2 -> Rule 8 all show the SAME
+    reason, the one given for Rule 1), so a caller looking at any one
+    downstream fact can see why it changed without a second lookup.
+    """
+
+    rule_id: str
+    subject_id: str
+    action: str
+    invalidated_by_rule_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class RevertRejectionResponse(BaseModel):
     """What the UI needs to flip the reverted row back to un-rejected."""
 
@@ -307,6 +330,7 @@ class RevertRejectionResponse(BaseModel):
     reverted_count: int
     reverted_items: List[RevertedItem] = []
     reverted_at: Optional[str] = None
+    cascade_changes: List[CascadeChange] = []
     model_config = {"extra": "allow"}
 
 
@@ -396,6 +420,7 @@ class RejectInferenceResponse(BaseModel):
     rejected_count: int
     rejected_items: List[RejectedItem] = []
     rejected_at: str
+    cascade_changes: List[CascadeChange] = []
 
 
 # -----------------------------------------------------------------------

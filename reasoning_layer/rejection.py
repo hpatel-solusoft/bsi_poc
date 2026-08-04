@@ -106,6 +106,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from reasoning_layer import cascade
 from reasoning_layer.neo4j_client import get_session
 from reasoning_layer.scope import resolve_scope
 from utils.provenance import graph_provenance
@@ -724,6 +725,7 @@ def reject_inference(
             )
 
         rejected_items = []
+        affected_subject_ids: List[str] = []
         for instance in instances:
             session.run(
                 _MERGE_REJECTION,
@@ -743,10 +745,39 @@ def reject_inference(
                     "match_id": build_match_id(rule_id, instance["subject_id_a"], instance["subject_id_b"]),
                 }
             )
+            # AI-30: every Subject THIS instance itself touches — both
+            # endpoints for the symmetric-edge family (Rules 1/3/5,
+            # where subject_id_b is also a genuine Subject), the single
+            # subject for every other family (subject_id_b is a
+            # case_id/network-key/allegation_id there, never a Subject
+            # to cascade-check on its own). See cascade.cascade_reject's
+            # docstring.
+            if instance.get("subject_id_a"):
+                affected_subject_ids.append(instance["subject_id_a"])
+            if spec.family == _FAMILY_SYMMETRIC_EDGE and instance.get("subject_id_b"):
+                affected_subject_ids.append(instance["subject_id_b"])
+
+        # AI-30: walk reasoning_layer.rule_registry.DOWNSTREAM_DEPENDENTS
+        # from rule_id, auto-invalidating any downstream fact whose
+        # triggering condition no longer holds now that this instance is
+        # rejected (e.g. Rule_01 rejected -> Rule_02's membership for the
+        # same subject re-checked -> if that subject has no other active
+        # SHARES_EMPLOYER_WITH edge, Rule_02's membership auto-retracts,
+        # then Rule_08 gets the same treatment two hops out). A no-op,
+        # cheaply, for every rule_id DOWNSTREAM_DEPENDENTS has no entry
+        # for (Rules 9-14 currently) — see that module's own docstring.
+        cascade_changes = cascade.cascade_reject(
+            session,
+            case_id,
+            rule_id,
+            sorted(set(affected_subject_ids)),
+            reason,
+            rejected_at,
+        )
 
     logger.info(
         "reject_inference: REJECTED case_id=%s rule_id=%s relationship_type=%s "
-        "investigator_id=%s target=(%s,%s) count=%d",
+        "investigator_id=%s target=(%s,%s) count=%d cascade_changes=%d",
         case_id,
         rule_id,
         spec.relationship_type,
@@ -754,6 +785,7 @@ def reject_inference(
         target_subject_id_a,
         target_subject_id_b,
         len(rejected_items),
+        len(cascade_changes),
     )
 
     # No cached rules_fired snapshot to sync: Postgres (case_ai_summary_store)
@@ -773,6 +805,11 @@ def reject_inference(
         "rejected_count": len(rejected_items),
         "rejected_items": rejected_items,
         "rejected_at": rejected_at,
+        # AI-30: every downstream fact this rejection auto-invalidated,
+        # if any — see cascade.cascade_reject's docstring. Always
+        # present, even as an empty list, so a caller never has to
+        # special-case "no cascade happened" vs "cascade key missing".
+        "cascade_changes": cascade_changes,
     }
     return _envelope(result)
 
@@ -1142,6 +1179,7 @@ def revert_rejection(
             )
 
         reverted_items = []
+        affected_subject_ids: List[str] = []
         for instance in instances:
             session.run(
                 _DELETE_REJECTION,
@@ -1158,10 +1196,33 @@ def revert_rejection(
                     "match_id": build_match_id(rule_id, instance["subject_id_a"], instance["subject_id_b"]),
                 }
             )
+            # AI-30: same affected-subject computation as reject_inference
+            # — see that function's identical comment.
+            if instance.get("subject_id_a"):
+                affected_subject_ids.append(instance["subject_id_a"])
+            if spec.family == _FAMILY_SYMMETRIC_EDGE and instance.get("subject_id_b"):
+                affected_subject_ids.append(instance["subject_id_b"])
+
+        # AI-30: mirror of reject_inference's cascade call — re-checks
+        # every downstream rule DOWNSTREAM_DEPENDENTS lists for rule_id,
+        # and for each one that comes back TRUE again for a subject THIS
+        # module itself auto-invalidated earlier, re-runs that downstream
+        # rule's real write query so it re-fires normally. Never touches
+        # a downstream fact that was always active, or one an
+        # investigator rejected manually — see
+        # cascade._reinstate's docstring.
+        cascade_changes = cascade.cascade_revert(
+            session,
+            case_id,
+            rule_id,
+            sorted(set(affected_subject_ids)),
+            reason,
+            reverted_at,
+        )
 
     logger.info(
         "revert_rejection: case_id=%s rule_id=%s relationship_type=%s "
-        "investigator_id=%s reason=%s target=(%s,%s) count=%d",
+        "investigator_id=%s reason=%s target=(%s,%s) count=%d cascade_changes=%d",
         case_id,
         rule_id,
         spec.relationship_type,
@@ -1170,6 +1231,7 @@ def revert_rejection(
         target_subject_id_a,
         target_subject_id_b,
         len(reverted_items),
+        len(cascade_changes),
     )
 
     # No cached rules_fired snapshot to sync — see the identical comment in
@@ -1187,6 +1249,9 @@ def revert_rejection(
             "reverted_count": len(reverted_items),
             "reverted_items": reverted_items,
             "reverted_at": reverted_at,
+            # AI-30: every downstream fact this revert re-instated, if
+            # any — see cascade.cascade_revert's docstring.
+            "cascade_changes": cascade_changes,
         },
         "provenance": graph_provenance(
             "reasoning_layer.rejection.revert_rejection",

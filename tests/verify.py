@@ -651,6 +651,49 @@ def test_wiring():
             unscoped.append(rule_id)
     check("every rule is scoped to the run's subjects", not unscoped, f"unscoped: {unscoped}")
 
+    # DOWNSTREAM_DEPENDENTS (reasoning_layer/rule_registry.py) records which
+    # rule reads another rule's output, so a rejection knows what else to
+    # re-check. It is a small, fixed table, not something derived from the
+    # graph — nothing stops it from going stale the day someone renames a
+    # relationship type or drops a MATCH clause. So: for every
+    # {upstream -> [{downstream, relationship_type}, ...]} entry, open the
+    # DOWNSTREAM rule's actual .cypher file on disk and confirm it still
+    # references the relationship type the map claims it reads. If a rule
+    # is edited and this map is not updated to match, the build fails here
+    # instead of the map silently going stale.
+    stale_dependencies = []
+    for upstream_rule_id, dependents in rule_registry.DOWNSTREAM_DEPENDENTS.items():
+        for dependent in dependents:
+            downstream_rule_id = dependent["rule_id"]
+            relationship_type = dependent["relationship_type"]
+            downstream_path = rule_engine.RULE_FILES[downstream_rule_id]
+            if relationship_type not in downstream_path.read_text():
+                stale_dependencies.append(
+                    f"{upstream_rule_id} -> {downstream_rule_id} claims {relationship_type}, "
+                    f"but {downstream_path.name} no longer references it"
+                )
+    check(
+        "DOWNSTREAM_DEPENDENTS matches what the rule files actually read",
+        not stale_dependencies,
+        "; ".join(stale_dependencies),
+    )
+
+    # Rule 9 reads raw IS_CO_SUBJECT_WITH / HAS_WAGE_RECORD_WITH directly off
+    # the ETL-loaded graph, not another rule's inferred output (see its own
+    # .cypher header) — it must never be added to DOWNSTREAM_DEPENDENTS as
+    # someone else's downstream dependent.
+    rule_9_as_a_dependent = [
+        upstream_rule_id
+        for upstream_rule_id, dependents in rule_registry.DOWNSTREAM_DEPENDENTS.items()
+        for dependent in dependents
+        if dependent["rule_id"] == "Rule_09_PCA_CheckSplit"
+    ]
+    check(
+        "Rule 9 has no upstream rule dependency in DOWNSTREAM_DEPENDENTS",
+        not rule_9_as_a_dependent,
+        f"Rule 9 incorrectly listed as downstream of: {rule_9_as_a_dependent}",
+    )
+
     # Every rule that writes an inferred relationship must check for a rejection first.
     no_guard = [
         rule_id
