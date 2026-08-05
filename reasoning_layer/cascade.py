@@ -155,6 +155,82 @@ def _condition_still_holds(session, subject_id: str, relationship_type: str) -> 
     return bool(record and record["still_active"])
 
 
+# downstream_rule_id -> every DISTINCT relationship_type it depends on,
+# derived from rule_registry.DOWNSTREAM_DEPENDENTS itself (never
+# hand-duplicated) so it can never drift from the table it's built from.
+# A rule fed by more than one upstream relationship type — today only
+# Rule_08 (HAS_PRIOR_GUILTY_CASE from Rule_07, MEMBER_OF_FRAUD_NETWORK
+# from Rules 2/4/6/9) — gets every distinct type it reads listed here.
+# A rule fed by only one relationship_type (Rule_02/04/06, Rule_13)
+# gets a single-element list, which collapses the ANY-check below back
+# to the plain single-condition check for it.
+_REQUIRED_RELATIONSHIP_TYPES: Dict[str, List[str]] = {}
+for _upstream_rule_id, _dependents in rule_registry.DOWNSTREAM_DEPENDENTS.items():
+    for _dependent in _dependents:
+        _types_for_rule = _REQUIRED_RELATIONSHIP_TYPES.setdefault(_dependent["rule_id"], [])
+        if _dependent["relationship_type"] not in _types_for_rule:
+            _types_for_rule.append(_dependent["relationship_type"])
+del _upstream_rule_id, _dependents, _dependent, _types_for_rule
+
+
+def _any_upstream_condition_holds(session, subject_id: str, downstream_rule_id: str) -> bool:
+    """
+    Whether AT LEAST ONE of the distinct relationship types
+    downstream_rule_id depends on (per _REQUIRED_RELATIONSHIP_TYPES
+    above) is currently active for subject_id.
+
+    REJECT-DIRECTION CHECK ONLY — deliberately looser than the
+    downstream rule's own Cypher (which requires ALL of them to MATCH a
+    fresh row): a downstream fact resting on more than one upstream
+    contributor — today only Rule_08, resting on Rule_07's prior-guilty
+    finding AND on a fraud-network membership from Rules 2/4/6/9 — is
+    only auto-REJECTED once EVERY contributor has been rejected.
+    Concretely: rejecting Rule_01 alone (breaking only the network leg)
+    must NOT auto-reject Rule_08 while Rule_07's prior-guilty finding is
+    still active; only rejecting BOTH legs does. A rule resting on a
+    single relationship_type (Rule_02/04/06, Rule_13) has exactly one
+    entry in its required list, so this collapses back to that one
+    condition either way — unaffected.
+
+    Deliberately NOT reused for the revert direction — see
+    _all_upstream_conditions_hold below, which REVERT uses instead. The
+    two directions are asymmetric on purpose: it takes rejecting every
+    contributor to auto-reject a multi-contributor fact, but it takes
+    EVERY contributor being active again to auto-reinstate one — a
+    single contributor coming back (e.g. reverting Rule_07 alone) must
+    NOT resurrect Rule_08 while Rule_01/02's network leg is still
+    rejected. Restoring a serious escalation is held to the stricter
+    standard on purpose, even though breaking it is held to the looser
+    one.
+    """
+    required_types = _REQUIRED_RELATIONSHIP_TYPES.get(downstream_rule_id, [])
+    if not required_types:
+        return True
+    return any(_condition_still_holds(session, subject_id, rtype) for rtype in required_types)
+
+
+def _all_upstream_conditions_hold(session, subject_id: str, downstream_rule_id: str) -> bool:
+    """
+    Whether EVERY distinct relationship type downstream_rule_id depends
+    on (per _REQUIRED_RELATIONSHIP_TYPES above) is currently active for
+    subject_id — AND across types.
+
+    REVERT-DIRECTION CHECK ONLY (mirror of _any_upstream_condition_holds
+    above, used by REJECT). A downstream fact resting on more than one
+    upstream contributor must have ALL of them active again before it is
+    auto-reinstated: reverting Rule_07 alone must NOT bring Rule_08 back
+    while Rule_01/02's fraud-network leg is still rejected — only once
+    BOTH legs are active again does Rule_08 return. A rule resting on a
+    single relationship_type (Rule_02/04/06, Rule_13) has exactly one
+    entry in its required list, so this collapses back to that one
+    condition either way — unaffected.
+    """
+    required_types = _REQUIRED_RELATIONSHIP_TYPES.get(downstream_rule_id, [])
+    if not required_types:
+        return True
+    return all(_condition_still_holds(session, subject_id, rtype) for rtype in required_types)
+
+
 _AUTO_INVALIDATE_MEMBERSHIP = """
 MATCH (a:Subject {subject_id: $subject_id})-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork {network_type: $network_type})
 WHERE coalesce(r.status, "active") = "active"
@@ -672,7 +748,25 @@ def _walk(
         for subject_id in subject_ids:
             if not subject_id:
                 continue
-            condition_holds = _condition_still_holds(session, subject_id, relationship_type)
+            # Asymmetric on purpose — see the two helpers' docstrings.
+            # REJECT: a multi-contributor fact (Rule_08: Rule_07's
+            # prior-guilty finding AND a fraud-network membership from
+            # Rules 2/4/6/9) is auto-rejected only once EVERY
+            # contributor is inactive — rejecting Rule_01 alone (network
+            # leg only) must NOT auto-reject Rule_08 while Rule_07 is
+            # still active.
+            # REVERT: the same fact is auto-reinstated only once EVERY
+            # contributor is active again — reverting Rule_07 alone must
+            # NOT reinstate Rule_08 while Rule_01/02's network leg is
+            # still rejected.
+            # A rule with a single required relationship_type
+            # (Rule_02/04/06, Rule_13) collapses both checks back to
+            # that one condition, so it is unaffected either way.
+            condition_holds = (
+                _all_upstream_conditions_hold(session, subject_id, downstream_rule_id)
+                if direction == "revert"
+                else _any_upstream_condition_holds(session, subject_id, downstream_rule_id)
+            )
 
             if direction == "reject" and not condition_holds:
                 changed = _auto_invalidate(
