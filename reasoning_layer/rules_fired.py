@@ -715,11 +715,48 @@ def _summarise(rule_id: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def instance_identity_key(instance: Dict[str, Any]) -> tuple:
+    """
+    THE stable, run-independent identity of one logical instance —
+    the single definition every caller that needs to tell "is this the
+    same fact" must reuse, rather than each re-deriving its own notion
+    of identity (which is exactly how the case-level merge bug below
+    was introduced).
+
+    Built ONLY from _INSTANCE_KEYS (subject_id / related_subject_id /
+    related_case_id / related_network_key / allegation_type /
+    allegation_id) — the fields that describe WHAT the instance is.
+    Deliberately excludes every field that varies by WHEN or BY WHICH
+    RUN the row was produced rather than by what it describes:
+    asserted_at (re-stamped by Neo4j on every re-assert of an otherwise
+    identical fact), status/rejection/revertable (case-level workflow
+    state, not identity), confidence/corroborated (rolled up
+    separately), detail/first_name/last_name/etc. (presentation), and
+    match_id/subject_id_a/subject_id_b/relationship_type (derived FROM
+    this same identity, not part of it).
+
+    Used by:
+      * _dedupe_rows (below) — collapses duplicate PHYSICAL
+        relationships the graph already has for one rule's query
+        within a single build_rules_fired() call.
+      * reasoning_layer.pipeline._merge_rules_fired — collapses the
+        same logical instance appearing in more than one subject's
+        per-subject rules_fired block when run_pipeline_for_case folds
+        them into one case-level block.
+
+    A caller with a network-family instance (Rule 2/4/6/9) must NOT use
+    this alone: `subject_id` there is an arbitrary per-run anchor, not
+    part of the network's identity — see _merge_rules_fired's own
+    related_network_key branch, which takes priority over this key for
+    that family.
+    """
+    return tuple(instance.get(k) for k in _INSTANCE_KEYS)
+
+
 def _dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Collapse rows describing the SAME logical instance down to one,
-    keyed on the same identity fields _instance() itself keys an
-    instance on (_INSTANCE_KEYS: subject_id / related_subject_id /
+    keyed on instance_identity_key (subject_id / related_subject_id /
     related_case_id / related_network_key / allegation_type).
 
     Defense in depth against duplicate PHYSICAL relationships in the
@@ -746,7 +783,7 @@ def _dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set()
     deduped: List[Dict[str, Any]] = []
     for row in rows:
-        key = tuple(row.get(k) for k in _INSTANCE_KEYS)
+        key = instance_identity_key(row)
         if key in seen:
             continue
         seen.add(key)

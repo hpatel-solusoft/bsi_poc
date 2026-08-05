@@ -381,12 +381,30 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
     call independently picks its own arbitrary anchor subject
     (subject_id/subject_name) for that same network. Two per-subject runs
     of the identical network therefore differ only in which subject got
-    picked as anchor, which the generic full-instance key does not
-    recognise as a duplicate — subject_id there is incidental, not part of
-    the network's identity, so keying on it produced the same inference
-    line twice. Non-network rules (e.g. Rule 1's directed subject-to-subject
-    pairs) still use the full-instance key, since for those subject_id is
-    the actual identity of a distinct, directional instance.
+    picked as anchor, which a full-instance key does not recognise as a
+    duplicate — subject_id there is incidental, not part of the network's
+    identity, so keying on it produced the same inference line twice.
+
+    EVERY OTHER RULE is keyed on rules_fired.instance_identity_key —
+    the SAME stable, run-independent identity rules_fired._dedupe_rows
+    already uses to collapse duplicate physical relationships within one
+    subject's own run. A prior version of this function instead built an
+    ad hoc key from every field on the instance dict (excluding only
+    confidence/corroborated), which included `asserted_at` — a timestamp
+    Neo4j re-stamps on every re-assert of what is otherwise the exact
+    same fact. run_pipeline_for_case reasons every subject on the case
+    separately (see _reasoning_population_for_case), so a symmetric rule
+    like Rule 1 gets re-asserted once per subject in scope even though
+    its Cypher already enforces a fixed `a.subject_id < b.subject_id`
+    direction and so returns the identical (subject_id, related_subject_id)
+    pair every time. Keying on asserted_at treated each of those
+    re-assertions as a new, distinct instance — inflating a case with 3
+    subjects and 1 real Rule_01 pair up to as many as 3-4x that many
+    "instances" in the case-level block, purely as an artifact of how
+    many subjects independently re-triggered the same rule, never
+    reflecting anything actually different in the graph. instance_identity_
+    key fixes this by excluding asserted_at (and every other
+    run/workflow-varying field) from what counts as "the same instance".
     """
     if not blocks:
         return []
@@ -409,13 +427,7 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
                     if network_key is not None:
                         key = ("related_network_key", str(network_key))
                     else:
-                        key = tuple(
-                            sorted(
-                                (k, str(v))
-                                for k, v in instance.items()
-                                if k not in ("confidence", "corroborated")
-                            )
-                        )
+                        key = rules_fired.instance_identity_key(instance)
                 if key in seen:
                     continue
                 seen.add(key)
