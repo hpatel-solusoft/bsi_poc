@@ -976,8 +976,8 @@ def enrich_instance(
         enriched["related_subject_name"] = related_name
 
     inference = build_inference(rule_id, enriched, context)
-    if inference:
-        enriched["inference"] = inference
+    # if inference:
+    #     enriched["inference"] = inference
     return enriched
 
 
@@ -1007,12 +1007,12 @@ def render_block(block: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         instances = entry.get("instances") or []
         for instance in instances:
             narrative = build_inference(rule_id, instance, context)
-            if narrative:
-                instance["inference"] = narrative
-            elif "inference" in instance:
-                # A first-pass line that this pass cannot reproduce would be
-                # a bug; leaving the stale text would hide it.
-                instance.pop("inference")
+            # if narrative:
+            #     instance["inference"] = narrative
+            # elif "inference" in instance:
+            #     # A first-pass line that this pass cannot reproduce would be
+            #     # a bug; leaving the stale text would hide it.
+            #     instance.pop("inference")
 
         # Rule-level narrative: the single line a summary view shows without
         # expanding the instances. The headline is the STRONGEST candidate
@@ -1031,13 +1031,13 @@ def render_block(block: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         candidates = sorted(active, key=_match_strength, reverse=True) or [
             i for i in instances if i.get("inference")
         ]
-        if not candidates:
-            entry["inference_summary"] = None
-        elif len(candidates) == 1:
-            entry["inference_summary"] = candidates[0]["inference"]
-        else:
-            entry["inference_summary"] = (
-                f"{candidates[0]['inference']} ({len(candidates) - 1} further "
-                f"{'match' if len(candidates) == 2 else 'matches'} of this rule on this case.)"
-            )
+        # if not candidates:
+        #     entry["inference_summary"] = None
+        # elif len(candidates) == 1:
+        #     entry["inference_summary"] = candidates[0]["inference"]
+        # else:
+        #     entry["inference_summary"] = (
+        #         f"{candidates[0]['inference']} ({len(candidates) - 1} further "
+        #         f"{'match' if len(candidates) == 2 else 'matches'} of this rule on this case.)"
+        #     )
     return block
