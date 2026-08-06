@@ -95,6 +95,14 @@ Does NOT own: rule execution (rule_engine.py), rule content
 (rules/*.cypher), or reading back rejected facts for display
 (report_generation.py, rule_audit.py, fraud_network.py all do their own
 reads).
+
+AI-31: also owns setting (:Case).last_inference_change_at — a single,
+case-wide graph-change staleness signal, touched once per successful
+reject_inference/revert_rejection call (see
+_touch_case_last_inference_change below). rule_audit.py reads this same
+property back out for GET /rule_audit's response; the Fraud Network
+subgraph query already returns full Case-node properties, so it needs no
+corresponding read-side change.
 """
 
 from __future__ import annotations
@@ -671,6 +679,58 @@ def _envelope(result: Dict[str, Any]) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# AI-31 — Case-level graph-change staleness signal.
+# ---------------------------------------------------------------------------
+# One timestamp on the Case node, set unconditionally on every successful
+# reject_inference/revert_rejection call (once per call, never once per
+# cascade hop — see the two call sites below), so every tab reading this
+# case (Investigation, Fraud Network, Rule Audit, ...) can compare its own
+# last-rendered timestamp against this single field to decide whether its
+# cached narrative is stale, without having to separately track every
+# individual rule/relationship that might have changed. Deliberately
+# case-wide rather than per-rule: an investigator rejecting Rule_01 can
+# cascade-invalidate Rule_02 and Rule_08 too (AI-30), so "did ANYTHING in
+# this case's graph change" is the only question a tab-level cache actually
+# needs answered here — reasoning_layer/cascade.py's own per-fact
+# auto_invalidated/invalidated_by_rule_id fields remain the place to look
+# for exactly WHAT changed.
+#
+# Uses the SAME app-generated rejected_at/reverted_at value the rest of
+# this module already stamps onto the :Rejection node and the per-family
+# rejected_at/reverted_at properties for this call — one wall-clock read
+# per request, never a second, independently-drifting Neo4j-side
+# datetime() call for the same logical event.
+_TOUCH_CASE_STALENESS = """
+MATCH (c:Case {case_id: $case_id})
+SET c.last_inference_change_at = $changed_at
+RETURN c.case_id AS case_id
+"""
+
+
+def _touch_case_last_inference_change(session, case_id: str, changed_at: str) -> None:
+    """
+    Stamp (:Case {case_id}).last_inference_change_at = changed_at.
+
+    Best-effort bookkeeping, not the primary write: by the time this is
+    called, the actual reject/revert (and any AI-30 cascade) has already
+    committed successfully. A missing Case node here (only possible if the
+    graph is in a state that already let reject/revert locate and mutate an
+    instance scoped to this case_id, which itself requires the Case node to
+    exist) would be a genuine graph inconsistency worth knowing about, so
+    it's logged loudly — but it must never turn an otherwise-successful
+    reject/revert into a 500 for the caller.
+    """
+    record = session.run(_TOUCH_CASE_STALENESS, case_id=case_id, changed_at=changed_at).single()
+    if record is None:
+        logger.warning(
+            "AI-31: could not set last_inference_change_at — no (:Case {case_id: %s}) node found. "
+            "The reject/revert this call was part of still succeeded; only the staleness "
+            "signal was not updated.",
+            case_id,
+        )
+
+
 def reject_inference(
     case_id: str,
     rule_id: str,
@@ -851,6 +911,11 @@ def reject_inference(
             investigator_id,
         )
 
+        # AI-31: one staleness touch per call, regardless of how many
+        # instances or cascade hops this reject just wrote — see
+        # _touch_case_last_inference_change's docstring.
+        _touch_case_last_inference_change(session, case_id, rejected_at)
+
     logger.info(
         "reject_inference: REJECTED case_id=%s rule_id=%s relationship_type=%s "
         "investigator_id=%s target=(%s,%s) count=%d cascade_changes=%d",
@@ -886,6 +951,12 @@ def reject_inference(
         # present, even as an empty list, so a caller never has to
         # special-case "no cascade happened" vs "cascade key missing".
         "cascade_changes": cascade_changes,
+        # AI-31: the same value just written to
+        # (:Case).last_inference_change_at — echoed back so a caller
+        # that only ever calls this endpoint (never re-reads /rule_audit
+        # or /fraud_network afterward) can still update its own
+        # staleness bookkeeping from the response alone.
+        "last_inference_change_at": rejected_at,
     }
     return _envelope(result)
 
@@ -1297,6 +1368,12 @@ def revert_rejection(
             investigator_id,
         )
 
+        # AI-31: identical staleness touch to reject_inference's — see
+        # _touch_case_last_inference_change's docstring. A revert changes
+        # the graph just as much as a reject does, so it must update the
+        # same signal.
+        _touch_case_last_inference_change(session, case_id, reverted_at)
+
     logger.info(
         "revert_rejection: case_id=%s rule_id=%s relationship_type=%s "
         "investigator_id=%s reason=%s target=(%s,%s) count=%d cascade_changes=%d",
@@ -1329,6 +1406,10 @@ def revert_rejection(
             # AI-30: every downstream fact this revert re-instated, if
             # any — see cascade.cascade_revert's docstring.
             "cascade_changes": cascade_changes,
+            # AI-31: same value just written to
+            # (:Case).last_inference_change_at — see the identical field
+            # on reject_inference's result for why it's echoed here too.
+            "last_inference_change_at": reverted_at,
         },
         "provenance": graph_provenance(
             "reasoning_layer.rejection.revert_rejection",

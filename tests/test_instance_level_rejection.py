@@ -129,10 +129,23 @@ class FakeSymmetricEdgeGraph:
     def __init__(self, edges: Dict[frozenset, str]):
         self.edges = dict(edges)
         self.rejection_nodes: set = set()
+        # AI-31: mirrors (:Case).last_inference_change_at — None until
+        # the first reject/revert call touches it.
+        self.case_last_inference_change_at: Optional[str] = None
+        self.staleness_touch_count = 0
 
     def responder(self, query: str, params: Dict[str, Any]):
         if "RETURN s.subject_id AS primary_subject_id" in query:
             return {"primary_subject_id": "A"}
+
+        # --- AI-31 staleness touch (reasoning_layer/rejection.py's
+        # _touch_case_last_inference_change) — issued once per
+        # reject_inference/revert_rejection call, after the AI-30
+        # cascade queries below have already run.
+        if "SET c.last_inference_change_at = $changed_at" in query:
+            self.case_last_inference_change_at = params["changed_at"]
+            self.staleness_touch_count += 1
+            return {"case_id": params["case_id"]}
 
         if 'SET r.status = "rejected"' in query and "b.subject_id AS subject_id_b" in query:
             return self._locate_and_set(params, new_status="rejected", from_status="active")
@@ -248,6 +261,10 @@ def test_reject_only_the_identified_instance_leaves_others_active():
     assert graph.edges[frozenset({"A", "B"})] == "active", "A-B must be untouched by rejecting A-C"
     assert graph.edges[frozenset({"A", "C"})] == "rejected"
     assert graph.rejection_nodes == {("A", "C")}, "only one :Rejection node, for A-C, must be written"
+    # AI-31: the case-wide staleness signal is set to the same rejected_at
+    # value returned in the envelope, and echoed back on the response.
+    assert graph.case_last_inference_change_at == result["rejected_at"]
+    assert result["last_inference_change_at"] == result["rejected_at"]
 
 
 def test_reject_then_rerun_pipeline_guard_then_revert_only_that_instance():
@@ -296,6 +313,10 @@ def test_reject_then_rerun_pipeline_guard_then_revert_only_that_instance():
     assert graph.edges[frozenset({"A", "C"})] == "active"
     assert graph.edges[frozenset({"A", "B"})] == "active", "A-B must still be untouched after reverting A-C"
     assert graph.rejection_nodes == set(), "A-C's :Rejection node must be deleted by the revert"
+    # AI-31: revert touches the same staleness signal reject did — a
+    # revert changes the graph just as much as a reject does.
+    assert graph.case_last_inference_change_at == result["reverted_at"]
+    assert result["last_inference_change_at"] == result["reverted_at"]
 
 
 def test_match_id_and_subject_ids_are_interchangeable_inputs():
@@ -400,3 +421,67 @@ def test_reject_nonexistent_instance_raises_not_found():
     # Neither real edge was touched by the failed attempt.
     assert graph.edges[frozenset({"A", "B"})] == "active"
     assert graph.edges[frozenset({"A", "C"})] == "active"
+
+
+# --------------------------------------------------------------------
+# AI-31 — (:Case).last_inference_change_at staleness signal
+# --------------------------------------------------------------------
+
+
+def test_reject_sets_case_staleness_timestamp_once_per_call():
+    """Two separate instances rejected in two separate calls must each
+    touch the staleness timestamp exactly once per call — not once per
+    instance, not once per AI-30 cascade hop."""
+    graph = FakeSymmetricEdgeGraph({frozenset({"A", "B"}): "active", frozenset({"A", "C"}): "active"})
+    assert graph.case_last_inference_change_at is None, "untouched until the first reject/revert"
+
+    p1, p2 = _patched(graph)
+    with p1, p2:
+        result = rejection.reject_inference(
+            case_id="CASE-1",
+            rule_id="Rule_01_Shared_Employer",
+            reason="r",
+            investigator_id="inv-1",
+            subject_id_a="A",
+            subject_id_b="B",
+        )["result"]
+
+    assert graph.case_last_inference_change_at is not None
+    assert graph.case_last_inference_change_at == result["rejected_at"]
+
+    # The staleness-touch query must have been issued exactly once for
+    # this call, not once per located instance and not once per AI-30
+    # cascade hop.
+    assert graph.staleness_touch_count == 1
+
+
+def test_case_not_found_does_not_fail_the_reject():
+    """AI-31's staleness write is best-effort bookkeeping, never the
+    primary write: if the Case node can't be found for some reason, the
+    reject itself must still succeed (see
+    reasoning_layer.rejection._touch_case_last_inference_change's
+    docstring)."""
+    graph = FakeSymmetricEdgeGraph({frozenset({"A", "B"}): "active", frozenset({"A", "C"}): "active"})
+
+    real_responder = graph.responder
+
+    def responder_with_missing_case(query: str, params: Dict[str, Any]):
+        if "SET c.last_inference_change_at = $changed_at" in query:
+            return None  # simulates no (:Case) node matched
+        return real_responder(query, params)
+
+    graph.responder = responder_with_missing_case  # type: ignore[method-assign]
+
+    p1, p2 = _patched(graph)
+    with p1, p2:
+        result = rejection.reject_inference(
+            case_id="CASE-1",
+            rule_id="Rule_01_Shared_Employer",
+            reason="r",
+            investigator_id="inv-1",
+            subject_id_a="A",
+            subject_id_b="B",
+        )["result"]
+
+    assert result["accepted"] is True, "a missing Case node must not turn a successful reject into a failure"
+    assert graph.edges[frozenset({"A", "B"})] == "rejected"

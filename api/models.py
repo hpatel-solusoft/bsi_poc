@@ -341,6 +341,10 @@ class RevertRejectionResponse(BaseModel):
     reverted_items: List[RevertedItem] = []
     reverted_at: Optional[str] = None
     cascade_changes: List[CascadeChange] = []
+    # AI-31: the value just written to (:Case).last_inference_change_at
+    # by this call — see reasoning_layer/rejection.py's
+    # _touch_case_last_inference_change.
+    last_inference_change_at: Optional[str] = None
     model_config = {"extra": "allow"}
 
 
@@ -431,6 +435,10 @@ class RejectInferenceResponse(BaseModel):
     rejected_items: List[RejectedItem] = []
     rejected_at: str
     cascade_changes: List[CascadeChange] = []
+    # AI-31: the value just written to (:Case).last_inference_change_at
+    # by this call — see reasoning_layer/rejection.py's
+    # _touch_case_last_inference_change.
+    last_inference_change_at: Optional[str] = None
     model_config = {"extra": "allow"}
 
 
@@ -533,6 +541,16 @@ class FraudNetworkResponse(BaseModel):
     `graph` is the full case subgraph. `networks`/`network_count` are
     the original FraudNetwork-only groupings, retained unchanged so the
     current screen keeps working while the frontend migrates.
+
+    AI-31: no dedicated top-level staleness field is added here on
+    purpose — reasoning_layer/fraud_network.py's subgraph query already
+    returns full properties(case_node) as part of `graph.nodes` (see
+    GraphNode.properties), so (:Case).last_inference_change_at (and the
+    AI-30 auto_invalidated/invalidated_by_rule_id pair on any
+    MEMBER_OF_FRAUD_NETWORK edge) is already present there with no query
+    change — find the node with labels containing "Case" and read
+    properties.last_inference_change_at off it. Confirmed by
+    tests/test_fraud_network_case_staleness.py.
     """
 
     case_id: str
@@ -561,6 +579,13 @@ class InferredRelationship(BaseModel):
     # is computed correctly but silently dropped here, since a
     # response_model strips any key it doesn't declare.
     match_id: Optional[str] = None
+    # AI-30/AI-31: only populated for Rule_08/Rule_13 rows (the
+    # case-flag family) — None for every other rule_id, which has no
+    # case-level auto-invalidation concept. Same reason match_id above
+    # needs an explicit field: an undeclared key is silently stripped by
+    # this response_model, not merely omitted.
+    auto_invalidated: Optional[bool] = None
+    invalidated_by_rule_id: Optional[str] = None
 
 
 class RuleAuditEntry(BaseModel):
@@ -576,3 +601,8 @@ class RuleAuditResponse(BaseModel):
     case_id: str
     primary_subject_id: Optional[str] = None
     rules: List[RuleAuditEntry]
+    # AI-31: case-wide graph-change staleness signal — see
+    # reasoning_layer/rejection.py's _touch_case_last_inference_change.
+    # None until the first reject_inference/revert_rejection call for
+    # this case.
+    last_inference_change_at: Optional[str] = None

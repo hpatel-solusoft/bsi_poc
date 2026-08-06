@@ -28,10 +28,13 @@ from api.message_utils import (
     merge_provenance,
 )
 from api.response_builders import parse_bsi_section
+from core.case_store import get_case_ai_summary_cache_updated_at
 from core.investigation_plan_override_repository import (
     compute_plan_staleness,
     get_override,
 )
+from core.narrative_staleness import StalenessCheck, check_staleness
+from reasoning_layer.case_staleness import get_last_inference_change_at
 from reasoning_layer.context_enrichment import enrich_graph_context
 from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.investigation_tasks import build_rule_aware_tasks, tag_step_sources
@@ -43,6 +46,71 @@ from semantic_layer.entity_contracts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# AI-32 — stale_reason for the 5 cached-narrative endpoints.
+# ---------------------------------------------------------------------------
+
+
+def evaluate_cache_staleness(
+    case_id: str,
+    reload_ai_summary_requested: bool,
+    cache_generated_at: Optional[datetime] = None,
+) -> StalenessCheck:
+    """
+    The one function every cached-narrative route (/intake,
+    /risk_assessment, /plan, /similar_cases, /generate_report) calls
+    before deciding whether to serve its cache. Fetches AI-31's
+    (:Case).last_inference_change_at and combines it with the caller's
+    reload_ai_summary flag via core.narrative_staleness.check_staleness
+    — see that module for what each of the two signals means and what
+    should_refresh / should_rerun_full_pipeline decide.
+
+    Args:
+        case_id: required.
+        reload_ai_summary_requested: this request's reload_ai_summary
+            field, unchanged from every route's existing handling.
+        cache_generated_at: the cached narrative's generation timestamp,
+            if the caller already fetched it for its own purposes (e.g.
+            /plan already reads case_ai_summary_store.updated_at for
+            compute_plan_staleness, and /generate_report reads
+            report_artifacts.generated_at instead of the
+            case_ai_summary_store default this fetches when omitted —
+            see that route's own AI-32 comment for why). Passing it in
+            avoids a redundant read AND guarantees both staleness checks
+            in a route agree on which timestamp they compared against.
+            When omitted, reads core.case_store.
+            get_case_ai_summary_cache_updated_at itself — the correct
+            default for /intake, /similar_cases, and /risk_assessment,
+            none of which read this timestamp for any other reason.
+
+    A Neo4j outage degrades to "no graph staleness signal" (logged, never
+    raised) rather than failing the route — the same non-blocking stance
+    every other live-graph read in this module already takes (see
+    fetch_live_graph_findings, fetch_live_similar_cases,
+    fetch_live_risk_signals above): a cached-narrative endpoint must keep
+    working, just without AI-32's new signal, when the graph is down.
+    """
+    if cache_generated_at is None:
+        cache_generated_at = get_case_ai_summary_cache_updated_at(case_id)
+
+    try:
+        last_inference_change_at = get_last_inference_change_at(case_id)
+    except (GraphUnavailableError, Neo4jError) as exc:
+        logger.warning(
+            "AI-32: graph staleness check unavailable for case_id=%s — %s; "
+            "proceeding as if the graph has not changed",
+            case_id,
+            exc,
+        )
+        last_inference_change_at = None
+
+    return check_staleness(
+        reload_ai_summary_requested=reload_ai_summary_requested,
+        last_inference_change_at=last_inference_change_at,
+        cache_generated_at=cache_generated_at,
+    )
 
 
 def fetch_live_graph_findings(

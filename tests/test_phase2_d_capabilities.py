@@ -413,12 +413,38 @@ def test_rule_audit_always_returns_all_rejectable_rules():
                     "status": "active",
                 }
             ]
+        if "Rule_08_Recidivist_Escalation" in q:
+            # AI-30/AI-31: confirms the auto_invalidated/
+            # invalidated_by_rule_id pair now survives the round trip
+            # from Neo4j row through to the API-facing dict.
+            return [
+                {
+                    "subject_id_a": "S1",
+                    "subject_id_b": "C1",
+                    "relationship_type": "CASE_RISK_ESCALATION",
+                    "confidence": "High",
+                    "asserted_at": "t",
+                    "corroborated": False,
+                    "status": "rejected",
+                    "auto_invalidated": True,
+                    "invalidated_by_rule_id": "Rule_01_Shared_Employer",
+                }
+            ]
         return []
 
     session = FakeSession(responder)
     scope_stub = {"scope_subject_ids": ["S1", "S2"], "scope_case_ids": ["C1"]}
     with mock.patch.object(rule_audit, "get_session", fake_session_cm(session)), mock.patch.object(
         rule_audit, "resolve_scope", lambda case_id, subject_id: scope_stub
+    ), mock.patch.object(
+        # AI-31/AI-32: last_inference_change_at is now read via the
+        # shared reasoning_layer.case_staleness reader (its own
+        # get_session call, separate from the FakeSession above) —
+        # mocked at the point of use rather than re-plumbed through
+        # FakeSession's query-text dispatch.
+        rule_audit,
+        "get_last_inference_change_at_raw",
+        return_value="2026-08-01T00:00:00+00:00",
     ):
         envelope = rule_audit.get_rule_audit("C1")
 
@@ -445,16 +471,43 @@ def test_rule_audit_always_returns_all_rejectable_rules():
         next(r["rule_description"] for r in result["rules"] if r["rule_id"] == "Rule_01_Shared_Employer")
         != "Rule_01_Shared_Employer",
     )
+    check(
+        "AI-31: case-wide last_inference_change_at surfaced at the top level",
+        result["last_inference_change_at"] == "2026-08-01T00:00:00+00:00",
+    )
+    rule_08_row = next(
+        r for r in result["rules"] if r["rule_id"] == "Rule_08_Recidivist_Escalation"
+    )["inferred_relationships"][0]
+    check(
+        "AI-30/AI-31: auto_invalidated/invalidated_by_rule_id pass through on Rule_08's row",
+        rule_08_row["auto_invalidated"] is True
+        and rule_08_row["invalidated_by_rule_id"] == "Rule_01_Shared_Employer",
+    )
+    rule_01_row = next(
+        r for r in result["rules"] if r["rule_id"] == "Rule_01_Shared_Employer"
+    )["inferred_relationships"][0]
+    check(
+        "auto_invalidated/invalidated_by_rule_id degrade to None for rule families "
+        "with no case-level auto-invalidation concept",
+        rule_01_row["auto_invalidated"] is None and rule_01_row["invalidated_by_rule_id"] is None,
+    )
 
 
 def test_rule_audit_no_primary_subject_degrades_gracefully():
     print("\n[D4.2] rule_audit.py — no primary subject on the graph yet")
     session = FakeSession(lambda q, p: None if "is_primary" in q else [])
-    with mock.patch.object(rule_audit, "get_session", fake_session_cm(session)):
+    with mock.patch.object(rule_audit, "get_session", fake_session_cm(session)), mock.patch.object(
+        rule_audit, "get_last_inference_change_at_raw", return_value=None
+    ):
         envelope = rule_audit.get_rule_audit("C1")
     result = envelope["result"]
     check("primary_subject_id is None rather than raising", result["primary_subject_id"] is None)
     check("every rule still present, all fired=False", all(not r["fired"] for r in result["rules"]))
+    check(
+        "AI-31: last_inference_change_at is None (not a crash) when the "
+        "Case node itself can't be found either",
+        result["last_inference_change_at"] is None,
+    )
 
 
 def test_rule_audit_blank_case_id():

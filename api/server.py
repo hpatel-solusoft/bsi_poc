@@ -58,6 +58,7 @@ from api.models import (
     intakeRequest,
 )
 from api.pipeline_execution import (
+    evaluate_cache_staleness,
     fetch_live_graph_findings,
     fetch_live_risk_signals,
     fetch_live_rule_aware_tasks,
@@ -103,6 +104,7 @@ from core.investigation_plan_override_repository import (
     get_override,
     upsert_override,
 )
+from core.narrative_staleness import StalenessCheck
 from core.report_artifacts_repository import get_latest_report, save_report
 from etl.ingest_service import ingest as run_graph_ingest
 from reasoning_layer.apply_schema import apply_schema
@@ -434,12 +436,27 @@ def intake(req: intakeRequest):
     """
     start = time.time()
     try:
-        # Agent-summary cache (reload_ai_summary=False, default): if
-        # intake has already produced and persisted an agent_summary for
-        # this case_id, answer from case_ai_summary_store / warm CASE_STORE
-        # WITHOUT calling the LLM again. reload_ai_summary=True always
-        # bypasses this lookup and falls through to a fresh agent run below.
-        if not req.reload_ai_summary:
+        # AI-32: the existing reload_ai_summary flag (core data changed,
+        # via AppWorks — see core.narrative_staleness's module docstring)
+        # is now ONE of two independent triggers that can make this
+        # cache stale; AI-31's (:Case).last_inference_change_at is the
+        # other (an investigator reject/revert). staleness.should_refresh
+        # widens the cache-hit check below from reload_ai_summary alone
+        # to "either trigger fired"; staleness.should_rerun_full_pipeline
+        # narrows back down to core_data-only for the one thing actually
+        # worth re-running from scratch for — see
+        # core.narrative_staleness.StalenessCheck.should_rerun_full_pipeline's
+        # docstring for why a graph-only change never warrants it.
+        staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
+
+        # Agent-summary cache: if intake has already produced and
+        # persisted an agent_summary for this case_id, answer from
+        # case_ai_summary_store / warm CASE_STORE WITHOUT calling the LLM
+        # again. Either staleness trigger bypasses this lookup and falls
+        # through to a fresh agent run below (a graph-only trigger still
+        # regenerates the narrative — see run_intake_direct_pipeline's
+        # force argument further down for what it does NOT also do).
+        if not staleness.should_refresh:
             cached = get_cached_route_summary(req.case_id, "intake")
             if cached is not None:
                 cached_case_data, cached_summary = cached
@@ -491,6 +508,10 @@ def intake(req: intakeRequest):
                             "pipeline_status": "cached",
                             "reload_ai_summary": req.reload_ai_summary,
                             "agent_summary_source": "db_cache",
+                            # AI-32: always None on this branch — it is
+                            # only reached when staleness.should_refresh
+                            # is False, i.e. neither trigger fired.
+                            "stale_reason": staleness.stale_reason,
                         },
                     },
                 }
@@ -512,9 +533,21 @@ def intake(req: intakeRequest):
         # (Section 8.1 AI-12, Section 9.1 AI-13) — factored out to
         # api/pipeline_execution.py. subject_primary_id was injected into
         # complaint_intelligence by extract_tool_results above.
+        #
+        # AI-32: staleness.should_rerun_full_pipeline, NOT
+        # req.reload_ai_summary directly, now controls the Wave 1/2
+        # force-rerun inside run_intake_direct_pipeline (it gates
+        # enrich_graph_context's own `force` argument) — True only for a
+        # core_data-driven refresh. A graph-only refresh still reaches
+        # this call (staleness.should_refresh already got it past the
+        # cache-hit check above, which is what makes the LLM run again at
+        # all and therefore what regenerates the narrative), but passes
+        # False here, so Wave 1/2 is left exactly as an investigator's
+        # reject/revert already left it in Neo4j — nothing about AppWorks
+        # structural data changed, so nothing there needs recomputing.
         sections, provenance_trail = run_intake_direct_pipeline(
             req.case_id,
-            req.reload_ai_summary,
+            staleness.should_rerun_full_pipeline,
             sections,
             provenance_trail,
         )
@@ -579,9 +612,21 @@ def intake(req: intakeRequest):
                 "meta": {
                     "tool_calls_made": len(provenance_trail),
                     "duration_seconds": duration_seconds,
-                    "pipeline_status": "reloaded" if req.reload_ai_summary else "ran",
+                    # AI-32: "reloaded" now specifically means the full
+                    # pipeline (Wave 1/2) re-ran — core_data was part of
+                    # the reason. A graph-only refresh still called the
+                    # LLM fresh (that's why this branch was reached at
+                    # all) but skipped that heavier step, so it gets its
+                    # own status rather than being folded into "ran" (a
+                    # cache hit) or "reloaded" (implies the full pipeline).
+                    "pipeline_status": (
+                        "reloaded"
+                        if staleness.should_rerun_full_pipeline
+                        else ("narrative_regenerated" if staleness.graph_changed else "ran")
+                    ),
                     "reload_ai_summary": req.reload_ai_summary,
                     "agent_summary_source": "llm",
+                    "stale_reason": staleness.stale_reason,
                 },
             },
         }
@@ -623,12 +668,21 @@ def similar_cases(req: SimilarCasesRequest):
             len(list(case_data.keys())),
         )
 
-        # Agent-summary cache (reload_ai_summary=False, default): if
-        # similar_cases has already produced and persisted an
-        # agent_summary for this case_id, answer from it WITHOUT calling
-        # the LLM again. reload_ai_summary=True always bypasses this
-        # lookup and falls through to a fresh agent run below.
-        if not req.reload_ai_summary:
+        # AI-32: the two independent staleness triggers, combined — see
+        # core.narrative_staleness's module docstring. /similar_cases has
+        # no separate "pipeline" stage of its own (find_structural_matches
+        # is already a live, always-fresh Neo4j read regardless of cache
+        # state — see fetch_live_similar_cases below), so unlike /intake
+        # there is nothing to selectively skip: should_refresh alone is
+        # exactly "regenerate the narrative", which is the entirety of
+        # what a refresh means for this route either way.
+        staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
+
+        # Agent-summary cache: if similar_cases has already produced and
+        # persisted an agent_summary for this case_id, answer from it
+        # WITHOUT calling the LLM again. Either staleness trigger bypasses
+        # this lookup and falls through to a fresh agent run below.
+        if not staleness.should_refresh:
             cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("similar_cases")
             if cached_summary is not None:
                 # similar_cases is ALWAYS a live Neo4j read, cache hit or
@@ -664,6 +718,7 @@ def similar_cases(req: SimilarCasesRequest):
                         "meta": {
                             "data_source": data_source,
                             "agent_summary_source": "db_cache",
+                            "stale_reason": staleness.stale_reason,
                         },
                     },
                 }
@@ -732,6 +787,7 @@ def similar_cases(req: SimilarCasesRequest):
                 "meta": {
                     "data_source": data_source,
                     "agent_summary_source": "llm",
+                    "stale_reason": staleness.stale_reason,
                 },
             },
         }
@@ -768,12 +824,20 @@ def risk_assessment(req: RiskAssessmentRequest):
         case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
 
-        # Agent-summary cache (reload_ai_summary=False, default): if
-        # risk_assessment has already produced and persisted an
-        # agent_summary for this case_id, answer from it WITHOUT calling
-        # the LLM again. reload_ai_summary=True always bypasses this
-        # lookup and falls through to a fresh agent run below.
-        if not req.reload_ai_summary:
+        # AI-32: the two independent staleness triggers, combined — see
+        # core.narrative_staleness's module docstring. Like
+        # /similar_cases, /risk_assessment has no separate "pipeline"
+        # stage of its own (neo4j_signals/risk_score/risk_tier are
+        # already a live, always-fresh recompute regardless of cache
+        # state — see fetch_live_risk_signals below), so should_refresh
+        # alone is exactly "regenerate the narrative".
+        staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
+
+        # Agent-summary cache: if risk_assessment has already produced
+        # and persisted an agent_summary for this case_id, answer from it
+        # WITHOUT calling the LLM again. Either staleness trigger bypasses
+        # this lookup and falls through to a fresh agent run below.
+        if not staleness.should_refresh:
             cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("risk_assessment")
             cached_risk_assessment = case_data.get("risk_assessment")
             if (
@@ -837,6 +901,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                         "meta": {
                             "data_source": data_source,
                             "agent_summary_source": "db_cache",
+                            "stale_reason": staleness.stale_reason,
                         },
                     },
                 }
@@ -927,6 +992,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                 "meta": {
                     "data_source": data_source,
                     "agent_summary_source": "llm",
+                    "stale_reason": staleness.stale_reason,
                 },
             },
         }
@@ -967,22 +1033,36 @@ def plan(req: PlanRequest):
         # make every override look stale (Section E.5).
         cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
 
+        # AI-32: the two independent staleness triggers, combined — see
+        # core.narrative_staleness's module docstring. Reuses the SAME
+        # cache_updated_at_before_call read just above (rather than a
+        # second Postgres round trip) so plan_stale's own comparison and
+        # this one are guaranteed to agree on which snapshot of
+        # case_ai_summary_store.updated_at they judged staleness against.
+        # Like /similar_cases and /risk_assessment, /plan has no separate
+        # "pipeline" stage of its own (rule_aware_tasks/rules_fired are
+        # already a live, always-fresh Neo4j read regardless of cache
+        # state — see fetch_live_rule_aware_tasks/prepare_plan_context),
+        # so should_refresh alone is exactly "regenerate the narrative".
+        staleness = evaluate_cache_staleness(
+            req.case_id, req.reload_ai_summary, cache_generated_at=cache_updated_at_before_call
+        )
+
         # Agent-summary cache: if /plan has already produced and persisted
         # an agent_summary for this case_id, answer from it WITHOUT calling
         # the LLM again.
         #
         # The investigation_plan_override (Section D.6) is checked FIRST,
-        # regardless of reload_ai_summary: once an investigator has
-        # modified the plan, that modification is authoritative, so a
-        # cache hit is served even when the caller asked to reload — a
-        # fresh LLM run would only be discarded in favour of
-        # override["modified_steps"] anyway (see run_plan_pipeline below),
-        # so skipping straight to it here saves the wasted LLM call.
-        # reload_ai_summary=True only bypasses the cache when NO override
-        # exists; it still falls through to a fresh agent run below in
-        # that case, same as before.
+        # regardless of staleness: once an investigator has modified the
+        # plan, that modification is authoritative, so a cache hit is
+        # served even when a refresh was otherwise indicated — a fresh LLM
+        # run would only be discarded in favour of override["modified_steps"]
+        # anyway (see run_plan_pipeline below), so skipping straight to it
+        # here saves the wasted LLM call. A staleness trigger only bypasses
+        # the cache when NO override exists; it still falls through to a
+        # fresh agent run below in that case, same as before.
         override = get_override(req.case_id)
-        if not req.reload_ai_summary or override is not None:
+        if not staleness.should_refresh or override is not None:
             cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("plan")
             cached_plan = case_data.get("investigation_plan")
             if cached_summary is not None and isinstance(cached_plan, dict):
@@ -1050,6 +1130,14 @@ def plan(req: PlanRequest):
                             "modified_on": modified_on.isoformat() if modified_on else None,
                             "plan_stale": plan_stale,
                             "agent_summary_source": "db_cache",
+                            # AI-32: independent of plan_stale above —
+                            # plan_stale is specifically about a saved
+                            # HUMAN OVERRIDE lagging behind case data
+                            # (Section E.5); stale_reason is about the
+                            # underlying AI-GENERATED narrative itself.
+                            # Both can be true/non-null at once and mean
+                            # different things.
+                            "stale_reason": staleness.stale_reason,
                         },
                     },
                 }
@@ -1185,6 +1273,7 @@ def plan(req: PlanRequest):
                     "modified_on": modified_on.isoformat() if modified_on else None,
                     "plan_stale": plan_stale,
                     "agent_summary_source": "llm",
+                    "stale_reason": staleness.stale_reason,
                 },
             },
         }
@@ -1400,9 +1489,14 @@ def generate_report(req: ReportGenerationRequest):
     identical to what was cached, answer from the latest persisted draft
     with only the Decision & Override Log re-derived, no LLM call. If
     the Related Network has changed since (a rejection, a revert, a
-    newly-active connection), the cache is treated as stale regardless
-    of reload_ai_summary and a fresh report is generated. reload_ai_summary=True
-    always skips the cache lookup outright and persists a fresh draft row.
+    newly-active connection), OR AI-31's (:Case).last_inference_change_at
+    is newer than this draft's own generated_at (AI-32), the cache is
+    treated as stale regardless of reload_ai_summary and a fresh report
+    is generated. reload_ai_summary=True always skips SERVING from this
+    cache and persists a fresh draft row — though the report_artifacts
+    lookup itself still runs even then, purely so the response's
+    stale_reason can report "both" accurately; see the AI-32 comment
+    inline below for why that one extra read is worth its cost here.
     """
     start = time.time()
     try:
@@ -1488,12 +1582,35 @@ def generate_report(req: ReportGenerationRequest):
             )
             plan_override = None
 
-        # Report cache (reload_ai_summary=False, default): if a report has
-        # already been generated and persisted for this case_id AND the
-        # live Related Network read above is identical to what was cached
-        # (no rejection, revert, or newly-active connection since), answer
-        # from the latest report_artifacts row WITHOUT calling the LLM
-        # again. Any actual difference means the cached narrative prose
+        # Report cache: if a report has already been generated and
+        # persisted for this case_id AND neither staleness trigger below
+        # fired, answer from the latest report_artifacts row WITHOUT
+        # calling the LLM again.
+        #
+        # /generate_report's "graph changed" signal is the OR of TWO
+        # independent detectors, deliberately kept BOTH rather than one
+        # replacing the other:
+        #   1. The existing, finer-grained content diff: is the live
+        #      Related Network read above byte-identical to what was
+        #      cached? This predates AI-32 and stays authoritative for
+        #      the actual cache-serve decision — it catches the exact
+        #      set of cases that matter for THIS route (a connection's
+        #      status/membership actually differs) and is immune to
+        #      false positives from a reject immediately followed by a
+        #      revert (net content unchanged, but AI-31's timestamp
+        #      would still have moved).
+        #   2. AI-32's new (:Case).last_inference_change_at vs this
+        #      report's own generated_at — the same coarse signal every
+        #      other cached-narrative route now uses. Folded in with OR,
+        #      never replacing #1: a defense-in-depth signal, not a
+        #      downgrade of the existing precision. Practically this
+        #      only ever fires ahead of #1 in the reject-then-revert case
+        #      above, where reporting stale_reason="graph" even though
+        #      the content is provably unchanged is the honest answer —
+        #      an investigator DID touch the graph — while this route
+        #      still correctly serves the (genuinely still-accurate)
+        #      cached content either way.
+        # Any actual difference means the cached narrative prose
         # (Reviewed and Excluded Connections, Network Connections) can no
         # longer be trusted — that text was written by the LLM once, at
         # generation time, and there is no safe way to splice a per-
@@ -1501,89 +1618,127 @@ def generate_report(req: ReportGenerationRequest):
         # & Override Log block below can be — so a real change falls
         # through to the full regeneration path and gets a fresh LLM
         # narrative, exactly as if reload_ai_summary=True had been passed.
-        # reload_ai_summary=True always skips this cache lookup entirely.
-        if not req.reload_ai_summary:
-            cached_report = get_latest_report(req.case_id)
-            if cached_report is not None:
-                cached_content = cached_report.get("content") or {}
-                cached_related_network = cached_content.get("related_network", [])
-                live_related_network = related.get("related_network", [])
+        #
+        # core_data_changed (reload_ai_summary=True) always skips SERVING
+        # from this cache — a forced reload must produce fresh prose. The
+        # lookup itself still runs either way (a cheap indexed Postgres
+        # read next to the LLM call this cache exists to avoid), purely so
+        # stale_reason below can report "both" accurately when core data
+        # AND the graph both changed, instead of silently losing the
+        # graph signal whenever a caller also happens to pass
+        # reload_ai_summary=True.
+        core_data_changed = bool(req.reload_ai_summary)
+        cached_report = get_latest_report(req.case_id)
+        if cached_report is not None:
+            cached_content = cached_report.get("content") or {}
+            cached_related_network = cached_content.get("related_network", [])
+            live_related_network = related.get("related_network", [])
+            content_unchanged = live_related_network == cached_related_network
 
-                if live_related_network == cached_related_network:
-                    cached_rejected_count = sum(
-                        1 for entry in cached_related_network if entry.get("status") == "rejected"
-                    )
+            # cached_report["generated_at"] is report_artifacts' own
+            # native Postgres timestamp column for this exact draft
+            # (distinct from cached_content["generated_at"], a string
+            # baked into the JSON body) — the correct cache_generated_at
+            # reference point for THIS report, never
+            # case_ai_summary_store.updated_at, which tracks a different
+            # cache entirely.
+            report_staleness = evaluate_cache_staleness(
+                req.case_id,
+                reload_ai_summary_requested=req.reload_ai_summary,
+                cache_generated_at=cached_report.get("generated_at"),
+            )
+            graph_changed = (not content_unchanged) or report_staleness.graph_changed
+            # StalenessCheck is frozen and takes plain booleans, so
+            # folding in content_unchanged alongside AI-31's own
+            # timestamp signal is a direct construction rather than a
+            # second call into evaluate_cache_staleness — see this
+            # block's own comment above for why both detectors matter.
+            staleness = StalenessCheck(core_data_changed=core_data_changed, graph_changed=graph_changed)
 
-                    # The Related Network itself is unchanged, but the plan
-                    # override could still have moved (a plan modification
-                    # or revert doesn't touch related_network at all) — so
-                    # the Decision & Override Log is still re-derived fresh
-                    # here and spliced into the cached narrative rather
-                    # than trusted from cached_content["decision_log"].
-                    cached_rejected_connections = [
-                        entry for entry in cached_related_network if entry.get("status") == "rejected"
-                    ]
-                    decision_log_envelope = build_decision_log(cached_rejected_connections, plan_override)
-                    decision_log_result = decision_log_envelope["result"]
+            if not core_data_changed and content_unchanged:
+                cached_rejected_count = sum(
+                    1 for entry in cached_related_network if entry.get("status") == "rejected"
+                )
 
-                    # Splice the freshly-rendered section into the cached
-                    # narrative markdown without re-invoking the LLM — same
-                    # technique apply_step_override_to_summary already uses
-                    # to overlay a live override onto /plan's cached prose.
-                    cached_report_markdown = (cached_content.get("standard_sections") or {}).get(
-                        "report_markdown", ""
-                    )
-                    resolved_report_markdown = replace_markdown_section(
-                        cached_report_markdown,
-                        "Decision & Override Log",
-                        decision_log_result["decision_log_markdown"],
-                    )
+                # The Related Network itself is unchanged, but the plan
+                # override could still have moved (a plan modification
+                # or revert doesn't touch related_network at all) — so
+                # the Decision & Override Log is still re-derived fresh
+                # here and spliced into the cached narrative rather
+                # than trusted from cached_content["decision_log"].
+                cached_rejected_connections = [
+                    entry for entry in cached_related_network if entry.get("status") == "rejected"
+                ]
+                decision_log_envelope = build_decision_log(cached_rejected_connections, plan_override)
+                decision_log_result = decision_log_envelope["result"]
 
-                    duration_seconds = round(time.time() - start, 1)
-                    logger.info(
-                        "generate_report CACHE HIT for case_id=%s — Related Network "
-                        "unchanged since last draft, answering from report_artifacts "
-                        "with a freshly-derived Decision & Override Log, no LLM call made",
-                        req.case_id,
-                    )
-                    log_agent_call(
-                        case_id=req.case_id,
-                        agent_name="report_generation",
-                        endpoint="/generate_report",
-                        latency_ms=int(duration_seconds * 1000),
-                        status="success",
-                    )
-                    return {
-                        "case_id": req.case_id,
-                        "status": "completed",
-                        "report_id": cached_content.get("report_id"),
-                        "generated_at": cached_content.get("generated_at"),
-                        "details": {
-                            "agent_summary": render_markdown_html_with_sources(
-                                resolved_report_markdown,
-                                case_data.get("provenance_trail", []),
-                            ),
-                            "related_network": cached_related_network,
-                            "confidence_summary": cached_content.get(
-                                "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
-                            ),
-                            "rejected_count": cached_rejected_count,
-                            "decision_log": decision_log_result.get("decision_log", []),
-                            "meta": {
-                                "data_source": data_source,
-                                "report_status": cached_content.get("status", "draft"),
-                                "agent_summary_source": "db_cache",
-                                "persisted_to_postgres": True,
-                            },
-                        },
-                    }
+                # Splice the freshly-rendered section into the cached
+                # narrative markdown without re-invoking the LLM — same
+                # technique apply_step_override_to_summary already uses
+                # to overlay a live override onto /plan's cached prose.
+                cached_report_markdown = (cached_content.get("standard_sections") or {}).get(
+                    "report_markdown", ""
+                )
+                resolved_report_markdown = replace_markdown_section(
+                    cached_report_markdown,
+                    "Decision & Override Log",
+                    decision_log_result["decision_log_markdown"],
+                )
 
+                duration_seconds = round(time.time() - start, 1)
                 logger.info(
-                    "generate_report CACHE STALE for case_id=%s — Related Network has "
-                    "changed since the last draft (rejection, revert, or new connection); "
-                    "regenerating a fresh report instead of serving report_artifacts",
+                    "generate_report CACHE HIT for case_id=%s — Related Network "
+                    "unchanged since last draft, answering from report_artifacts "
+                    "with a freshly-derived Decision & Override Log, no LLM call made",
                     req.case_id,
                 )
+                log_agent_call(
+                    case_id=req.case_id,
+                    agent_name="report_generation",
+                    endpoint="/generate_report",
+                    latency_ms=int(duration_seconds * 1000),
+                    status="success",
+                )
+                return {
+                    "case_id": req.case_id,
+                    "status": "completed",
+                    "report_id": cached_content.get("report_id"),
+                    "generated_at": cached_content.get("generated_at"),
+                    "details": {
+                        "agent_summary": render_markdown_html_with_sources(
+                            resolved_report_markdown,
+                            case_data.get("provenance_trail", []),
+                        ),
+                        "related_network": cached_related_network,
+                        "confidence_summary": cached_content.get(
+                            "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
+                        ),
+                        "rejected_count": cached_rejected_count,
+                        "decision_log": decision_log_result.get("decision_log", []),
+                        "meta": {
+                            "data_source": data_source,
+                            "report_status": cached_content.get("status", "draft"),
+                            "agent_summary_source": "db_cache",
+                            "persisted_to_postgres": True,
+                            "stale_reason": staleness.stale_reason,
+                        },
+                    },
+                }
+
+            logger.info(
+                "generate_report CACHE STALE for case_id=%s stale_reason=%s — "
+                "regenerating a fresh report instead of serving report_artifacts",
+                req.case_id,
+                staleness.stale_reason,
+            )
+        else:
+            # No report has ever been generated for this case_id — a
+            # genuine first run, not staleness. graph_changed is reported
+            # False here for the same reason every other cached-narrative
+            # route treats a missing cache as "nothing to compare, no
+            # signal" rather than guessing (see
+            # core.narrative_staleness.is_graph_newer's docstring).
+            staleness = StalenessCheck(core_data_changed=core_data_changed, graph_changed=False)
 
         # --- Decision & Override Log assembly (Report Design ACTIONS #3) ---
         # Deterministic, non-LLM formatting over two inputs /generate_report
@@ -1727,6 +1882,7 @@ def generate_report(req: ReportGenerationRequest):
                     "report_status": "draft",
                     "agent_summary_source": "llm",
                     "persisted_to_postgres": persisted is not None,
+                    "stale_reason": staleness.stale_reason,
                 },
             },
         }

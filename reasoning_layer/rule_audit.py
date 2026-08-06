@@ -37,6 +37,7 @@ import logging
 from typing import Any, Dict, List
 
 from reasoning_layer import rule_registry
+from reasoning_layer.case_staleness import get_last_inference_change_at_raw
 from reasoning_layer.neo4j_client import get_session
 from reasoning_layer.rejection import build_match_id
 from reasoning_layer.scope import resolve_scope
@@ -160,7 +161,13 @@ _PROP_QUERIES: Dict[str, str] = {
         RETURN c.risk_escalation_subject_id AS subject_id_a, c.case_id AS subject_id_b,
                "CASE_RISK_ESCALATION" AS relationship_type, c.risk_escalation_confidence AS confidence,
                toString(c.risk_escalation_asserted_at) AS asserted_at, false AS corroborated,
-               c.risk_escalation_status AS status
+               c.risk_escalation_status AS status,
+               // AI-30/AI-31: rules_fired.py already surfaces this pair
+               // in its own aggregate output; /rule_audit was the one
+               // consumer still missing it — added here for parity, pure
+               // field pass-through (no cascade.py change needed).
+               c.risk_escalation_auto_invalidated AS auto_invalidated,
+               c.risk_escalation_invalidated_by_rule_id AS invalidated_by_rule_id
     """,
     "Rule_12_SLAM_Wage_Corroboration": """
         MATCH (c:Case)-[:HAS_ALLEGATION]->(al:Allegation)-[:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject)
@@ -177,7 +184,10 @@ _PROP_QUERIES: Dict[str, str] = {
                "FASTTRACK_RECOMMENDATION" AS relationship_type,
                c.fasttrack_recommendation_confidence AS confidence,
                toString(c.fasttrack_recommendation_asserted_at) AS asserted_at, false AS corroborated,
-               c.fasttrack_recommendation_status AS status
+               c.fasttrack_recommendation_status AS status,
+               // AI-30/AI-31: same parity fix as Rule_08 above.
+               c.fasttrack_recommendation_auto_invalidated AS auto_invalidated,
+               c.fasttrack_recommendation_invalidated_by_rule_id AS invalidated_by_rule_id
     """,
 }
 
@@ -208,10 +218,20 @@ def get_rule_audit(case_id: str) -> dict:
               "inferred_relationships": [
                 {subject_id_a, subject_id_b, relationship_type,
                  confidence, asserted_at, corroborated,
-                 status: "active" | "rejected", match_id}
+                 status: "active" | "rejected", match_id,
+                 # AI-30/AI-31: only populated for Rule_08/Rule_13 rows
+                 # (the case-flag family) — null on every other rule's
+                 # rows, which have no case-level auto-invalidation
+                 # concept of their own.
+                 auto_invalidated: bool | None,
+                 invalidated_by_rule_id: str | None}
               ],
             }
           ],
+          # AI-31: case-wide graph-change staleness signal — see
+          # reasoning_layer/rejection.py's _touch_case_last_inference_change.
+          # None until the first reject/revert call for this case.
+          "last_inference_change_at": str | None,
         }
 
     Every rejectable rule_id from rejection.RULE_IDS_REJECTABLE is
@@ -237,6 +257,15 @@ def get_rule_audit(case_id: str) -> dict:
         primary_record = session.run(_PRIMARY_SUBJECT_QUERY, case_id=case_id).single()
 
     primary_subject_id = primary_record["primary_subject_id"] if primary_record else None
+    # AI-31: case-wide graph-change staleness signal, read via the
+    # shared reasoning_layer.case_staleness reader (also used by AI-32's
+    # narrative-staleness check) rather than a second private query
+    # here — deliberately its own read, independent of whether a
+    # primary subject has been flagged yet: a Case node can exist (and
+    # have already been reject/revert-touched) before ETL has flagged
+    # is_primary on any Subject, and this signal must not silently
+    # disappear for that window.
+    last_inference_change_at = get_last_inference_change_at_raw(case_id)
 
     if primary_subject_id:
         scope = resolve_scope(case_id=case_id, subject_id=primary_subject_id)
@@ -285,6 +314,13 @@ def get_rule_audit(case_id: str) -> dict:
                     # MODIFIER_RULE_ID — the one rule_id excluded above —
                     # has no rejectable instance at all).
                     "match_id": build_match_id(rule_id, row["subject_id_a"], row["subject_id_b"]),
+                    # AI-30/AI-31: present only on Rule_08/Rule_13 rows
+                    # (the only queries above that RETURN these columns);
+                    # .get(...) rather than row[...] is what makes every
+                    # other rule's rows degrade to None instead of a
+                    # KeyError.
+                    "auto_invalidated": row.get("auto_invalidated"),
+                    "invalidated_by_rule_id": row.get("invalidated_by_rule_id"),
                 }
                 for row in rows
                 if row["subject_id_a"] is not None
@@ -302,6 +338,11 @@ def get_rule_audit(case_id: str) -> dict:
         "case_id": case_id,
         "primary_subject_id": primary_subject_id,
         "rules": rules,
+        # AI-31: case-wide graph-change staleness signal — see
+        # _CASE_STALENESS_QUERY above and reasoning_layer/rejection.py's
+        # _touch_case_last_inference_change. None until the first
+        # reject_inference/revert_rejection call for this case.
+        "last_inference_change_at": last_inference_change_at,
     }
     logger.info(
         "get_rule_audit: case_id=%s primary_subject_id=%s rules_fired=%d/%d",
