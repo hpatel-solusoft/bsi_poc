@@ -73,6 +73,7 @@ from api.response_builders import (
     apply_step_override_to_summary,
     build_confidence_summary,
     fired_rules_only,
+    format_provenance_lines,
     render_markdown_html,
     render_markdown_html_with_sources,
     replace_markdown_section,
@@ -489,10 +490,8 @@ def intake(req: intakeRequest):
                     "case_id": req.case_id,
                     "status": "completed",
                     "details": {
-                        "agent_summary": render_markdown_html_with_sources(
-                            cached_summary,
-                            cached_case_data.get("provenance_trail", []),
-                        ),
+                        "agent_summary": cached_summary,
+                        "provenance_trail": format_provenance_lines(cached_case_data.get("provenance_trail", [])),
                         "graph_findings": {
                             "network_match_flag": live_findings.get("network_match_flag"),
                             "graph_context": live_findings.get("graph_context"),
@@ -591,8 +590,8 @@ def intake(req: intakeRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(assistant_text, provenance_trail),
-                # Graph reasoning results (AI-12 network_match_flag, AI-13
+                "agent_summary": assistant_text,
+                "provenance_trail": format_provenance_lines(provenance_trail),
                 # graph_context/graph_signals/rules_fired) previously only
                 # reached ai_summary.investigation — computed after the LLM's
                 # agent_summary text was already finalised, so it never
@@ -708,10 +707,8 @@ def similar_cases(req: SimilarCasesRequest):
                     "case_id": req.case_id,
                     "status": "completed",
                     "details": {
-                        "agent_summary": render_markdown_html_with_sources(
-                            cached_summary,
-                            case_data.get("provenance_trail", []),
-                        ),
+                        "agent_summary": cached_summary,
+                        "provenance_trail": format_provenance_lines(case_data.get("provenance_trail", [])),
                         "graph_findings": {
                             "similar_cases": live_similar_cases,
                         },
@@ -773,7 +770,8 @@ def similar_cases(req: SimilarCasesRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(agent_summary, merged_provenance),
+                "agent_summary": agent_summary,
+                "provenance_trail": format_provenance_lines(merged_provenance),
                 # Raw Neo4j structural match result (AI-14 —
                 # reasoning_layer.similar_cases.find_structural_matches):
                 # matches, match_reasons, score, source, total_candidates_scored.
@@ -887,10 +885,8 @@ def risk_assessment(req: RiskAssessmentRequest):
                     "case_id": req.case_id,
                     "status": "completed",
                     "details": {
-                        "agent_summary": render_markdown_html_with_sources(
-                            cached_summary,
-                            case_data.get("provenance_trail", []),
-                        ),
+                        "agent_summary": cached_summary,
+                        "provenance_trail": format_provenance_lines(case_data.get("provenance_trail", [])),
                         "graph_findings": {
                             "neo4j_signals": live_risk.get("neo4j_signals"),
                             "base_risk_score": live_risk.get("base_risk_score", base_risk_score),
@@ -973,7 +969,8 @@ def risk_assessment(req: RiskAssessmentRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(assistant_text, merged_provenance),
+                "agent_summary": assistant_text,
+                "provenance_trail": format_provenance_lines(merged_provenance),
                 # Neo4j graph risk signals (AI-15 —
                 # reasoning_layer.risk_signals.apply_graph_risk_signals):
                 # the four Section 8.4 signals plus the AppWorks base score
@@ -1115,10 +1112,8 @@ def plan(req: PlanRequest):
                     "case_id": req.case_id,
                     "status": "completed",
                     "details": {
-                        "agent_summary": render_markdown_html_with_sources(
-                            cached_summary,
-                            case_data.get("provenance_trail", []),
-                        ),
+                        "agent_summary": cached_summary,
+                        "provenance_trail": format_provenance_lines(case_data.get("provenance_trail", [])),
                         "graph_findings": {
                             "rule_aware_tasks": live_rule_aware_tasks,
                             "rules_fired": fired_rules_only(live_findings.get("rules_fired")),
@@ -1249,10 +1244,8 @@ def plan(req: PlanRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": render_markdown_html_with_sources(
-                    resolved_agent_summary,
-                    merged_provenance,
-                ),
+                "agent_summary": resolved_agent_summary,
+                "provenance_trail": format_provenance_lines(merged_provenance),
                 # Graph-derived plan output (AI-16 —
                 # reasoning_layer.investigation_tasks.build_rule_aware_tasks):
                 # the rule-aware task recommendations and the rules_fired
@@ -1705,10 +1698,8 @@ def generate_report(req: ReportGenerationRequest):
                     "report_id": cached_content.get("report_id"),
                     "generated_at": cached_content.get("generated_at"),
                     "details": {
-                        "agent_summary": render_markdown_html_with_sources(
-                            resolved_report_markdown,
-                            case_data.get("provenance_trail", []),
-                        ),
+                        "agent_summary": resolved_report_markdown,
+                        "provenance_trail": format_provenance_lines(cached_report.get("provenance_trail", [])),
                         "related_network": cached_related_network,
                         "confidence_summary": cached_content.get(
                             "confidence_summary", {"high": 0, "medium": 0, "unresolved": 0}
@@ -1869,10 +1860,8 @@ def generate_report(req: ReportGenerationRequest):
             "report_id": report_id,
             "generated_at": generated_at,
             "details": {
-                "agent_summary": render_markdown_html_with_sources(
-                    assistant_text,
-                    merged_provenance,
-                ),
+                "agent_summary": assistant_text,
+                "provenance_trail": format_provenance_lines(merged_provenance),
                 "related_network": related.get("related_network", []),
                 "confidence_summary": confidence_summary,
                 "rejected_count": related.get("rejected_count", 0),
@@ -2496,7 +2485,8 @@ def copilot(req: CopilotRequest):
         )
 
         return {
-            "answer": render_markdown_html(answer),
+            "answer": answer,
+            "provenance_trail": format_provenance_lines(combined_provenance),
             "sources_cited": sources_cited,
             "sources_cited_details": sources_cited_details,
             "case_data_source": case_data_source,
