@@ -510,6 +510,7 @@ def intake(req: intakeRequest):
                             # AI-32: always None on this branch — it is
                             # only reached when staleness.should_refresh
                             # is False, i.e. neither trigger fired.
+                            "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
                         },
                     },
@@ -625,6 +626,7 @@ def intake(req: intakeRequest):
                     ),
                     "reload_ai_summary": req.reload_ai_summary,
                     "agent_summary_source": "llm",
+                    "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
                 },
             },
@@ -715,6 +717,7 @@ def similar_cases(req: SimilarCasesRequest):
                         "meta": {
                             "data_source": data_source,
                             "agent_summary_source": "db_cache",
+                            "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
                         },
                     },
@@ -785,6 +788,7 @@ def similar_cases(req: SimilarCasesRequest):
                 "meta": {
                     "data_source": data_source,
                     "agent_summary_source": "llm",
+                    "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
                 },
             },
@@ -897,6 +901,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                         "meta": {
                             "data_source": data_source,
                             "agent_summary_source": "db_cache",
+                            "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
                         },
                     },
@@ -989,6 +994,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                 "meta": {
                     "data_source": data_source,
                     "agent_summary_source": "llm",
+                    "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
                 },
             },
@@ -1132,6 +1138,7 @@ def plan(req: PlanRequest):
                             # underlying AI-GENERATED narrative itself.
                             # Both can be true/non-null at once and mean
                             # different things.
+                            "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
                         },
                     },
@@ -1266,6 +1273,7 @@ def plan(req: PlanRequest):
                     "modified_on": modified_on.isoformat() if modified_on else None,
                     "plan_stale": plan_stale,
                     "agent_summary_source": "llm",
+                    "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
                 },
             },
@@ -1711,6 +1719,7 @@ def generate_report(req: ReportGenerationRequest):
                             "report_status": cached_content.get("status", "draft"),
                             "agent_summary_source": "db_cache",
                             "persisted_to_postgres": True,
+                            "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
                         },
                     },
@@ -1882,6 +1891,7 @@ def generate_report(req: ReportGenerationRequest):
                     "report_status": "draft",
                     "agent_summary_source": "llm",
                     "persisted_to_postgres": persisted is not None,
+                    "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
                 },
             },

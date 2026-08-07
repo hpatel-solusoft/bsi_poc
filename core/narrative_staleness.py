@@ -67,6 +67,19 @@ class StalenessCheck:
     graph_changed: bool
 
     @property
+    def stale(self) -> bool:
+        """Explicit boolean twin of stale_reason (Rule_Cascade-Staleness.txt's
+        Flow 3, "NEW FIELDS" summary: response.stale alongside
+        response.stale_reason) — `bool(stale_reason)` gives the identical
+        answer, but every route's response carries this as its own named
+        field rather than asking the frontend to truthiness-check a
+        string, since `stale_reason` is allowed to be the literal string
+        "null" nowhere — it is a real null/None on the wire, and a
+        dedicated boolean is the least surprising way to say "should the
+        frontend show a refresh banner at all"."""
+        return self.core_data_changed or self.graph_changed
+
+    @property
     def stale_reason(self) -> StaleReason:
         """"core_data" / "graph" / "both" / None — exactly the four
         values AI-32 asks for, and the literal field a route's response
