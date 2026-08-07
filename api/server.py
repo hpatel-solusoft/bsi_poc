@@ -1743,6 +1743,20 @@ def generate_report(req: ReportGenerationRequest):
         decision_log_envelope = build_decision_log(rejected_connections, plan_override)
         decision_log_result = decision_log_envelope["result"]
 
+        # rules_fired for the report narrative is a live Neo4j read, same
+        # as /intake and /plan (see fetch_live_graph_findings) — case_data
+        # (resolved above via CS-4 warm lookup -> Postgres fallback ->
+        # ai_summary body) NEVER carries rules_fired at all
+        # (core.persistence_filters.strip_graph_derived_fields strips it
+        # before every write), so case_data.get("rules_fired") was always
+        # None/[] here and "Rules Fired" narrated as empty regardless of
+        # what had actually fired in the graph. Reading it fresh means an
+        # investigator's reject/revert, or a rule that fired since the
+        # last cached draft, is reflected in this report immediately.
+        live_report_rules_fired = fetch_live_graph_findings(req.case_id, subject_id).get(
+            "rules_fired", []
+        )
+
         # Inject the computed network and decision log into the case
         # context the prompt serialises, so the LLM narrates THESE facts
         # (never adds, removes, or reorders them — REPORT_GENERATION scope
@@ -1753,13 +1767,10 @@ def generate_report(req: ReportGenerationRequest):
         # response-boundary filter /intake and /plan already apply via
         # fired_rules_only() (see api/response_builders.py: CASE_STORE and
         # the merge keep the full fixed 14-entry block; every reader that
-        # displays it to an investigator trims to fired:true first). This
-        # route was the one place still serialising the unfiltered block,
-        # which is why "Rules Fired" narrated all 14 rules — including the
-        # ones that never fired — instead of only the ones that did.
+        # displays it to an investigator trims to fired:true first).
         case_data_for_prompt = {
             **case_data,
-            "rules_fired": fired_rules_only(case_data.get("rules_fired")),
+            "rules_fired": fired_rules_only(live_report_rules_fired),
             "related_network": related.get("related_network", []),
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
@@ -2062,13 +2073,25 @@ def generate_report_pdf(req: ReportGenerationRequest):
         decision_log_envelope = build_decision_log(rejected_connections, plan_override)
         decision_log_result = decision_log_envelope["result"]
 
+        # rules_fired for the report narrative is a live Neo4j read,
+        # identical to the fix in /generate_report above (and the same
+        # pattern /intake and /plan already use via
+        # fetch_live_graph_findings) — case_data never carries rules_fired
+        # at all (core.persistence_filters.strip_graph_derived_fields), so
+        # case_data.get("rules_fired") was always None/[] here too and the
+        # rendered PDF's "Rules Fired" section always read "No inference
+        # rules fired for this case."
+        live_report_rules_fired = fetch_live_graph_findings(req.case_id, subject_id).get(
+            "rules_fired", []
+        )
+
         # Same context assembly and prompt as /generate_report — the LLM
         # narrates the Related Network, Reviewed and Excluded Connections,
         # and Decision & Override Log sections; it never decides their
         # contents.
         case_data_for_prompt = {
             **case_data,
-            "rules_fired": fired_rules_only(case_data.get("rules_fired")),
+            "rules_fired": fired_rules_only(live_report_rules_fired),
             "related_network": related.get("related_network", []),
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
