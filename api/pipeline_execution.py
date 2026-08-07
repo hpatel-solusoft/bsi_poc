@@ -18,8 +18,9 @@ This module owns: what happens to the tool/LLM output in between.
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from fastapi import HTTPException
 from neo4j.exceptions import Neo4jError
 
 from api.message_utils import (
@@ -46,6 +47,101 @@ from semantic_layer.entity_contracts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# AI-33 — cross-endpoint prerequisite auto-resolution (out-of-order tab
+# click).
+#
+# Today an investigator can click Similar Cases, Risk Assessment, or Plan
+# directly, without opening Case Summary first. core.case_store.
+# resolve_case_data() has always been all-or-nothing: it raises a hard 400
+# the moment case_id is not already resolvable from the warm CASE_STORE,
+# the Postgres case_ai_summary_store fallback, or a client-supplied
+# ai_summary body — even though the ONLY thing actually missing might be a
+# single upstream section (e.g. /risk_assessment needs /similar_cases'
+# output, not a full case reload).
+#
+# resolve_prerequisite_case_data() below is the one chain-aware replacement
+# every on-demand route (except /intake, which has no upstream dependency,
+# and /copilot, which never blocks — see its own soft-check inline in
+# api/server.py) calls immediately after its existing case-store lookup.
+# It is deliberately NOT a registry of the full tab order: each caller
+# supplies only the ONE field it needs from the ONE route immediately
+# before it, and knows nothing about any other tab boundary. Sharing this
+# as one small function (rather than copy-pasting the same try/except three
+# times) is just avoiding duplication — it carries no ordering knowledge of
+# its own; every ordering fact still lives at the call site in server.py.
+# ---------------------------------------------------------------------------
+
+
+def resolve_prerequisite_case_data(
+    case_id: str,
+    ai_summary: Optional[Dict[str, Any]],
+    required_field: str,
+    run_prerequisite_route: Callable[[], Any],
+    resolve_case_store: Callable[[str, Optional[Dict[str, Any]]], Tuple[Dict[str, Any], str]],
+    route_name: str,
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Resolve case_data for an on-demand route, auto-running exactly one
+    upstream route first if — and only if — case_data is either entirely
+    unresolvable or resolvable but missing `required_field`.
+
+    Args:
+        case_id: the current request's case_id.
+        ai_summary: the current request's own ai_summary body (legacy /
+            explicit-override path) — passed straight through to
+            resolve_case_store, both before and after any auto-run, so
+            that path keeps working exactly as it did before this ticket.
+        required_field: the single top-level case_data key this route
+            needs from the ONE route immediately before it (e.g.
+            "complaint_intelligence" for /similar_cases, "similar_cases"
+            for /risk_assessment, "risk_assessment" for /plan).
+        run_prerequisite_route: a zero-arg callable that runs the missing
+            prerequisite's own route logic for this case_id (e.g.
+            `lambda: intake(intakeRequest(case_id=case_id))`). That route
+            persists its own output the same way it always has (CASE_STORE
+            update + persist_case_session), so the retry below finds it.
+        resolve_case_store: the caller's own `_resolve_case_store`
+            (case_id, ai_summary) -> (case_data, source) — the existing
+            CS-4 lookup, unchanged. Injected so this module never imports
+            from api/server.py.
+        route_name: this route's name, for the auto-resolve log line only.
+
+    Returns:
+        (case_data, data_source) exactly as resolve_case_store would,
+        after guaranteeing required_field is present whenever the
+        prerequisite route was able to produce it.
+
+    A genuine total miss (resolve_case_store's underlying
+    core.case_store.resolve_case_data finding nothing anywhere) surfaces
+    as HTTPException(400) — this function catches ONLY that specific
+    "not found" case to trigger the auto-run; any other HTTPException
+    (e.g. a 409 conflict) is not this function's concern and is
+    re-raised untouched. If the prerequisite route itself fails, its
+    exception propagates to the caller exactly as it would if the
+    investigator had clicked it directly.
+    """
+    try:
+        case_data, data_source = resolve_case_store(case_id, ai_summary)
+    except HTTPException as exc:
+        if exc.status_code != 400:
+            raise
+        case_data, data_source = None, None
+
+    if not case_data or not case_data.get(required_field):
+        logger.info(
+            "%s AUTO-RESOLVE case_id=%s — missing prerequisite '%s'; running its "
+            "upstream route internally before continuing (out-of-order tab click)",
+            route_name,
+            case_id,
+            required_field,
+        )
+        run_prerequisite_route()
+        case_data, data_source = resolve_case_store(case_id, ai_summary)
+
+    return case_data, data_source
 
 
 # ---------------------------------------------------------------------------

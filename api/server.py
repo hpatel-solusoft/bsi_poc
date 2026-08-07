@@ -64,6 +64,7 @@ from api.pipeline_execution import (
     fetch_live_rule_aware_tasks,
     fetch_live_similar_cases,
     prepare_plan_context,
+    resolve_prerequisite_case_data,
     run_intake_direct_pipeline,
     run_plan_pipeline,
     run_risk_assessment_pipeline,
@@ -661,7 +662,19 @@ def similar_cases(req: SimilarCasesRequest):
     try:
 
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
-        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        # AI-33: an investigator can open Similar Cases without ever
+        # having opened Case Summary. Rather than assuming the frontend
+        # guarantees click order, auto-run /intake's own logic internally
+        # the moment complaint_intelligence (Case Summary's output) isn't
+        # already resolvable — instead of the hard 400 this used to raise.
+        case_data, data_source = resolve_prerequisite_case_data(
+            req.case_id,
+            req.ai_summary,
+            required_field="complaint_intelligence",
+            run_prerequisite_route=lambda: intake(intakeRequest(case_id=req.case_id)),
+            resolve_case_store=_resolve_case_store,
+            route_name="similar_cases",
+        )
         logger.info(
             "case_id=%s data_source=%s key_count=%d",
             req.case_id,
@@ -823,7 +836,21 @@ def risk_assessment(req: RiskAssessmentRequest):
     try:
 
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
-        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        # AI-33: an investigator can open Risk Assessment without ever
+        # having opened Similar Cases. Auto-run /similar_cases' own logic
+        # internally the moment similar_cases (that route's output) isn't
+        # already resolvable, instead of the hard 400 this used to raise.
+        # /similar_cases' own entry check (complaint_intelligence) fires
+        # the same way if IT turns out to be missing too — this route
+        # only needs to know about the one route immediately before it.
+        case_data, data_source = resolve_prerequisite_case_data(
+            req.case_id,
+            req.ai_summary,
+            required_field="similar_cases",
+            run_prerequisite_route=lambda: similar_cases(SimilarCasesRequest(case_id=req.case_id)),
+            resolve_case_store=_resolve_case_store,
+            route_name="risk_assessment",
+        )
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
 
         # AI-32: the two independent staleness triggers, combined — see
@@ -1028,7 +1055,23 @@ def plan(req: PlanRequest):
     try:
 
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
-        case_data, data_source = _resolve_case_store(req.case_id, req.ai_summary)
+        # AI-33: an investigator can open Plan without ever having opened
+        # Risk Assessment. Auto-run /risk_assessment's own logic internally
+        # the moment risk_assessment (that route's output) isn't already
+        # resolvable, instead of the hard 400 this used to raise. Chains
+        # backward one hop at a time: /risk_assessment's own entry check
+        # (similar_cases) fires /similar_cases if that is missing too, and
+        # /similar_cases' own entry check fires /intake if THAT is
+        # missing — this route only needs to know about the one route
+        # immediately before it.
+        case_data, data_source = resolve_prerequisite_case_data(
+            req.case_id,
+            req.ai_summary,
+            required_field="risk_assessment",
+            run_prerequisite_route=lambda: risk_assessment(RiskAssessmentRequest(case_id=req.case_id)),
+            resolve_case_store=_resolve_case_store,
+            route_name="plan",
+        )
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
 
         # Captured BEFORE this route's own persist_case_session call below,
@@ -2384,6 +2427,23 @@ def copilot(req: CopilotRequest):
     try:
         # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
         case_data, case_data_source = _resolve_case_store(req.case_id, req.ai_summary)
+
+        # AI-33: soft-check only. Unlike /similar_cases, /risk_assessment,
+        # and /plan, Copilot never auto-runs another route to backfill a
+        # missing prerequisite — doing so would itself block the chat
+        # response on that route's LLM call, which is exactly what this
+        # check exists to avoid. If Case Summary's output isn't there yet,
+        # Copilot degrades gracefully and answers from whatever context it
+        # does have (build_copilot_prompt already handles a sparse
+        # case_data); this is purely an observability signal for why an
+        # answer might be thinner than usual, never a gate on the chat.
+        if not case_data.get("complaint_intelligence"):
+            logger.info(
+                "copilot SOFT-CHECK case_id=%s — complaint_intelligence not yet "
+                "resolved (Case Summary likely never opened for this case); "
+                "answering from available context without blocking",
+                req.case_id,
+            )
 
         # Captured BEFORE this route's own persist_case_session call below
         # (Section E.5) — see the identical comment in /plan.
