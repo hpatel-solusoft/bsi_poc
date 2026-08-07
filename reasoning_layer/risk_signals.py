@@ -14,9 +14,10 @@ The four signals and their effects (Section 8.4):
   2. Network size multiplier: largest FraudNetwork the subject belongs to.
      4-6 members => 1.2x, 7+ => 1.5x, applied to the GRAPH score component
      only (never to the AppWorks base).
-  3. Prior guilt recency: most recent date_closed on HAS_PRIOR_GUILTY_CASE.
-     <2yr => full weight, 2-5yr => 0.7x, >5yr => 0.4x — weights the
-     prior-guilt part of the graph component.
+  3. Prior guilt recency: most recent fraud_end_date on the prior guilty
+     :Case, reached via HAS_PRIOR_GUILTY_CASE. <2yr => full weight,
+     2-5yr => 0.7x, >5yr => 0.4x — weights the prior-guilt part of the
+     graph component.
   4. Rule 13 FastTrack override: is_fasttrack on the :Case. Forces
      risk_tier to a minimum of HIGH regardless of the computed score.
   Plus the compound rule penalty: 3+ of Rules 7, 8, 9, 11 firing together
@@ -157,6 +158,9 @@ RETURN coalesce(c.is_fasttrack, false) AS is_fasttrack,
 # the caller needs to know WHICH field answered: a recency derived from
 # opened_date is an estimate and must be labelled as one on a screen
 # that feeds a risk score. A coalesce would collapse that distinction.
+# The actual priority order lives on _RECENCY_DATE_SOURCES below, not
+# here — see that constant's own comment for why fraud_end_date, not a
+# closure-date field, is checked first.
 _RULE8_RECENCY_QUERY = """
 MATCH (s:Subject {subject_id: $subject_id})
 OPTIONAL MATCH (s)-[pg:HAS_PRIOR_GUILTY_CASE]->(pc:Case)
@@ -222,21 +226,39 @@ _COMPOUND_RULE_PREFIXES = ("Rule_07", "Rule_08", "Rule_09", "Rule_11")
 # case. Each entry is (field returned by the query, label reported to
 # the caller, is_estimate).
 #
-# The first three are genuine closure dates and answer the question
-# "how long ago was this subject found guilty?" directly. The last two
-# are NOT closure dates — fraud_end_date is when the alleged conduct
-# stopped and opened_date is when the case was filed, both of which
-# necessarily PRE-date the finding of guilt. Using them therefore
-# OVERSTATES the elapsed years, which is the conservative direction for
-# a risk score: it can only weaken the prior-guilt weight, never
-# inflate it. They are flagged is_estimate=True so the UI can render
-# "~4.2 yrs (est. from case open date)" rather than asserting a
-# precision the data does not support.
+# fraud_end_date FIRST, DELIBERATELY AHEAD OF THE CLOSURE-DATE FIELDS:
+# this previously ranked date_closed/closed_date ahead of fraud_end_date
+# on the reasoning that a genuine closure date answers "how long ago was
+# this subject found guilty?" more directly than the fraud period's end
+# date does. That reasoning assumed a populated date_closed is a TRUE
+# closure date. In production it is not reliably one: date_closed on
+# HAS_PRIOR_GUILTY_CASE is coalesce(c.closed_date, al.date_closed) (see
+# rule_07_prior_guilty.cypher), and al.date_closed (Allegations_DateClosed
+# from AppWorks) has been observed holding a near-future sync artefact
+# instead of the real closure date on at least one live case — a WRONG
+# but perfectly plausible-looking date (passes every sanity check this
+# module runs), which then silently won priority over the case's own,
+# reliably-populated fraud_end_date. A bad non-null value beating a good
+# one is a worse failure than the null-source gap this priority list was
+# originally built to work around (see _UNDATED_PRIOR_GUILT_RECENCY_WEIGHT
+# above), because it produces a confidently wrong score instead of an
+# honestly-undated one.
+#
+# fraud_end_date is not a closure date — it is when the alleged conduct
+# stopped, which necessarily PRE-dates the finding of guilt — so using it
+# OVERSTATES the elapsed years. That is the conservative direction for a
+# risk score: it can only weaken the prior-guilt weight, never inflate
+# it, and it can never make a recent prior look older than it is.
+# Flagged is_estimate=True so the UI can render "~4.2 yrs (est. from
+# fraud end date)" rather than asserting a precision the data does not
+# support. The closure-date fields remain in the list, ranked below it,
+# purely as a fallback for the (structural or Wave-1-only) case where a
+# prior guilty case's own fraud_end_date is itself unavailable.
 _RECENCY_DATE_SOURCES = (
+    ("case_fraud_end_date", "prior_case.fraud_end_date", True),
     ("rel_date_closed", "prior_guilty_case.date_closed", False),
     ("case_closed_date", "case.closed_date", False),
     ("allegation_date_closed", "allegation.date_closed", False),
-    ("case_fraud_end_date", "case.fraud_end_date", True),
     ("case_opened_date", "case.opened_date", True),
 )
 
