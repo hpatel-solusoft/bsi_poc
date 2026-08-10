@@ -256,6 +256,46 @@ def get_route_generated_at(case_data: Dict[str, Any], route: str) -> Optional[st
     return entry.get("generated_at")
 
 
+def get_route_generated_at_datetime(case_data: Dict[str, Any], route: str) -> Optional[datetime]:
+    """
+    AI-35: same value as get_route_generated_at, parsed into a
+    timezone-aware datetime so a route's own per-tab save-time (AI-34)
+    can be compared directly against another timezone-aware datetime —
+    e.g. investigation_plan_overrides.modified_on (a native psycopg2
+    timestamptz), or AI-31's (:Case).last_inference_change_at.
+
+    This is what /plan's two staleness checks (the AI-32 graph check and
+    the manual-edit-override check, both in api/server.py's plan())
+    compare against instead of the old case-wide
+    case_ai_summary_store.updated_at column — that shared column moves
+    every time ANY tab refreshes, not just /plan, so it could not tell
+    "the case changed" apart from "some other tab reloaded".
+
+    Degrades to None — never raises — on every case get_route_generated_at
+    already returns None for (no cache yet, route never cached, or a
+    legacy bare-string entry with no generated_at attached), AND on a
+    value that fails to parse as ISO-8601. The latter is a defensive,
+    never-raise degrade, same as reasoning_layer.case_staleness's
+    identical pattern for the graph timestamp: one malformed value must
+    fall back to "no staleness signal for this request", not take down
+    the /plan route.
+    """
+    raw = get_route_generated_at(case_data, route)
+    if raw is None:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "route=%s: agent_summary_cache generated_at=%r is not a "
+            "parseable ISO-8601 timestamp — treating as no staleness "
+            "signal for this request",
+            route,
+            raw,
+        )
+        return None
+
+
 def get_cached_route_summary(case_id: str, route: str) -> Optional[Tuple[Dict[str, Any], str]]:
     """
     Non-LLM cache lookup used by the reload_ai_summary skip check on

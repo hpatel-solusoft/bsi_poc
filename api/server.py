@@ -91,6 +91,7 @@ from core.case_store import (
     get_cached_route_summary,
     get_case_ai_summary_cache_updated_at,
     get_route_generated_at,
+    get_route_generated_at_datetime,
     get_route_summary_text,
     merge_agent_summary_cache,
     persist_case_session,
@@ -1085,24 +1086,38 @@ def plan(req: PlanRequest):
         )
         logger.info("case_id=%s data_source=%s", req.case_id, data_source)
 
-        # Captured BEFORE this route's own persist_case_session call below,
-        # which always rewrites updated_at to now() — reading it late would
-        # make every override look stale (Section E.5).
-        cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
+        # AI-35: /plan's OWN per-tab save-time (AI-34), read from the
+        # already-resolved case_data BEFORE this route's own
+        # merge_agent_summary_cache/persist_case_session calls below
+        # overwrite this exact "plan" cache entry — reading it late would
+        # make every override look stale (Section E.5), and would make
+        # the AI-32 graph check below compare against the run that is
+        # about to happen instead of the one actually cached.
+        #
+        # This replaces the old case-wide case_ai_summary_store.updated_at
+        # column (shared by every tab — /intake, /similar_cases,
+        # /risk_assessment, /plan all touch it) for BOTH of /plan's
+        # staleness checks: the AI-32 graph check immediately below, and
+        # compute_plan_staleness's manual-edit check further down. Reading
+        # the shared column here made /plan look "fresh" whenever ANY
+        # other tab refreshed, even though nothing about /plan's own
+        # narrative or override had changed — after this ticket, nothing
+        # in /plan reads that shared column anymore.
+        plan_generated_at_before_call = get_route_generated_at_datetime(case_data, "plan")
 
         # AI-32: the two independent staleness triggers, combined — see
         # core.narrative_staleness's module docstring. Reuses the SAME
-        # cache_updated_at_before_call read just above (rather than a
-        # second Postgres round trip) so plan_stale's own comparison and
-        # this one are guaranteed to agree on which snapshot of
-        # case_ai_summary_store.updated_at they judged staleness against.
+        # plan_generated_at_before_call read just above (rather than a
+        # second lookup) so plan_stale's own comparison and this one are
+        # guaranteed to agree on which snapshot of /plan's own
+        # generated_at they judged staleness against.
         # Like /similar_cases and /risk_assessment, /plan has no separate
         # "pipeline" stage of its own (rule_aware_tasks/rules_fired are
         # already a live, always-fresh Neo4j read regardless of cache
         # state — see fetch_live_rule_aware_tasks/prepare_plan_context),
         # so should_refresh alone is exactly "regenerate the narrative".
         staleness = evaluate_cache_staleness(
-            req.case_id, req.reload_ai_summary, cache_generated_at=cache_updated_at_before_call
+            req.case_id, req.reload_ai_summary, cache_generated_at=plan_generated_at_before_call
         )
 
         # Agent-summary cache: if /plan has already produced and persisted
@@ -1130,7 +1145,7 @@ def plan(req: PlanRequest):
                         override["modified_by"],
                         override["modified_on"],
                     )
-                    plan_stale = compute_plan_staleness(cache_updated_at_before_call, modified_on)
+                    plan_stale = compute_plan_staleness(plan_generated_at_before_call, modified_on)
                     # The structured investigation_plan above now carries the
                     # override, but cached_summary is still the pre-override
                     # LLM markdown pulled straight from case_ai_summary_store —
@@ -1238,7 +1253,7 @@ def plan(req: PlanRequest):
             sections,
             messages,
             new_provenance,
-            cache_updated_at_before_call,
+            plan_generated_at_before_call,
             rule_aware_tasks,
         )
 

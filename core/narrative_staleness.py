@@ -180,10 +180,17 @@ def check_staleness(
         last_inference_change_at: AI-31's (:Case).last_inference_change_at,
             parsed to a timezone-aware datetime, or None.
         cache_generated_at: when the narrative currently cached for this
-            case (and this route) was generated — case_ai_summary_store.
-            updated_at for the four LLM-narrative routes, or
-            report_artifacts.generated_at for /generate_report — as a
-            timezone-aware datetime, or None if nothing is cached yet.
+            case (and this route) was generated, as a timezone-aware
+            datetime, or None if nothing is cached yet.
+            case_ai_summary_store.updated_at (the shared, case-wide
+            column) for /intake, /similar_cases, and /risk_assessment;
+            report_artifacts.generated_at for /generate_report; and, as
+            of AI-35, /plan's OWN per-tab generated_at (AI-34's
+            agent_summary_cache["plan"]["generated_at"], via
+            core.case_store.get_route_generated_at_datetime) rather
+            than the shared column — a refresh on another tab must not
+            make /plan's graph-staleness check look fresh for a change
+            that has nothing to do with /plan.
     """
     return StalenessCheck(
         core_data_changed=bool(reload_ai_summary_requested),

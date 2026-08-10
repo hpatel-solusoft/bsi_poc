@@ -169,17 +169,19 @@ def evaluate_cache_staleness(
             field, unchanged from every route's existing handling.
         cache_generated_at: the cached narrative's generation timestamp,
             if the caller already fetched it for its own purposes (e.g.
-            /plan already reads case_ai_summary_store.updated_at for
-            compute_plan_staleness, and /generate_report reads
-            report_artifacts.generated_at instead of the
-            case_ai_summary_store default this fetches when omitted —
-            see that route's own AI-32 comment for why). Passing it in
-            avoids a redundant read AND guarantees both staleness checks
-            in a route agree on which timestamp they compared against.
-            When omitted, reads core.case_store.
-            get_case_ai_summary_cache_updated_at itself — the correct
-            default for /intake, /similar_cases, and /risk_assessment,
-            none of which read this timestamp for any other reason.
+            /plan reads its OWN per-tab generated_at, AI-34/AI-35, via
+            core.case_store.get_route_generated_at_datetime, for
+            compute_plan_staleness — NOT the shared case_ai_summary_store
+            column; and /generate_report reads report_artifacts.
+            generated_at instead of the case_ai_summary_store default
+            this fetches when omitted — see that route's own AI-32
+            comment for why). Passing it in avoids a redundant read AND
+            guarantees both staleness checks in a route agree on which
+            timestamp they compared against. When omitted, reads
+            core.case_store.get_case_ai_summary_cache_updated_at itself —
+            the correct default for /intake, /similar_cases, and
+            /risk_assessment, none of which read this timestamp for any
+            other reason.
 
     A Neo4j outage degrades to "no graph staleness signal" (logged, never
     raised) rather than failing the route — the same non-blocking stance
@@ -660,7 +662,7 @@ def run_plan_pipeline(
     sections: Dict[str, Any],
     messages,
     new_provenance: List[dict],
-    cache_updated_at_before_call,
+    plan_generated_at_before_call,
     rule_aware_tasks: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any], List[dict], str, Optional[str], Optional[Any], bool]:
     """
@@ -668,6 +670,16 @@ def run_plan_pipeline(
     validate it, and apply any human override (Section D.6). Returns
     (assistant_text, investigation_plan, plan_section, merged_provenance,
     plan_source, modified_by, modified_on, plan_stale).
+
+    plan_generated_at_before_call: AI-35 — /plan's OWN per-tab
+    generated_at (AI-34), read by the caller from case_data BEFORE this
+    request's merge_agent_summary_cache call overwrites it, as a
+    timezone-aware datetime (core.case_store.get_route_generated_at_datetime)
+    or None if /plan has never been cached for this case yet. Compared
+    against the override's modified_on below — NOT the case-wide
+    case_ai_summary_store.updated_at column, which is shared across every
+    tab and would make this check agree with /plan's cache purely by
+    coincidence whenever another tab happened to refresh at the same time.
     """
     assistant_text = extract_agent_summary(messages)
 
@@ -735,7 +747,9 @@ def run_plan_pipeline(
         modified_on = None
 
     plan_stale = (
-        compute_plan_staleness(cache_updated_at_before_call, modified_on) if override is not None else False
+        compute_plan_staleness(plan_generated_at_before_call, modified_on)
+        if override is not None
+        else False
     )
 
     plan_section = {"investigation_plan": investigation_plan}

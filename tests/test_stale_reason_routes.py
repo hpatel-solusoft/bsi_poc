@@ -322,12 +322,16 @@ def test_plan_graph_only_bypasses_cache_when_no_override_exists():
     case_id = "CASE-STALE-PLAN"
     server.CASE_STORE[case_id] = {}
     case_data = {"complaint_intelligence": {}, "rules_fired": [], "provenance_trail": []}
+    # AI-35: /plan no longer reads get_case_ai_summary_cache_updated_at
+    # (the shared, case-wide column) at all — it reads its own per-tab
+    # generated_at instead (core.case_store.get_route_generated_at_datetime,
+    # real here since case_data has no cached "plan" entry yet, so it
+    # naturally resolves to None). No mock is needed for it any more; the
+    # absence of one here is itself part of what this test now proves.
     with mock.patch.object(
         server, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
     ), mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
-    ), mock.patch.object(
-        server, "get_case_ai_summary_cache_updated_at", return_value=_T0
     ), mock.patch.object(
         server, "get_override", return_value=None
     ), mock.patch.object(
@@ -359,6 +363,10 @@ def test_plan_override_always_wins_even_when_graph_changed():
     AI-32 must not change this pre-existing priority rule (see the
     route's own AI-32 comment)."""
     case_id = "CASE-STALE-PLAN"
+    # Legacy cache shape: a bare markdown string for "plan", predating
+    # AI-34/AI-35's {summary, generated_at} pair. get_route_generated_at_
+    # datetime degrades this to None (no per-tab staleness signal) rather
+    # than erroring — proven for real here, since it is never mocked.
     cached_summary = "## Investigation Steps\n- **Step 1:** Old step"
     case_data = {
         server.AGENT_SUMMARY_CACHE_KEY: {"plan": cached_summary},
@@ -371,12 +379,12 @@ def test_plan_override_always_wins_even_when_graph_changed():
         "modified_by": "analyst",
         "modified_on": datetime(2026, 7, 31, tzinfo=timezone.utc),
     }
+    # AI-35: no get_case_ai_summary_cache_updated_at mock needed (or read)
+    # for /plan any more — see the test above's comment.
     with mock.patch.object(
         server, "evaluate_cache_staleness", return_value=_BOTH
     ), mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
-    ), mock.patch.object(
-        server, "get_case_ai_summary_cache_updated_at", return_value=None
     ), mock.patch.object(
         server, "get_override", return_value=override
     ), mock.patch.object(server, "log_agent_call"):
@@ -385,6 +393,10 @@ def test_plan_override_always_wins_even_when_graph_changed():
     assert response["details"]["meta"]["agent_summary_source"] == "db_cache"
     assert response["details"]["meta"]["plan_source"] == "User Modified"
     assert response["details"]["meta"]["stale_reason"] == "both"
+    # No cached "plan" generated_at exists (legacy bare-string entry) —
+    # compute_plan_staleness has nothing to compare the override against,
+    # so it degrades to False rather than guessing.
+    assert response["details"]["meta"]["plan_stale"] is False
 
 
 # --------------------------------------------------------------------
