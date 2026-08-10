@@ -731,13 +731,27 @@ def run_plan_pipeline(
         logger.warning(f"Investigation plan schema validation failed — storing unvalidated: {e}")
 
     # Modify Investigation Steps flow (Section D.6): a saved override
-    # replaces investigation_steps only — evidence_checklist,
-    # escalation_criteria, fraud_types, and risk_tier stay AI-generated.
-    # Read server-side on every /plan call so the override is always
-    # reflected regardless of which client called this endpoint.
+    # replaces investigation_steps in the DISPLAYED plan only —
+    # evidence_checklist, escalation_criteria, fraud_types, and risk_tier
+    # stay AI-generated. Read server-side on every /plan call so the
+    # override is always reflected regardless of which client called
+    # this endpoint.
+    #
+    # CRITICAL: investigation_plan["investigation_steps"] here MUST stay
+    # the pure, un-overridden LLM output (steps_dicts) — this exact dict
+    # is what api/server.py persists to case_ai_summary_store as "the AI
+    # plan" and caches as agent_summary_cache["plan"]. If this function
+    # baked override["modified_steps"] in here instead, every fresh
+    # /plan regeneration while an override existed would permanently
+    # overwrite the persisted AI baseline with the human edit — there
+    # would be nothing left for POST /plan/revert_to_ai to revert TO,
+    # even though it correctly deletes the override row: the "AI"
+    # content being reverted to would already BE the human edit. The
+    # override is applied to a response-only copy in api/server.py
+    # instead, exactly mirroring how the /plan CACHE-HIT branch already
+    # splices it in without ever touching what's persisted.
     override = get_override(case_id)
     if override is not None:
-        investigation_plan["investigation_steps"] = override["modified_steps"]
         plan_source = "User Modified"
         modified_by = override["modified_by"]
         modified_on = override["modified_on"]

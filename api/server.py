@@ -1258,6 +1258,10 @@ def plan(req: PlanRequest):
         )
 
         # Update CS-4 warm store but return only the route-specific section.
+        # plan_section/investigation_plan here are the PURE, un-overridden
+        # LLM output (see run_plan_pipeline) — this is intentional; the
+        # warm store and Postgres must only ever hold the AI baseline so
+        # POST /plan/revert_to_ai has something real to revert to.
         CASE_STORE[req.case_id].update(plan_section)
         CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
 
@@ -1269,12 +1273,14 @@ def plan(req: PlanRequest):
             {"investigation_plan": investigation_plan},
             merged_provenance,
         )
-        # Cache this run's RESOLVED agent_summary markdown (the LLM's own
-        # markdown, verbatim, with the override's steps spliced in when one
-        # exists — see resolve_plan_agent_summary / apply_step_override_to_summary)
-        # so a cache hit next time serves exactly what this call would have
-        # returned. Carries forward any other route's already-cached entry
-        # for this case_id.
+        # Cache this run's RESOLVED agent_summary markdown — the LLM's own
+        # markdown, PURE, with no override spliced in. This is what makes
+        # POST /plan/revert_to_ai correct: the cached "AI" text must never
+        # be the override's own text, or reverting has nothing genuine to
+        # fall back to. The override is spliced into a SEPARATE
+        # response-only copy below (response_agent_summary) — never into
+        # what gets cached here. Carries forward any other route's
+        # already-cached entry for this case_id.
         resolved_agent_summary = resolve_plan_agent_summary(
             assistant_text,
             investigation_plan,
@@ -1282,15 +1288,6 @@ def plan(req: PlanRequest):
             case_data,
             merged_provenance,
         )
-        if plan_source == "User Modified":
-            # run_plan_pipeline already swapped investigation_plan["investigation_steps"]
-            # for the override above, but assistant_text/resolved_agent_summary
-            # is still the fresh LLM turn's own steps — same gap as the
-            # cache-hit path, fixed the same way.
-            resolved_agent_summary = apply_step_override_to_summary(
-                resolved_agent_summary,
-                investigation_plan.get("investigation_steps"),
-            )
         ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
             case_data,
             "plan",
@@ -1301,6 +1298,19 @@ def plan(req: PlanRequest):
             AGENT_SUMMARY_CACHE_KEY
         ]
         persist_case_session(req.case_id, ai_summary)
+
+        # Response-only override splice — mirrors the /plan CACHE-HIT
+        # branch above exactly: the persisted/cached text stays the pure
+        # AI baseline (just written above); only what THIS response
+        # returns to the caller reflects the override, the same way a
+        # cache hit never mutates cached_summary/cached_plan before
+        # persisting anything.
+        response_agent_summary = resolved_agent_summary
+        if plan_source == "User Modified":
+            response_agent_summary = apply_step_override_to_summary(
+                resolved_agent_summary,
+                override["modified_steps"] if override is not None else None,
+            )
         log_agent_call(
             case_id=req.case_id,
             agent_name="investigation_plan",
@@ -1322,7 +1332,7 @@ def plan(req: PlanRequest):
             "case_id": req.case_id,
             "status": "completed",
             "details": {
-                "agent_summary": resolved_agent_summary,
+                "agent_summary": response_agent_summary,
                 "provenance_trail": format_provenance_lines(merged_provenance),
                 # Graph-derived plan output (AI-16 —
                 # reasoning_layer.investigation_tasks.build_rule_aware_tasks):
