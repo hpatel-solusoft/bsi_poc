@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
@@ -195,6 +196,65 @@ def try_resolve_case_data(case_id: str) -> Optional[Dict[str, Any]]:
 
 AGENT_SUMMARY_CACHE_KEY = "agent_summary_cache"
 
+# Each route's entry under agent_summary_cache is
+# {"summary": "<markdown text>", "generated_at": "<ISO-8601 UTC timestamp>"}
+# — one independent {summary, generated_at} pair per tab ("intake",
+# "similar_cases", "risk_assessment", "plan"), never a single case-wide
+# timestamp. A case_ai_summary_store row written before this ticket (or
+# any other caller that never adopted the new shape) may still have a
+# bare markdown string for a route instead of this dict — every reader
+# below treats that as "generated_at unknown", not an error, so an old
+# persisted case keeps working exactly as it did.
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_route_summary_text(case_data: Dict[str, Any], route: str) -> Optional[str]:
+    """
+    The markdown text half of one tab's cached agent_summary entry.
+    Backward compatible with the pre-timestamp cache shape: if `route`'s
+    entry is still a bare string (written before this ticket), that
+    string is returned as-is rather than treated as missing.
+
+    Returns None if `route` has never been cached for this case_data —
+    never raises.
+    """
+    entry = (case_data.get(AGENT_SUMMARY_CACHE_KEY) or {}).get(route)
+    if isinstance(entry, dict):
+        return entry.get("summary")
+    if isinstance(entry, str):
+        return entry or None
+    return None
+
+
+def get_route_generated_at(case_data: Dict[str, Any], route: str) -> Optional[str]:
+    """
+    THE one place that reads when a tab ("intake", "similar_cases",
+    "risk_assessment", or "plan") last saved its agent_summary for a
+    case. /intake, /similar_cases, /risk_assessment, and /plan all call
+    this — never their own case_data[AGENT_SUMMARY_CACHE_KEY][route]
+    lookup — so there is exactly one place that knows how a tab's saved
+    time is stored and how to fall back safely when it isn't.
+
+    Returns None — never an error, never a crash — when:
+      * case_data has no agent_summary_cache at all (case_id has never
+        run any route yet), or
+      * this specific route has never been cached for this case_data
+        (e.g. /plan hasn't been called yet, even though /intake has), or
+      * this route's entry predates this ticket and is still a bare
+        markdown string with no generated_at attached.
+
+    Reading one route's saved time never depends on, and never mutates,
+    any other route's entry — each is an independent lookup into its
+    own {route: {summary, generated_at}} pair.
+    """
+    entry = (case_data.get(AGENT_SUMMARY_CACHE_KEY) or {}).get(route)
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("generated_at")
+
 
 def get_cached_route_summary(case_id: str, route: str) -> Optional[Tuple[Dict[str, Any], str]]:
     """
@@ -205,7 +265,9 @@ def get_cached_route_summary(case_id: str, route: str) -> Optional[Tuple[Dict[st
     "similar_cases", "risk_assessment", or "plan") already has a
     persisted agent_summary for case_id — warm CASE_STORE first, then
     the PostgreSQL case_ai_summary_store fallback (same lookup order as
-    try_resolve_case_data).
+    try_resolve_case_data). cached_markdown is just the text (via
+    get_route_summary_text) — call get_route_generated_at(case_data,
+    route) separately for that entry's saved time.
 
     Returns None on a clean miss: case_id has never run at all, or it
     has run but this particular route's agent_summary was never cached
@@ -215,22 +277,36 @@ def get_cached_route_summary(case_id: str, route: str) -> Optional[Tuple[Dict[st
     case_data = try_resolve_case_data(case_id)
     if case_data is None:
         return None
-    cached_markdown = (case_data.get(AGENT_SUMMARY_CACHE_KEY) or {}).get(route)
+    cached_markdown = get_route_summary_text(case_data, route)
     if not cached_markdown:
         return None
     return case_data, cached_markdown
 
 
-def merge_agent_summary_cache(case_data: Dict[str, Any], route: str, markdown_text: str) -> Dict[str, str]:
+def merge_agent_summary_cache(
+    case_data: Dict[str, Any],
+    route: str,
+    markdown_text: str,
+    generated_at: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
     """
-    Fold this route's freshly generated agent_summary markdown into the
-    case's agent_summary_cache dict, carrying forward every other
-    route's already-cached entry from `case_data` (the pre-call
-    resolution for this request) so persisting this route's result never
-    erases what another route already cached for this case_id.
+    Fold this route's freshly generated agent_summary markdown — and the
+    time it was generated — into the case's agent_summary_cache dict,
+    carrying forward every OTHER route's already-cached {summary,
+    generated_at} entry from `case_data` (the pre-call resolution for
+    this request) UNTOUCHED, so persisting this route's result never
+    erases, or even changes the generated_at of, what another route
+    already cached for this case_id.
+
+    generated_at defaults to now (UTC, ISO-8601) — the only caller that
+    ever passes it explicitly is a test asserting an exact value; every
+    route handler calls this with the default.
     """
     cache = dict(case_data.get(AGENT_SUMMARY_CACHE_KEY) or {})
-    cache[route] = markdown_text
+    cache[route] = {
+        "summary": markdown_text,
+        "generated_at": generated_at or _utc_now_iso(),
+    }
     return cache
 
 

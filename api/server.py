@@ -90,6 +90,8 @@ from core.case_store import (
     get_cached_investigation_steps,
     get_cached_route_summary,
     get_case_ai_summary_cache_updated_at,
+    get_route_generated_at,
+    get_route_summary_text,
     merge_agent_summary_cache,
     persist_case_session,
     resolve_case_data,
@@ -513,6 +515,7 @@ def intake(req: intakeRequest):
                             # is False, i.e. neither trigger fired.
                             "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
+                            "generated_at": get_route_generated_at(cached_case_data, "intake"),
                         },
                     },
                 }
@@ -563,6 +566,7 @@ def intake(req: intakeRequest):
             "intake",
             assistant_text,
         )
+        intake_generated_at = get_route_generated_at(sections, "intake")
 
         # CS-4: populate warm in-memory store with all sections + provenance.
         CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
@@ -629,6 +633,7 @@ def intake(req: intakeRequest):
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
+                    "generated_at": intake_generated_at,
                 },
             },
         }
@@ -697,7 +702,7 @@ def similar_cases(req: SimilarCasesRequest):
         # WITHOUT calling the LLM again. Either staleness trigger bypasses
         # this lookup and falls through to a fresh agent run below.
         if not staleness.should_refresh:
-            cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("similar_cases")
+            cached_summary = get_route_summary_text(case_data, "similar_cases")
             if cached_summary is not None:
                 # similar_cases is ALWAYS a live Neo4j read, cache hit or
                 # not — case_data never carries the structural matches
@@ -732,6 +737,7 @@ def similar_cases(req: SimilarCasesRequest):
                             "agent_summary_source": "db_cache",
                             "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
+                            "generated_at": get_route_generated_at(case_data, "similar_cases"),
                         },
                     },
                 }
@@ -769,6 +775,7 @@ def similar_cases(req: SimilarCasesRequest):
             "similar_cases",
             agent_summary,
         )
+        similar_cases_generated_at = get_route_generated_at(ai_summary["investigation"], "similar_cases")
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
@@ -803,6 +810,7 @@ def similar_cases(req: SimilarCasesRequest):
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
+                    "generated_at": similar_cases_generated_at,
                 },
             },
         }
@@ -867,7 +875,7 @@ def risk_assessment(req: RiskAssessmentRequest):
         # WITHOUT calling the LLM again. Either staleness trigger bypasses
         # this lookup and falls through to a fresh agent run below.
         if not staleness.should_refresh:
-            cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("risk_assessment")
+            cached_summary = get_route_summary_text(case_data, "risk_assessment")
             cached_risk_assessment = case_data.get("risk_assessment")
             if (
                 cached_summary is not None
@@ -930,6 +938,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                             "agent_summary_source": "db_cache",
                             "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
+                            "generated_at": get_route_generated_at(case_data, "risk_assessment"),
                         },
                     },
                 }
@@ -985,6 +994,7 @@ def risk_assessment(req: RiskAssessmentRequest):
             "risk_assessment",
             assistant_text,
         )
+        risk_assessment_generated_at = get_route_generated_at(ai_summary["investigation"], "risk_assessment")
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
@@ -1023,6 +1033,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
+                    "generated_at": risk_assessment_generated_at,
                 },
             },
         }
@@ -1109,7 +1120,7 @@ def plan(req: PlanRequest):
         # fresh agent run below in that case, same as before.
         override = get_override(req.case_id)
         if not staleness.should_refresh or override is not None:
-            cached_summary = case_data.get(AGENT_SUMMARY_CACHE_KEY, {}).get("plan")
+            cached_summary = get_route_summary_text(case_data, "plan")
             cached_plan = case_data.get("investigation_plan")
             if cached_summary is not None and isinstance(cached_plan, dict):
                 if override is not None:
@@ -1183,6 +1194,7 @@ def plan(req: PlanRequest):
                             # different things.
                             "stale": staleness.stale,
                             "stale_reason": staleness.stale_reason,
+                            "generated_at": get_route_generated_at(case_data, "plan"),
                         },
                     },
                 }
@@ -1269,6 +1281,7 @@ def plan(req: PlanRequest):
             "plan",
             resolved_agent_summary,
         )
+        plan_generated_at = get_route_generated_at(ai_summary["investigation"], "plan")
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
@@ -1318,6 +1331,7 @@ def plan(req: PlanRequest):
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
                     "stale_reason": staleness.stale_reason,
+                    "generated_at": plan_generated_at,
                 },
             },
         }
