@@ -46,6 +46,48 @@ class PlanRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
+class ReloadAllRequest(BaseModel):
+    """POST /reload_all — force-refresh every ON-DEMAND tab for case_id
+    in one call: /intake, /similar_cases, /risk_assessment, /plan, each
+    run with reload_ai_summary=True, in that exact dependency order."""
+
+    case_id: str
+
+
+class ReloadStepResult(BaseModel):
+    """One tab's outcome within a POST /reload_all run."""
+
+    step: str
+    # "success" | "failed" | "skipped". "skipped" only occurs after an
+    # earlier step in the sequence failed — a step is never skipped for
+    # any other reason.
+    status: str
+    duration_seconds: float
+    # The underlying route's own meta.agent_summary_source /
+    # meta.stale — "llm" and False respectively on a genuine reload,
+    # since reload_ai_summary=True always forces a fresh LLM run. Only
+    # present when status == "success".
+    agent_summary_source: Optional[str] = None
+    stale: Optional[bool] = None
+    # Present only when status == "failed" — the underlying route's own
+    # error detail, so a caller can distinguish e.g. a missing
+    # OPENAI_API_KEY from an AppWorks fetch failure without re-deriving
+    # it from an HTTP status code alone.
+    error: Optional[str] = None
+
+
+class ReloadAllResponse(BaseModel):
+    """Response for POST /reload_all."""
+
+    case_id: str
+    # "success"  — every step succeeded.
+    # "partial"  — at least one step succeeded before the first failure.
+    # "failed"   — the first step (intake) itself failed.
+    status: str
+    duration_seconds: float
+    steps: List[ReloadStepResult]
+
+
 class ModifyInvestigationStepsRequest(BaseModel):
     """
     POST /plan/modify_investigation_steps — the Investigation Plan

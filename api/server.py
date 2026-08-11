@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg2
 from dotenv import load_dotenv
@@ -47,6 +47,9 @@ from api.models import (
     PlanRequest,
     RejectInferenceRequest,
     RejectInferenceResponse,
+    ReloadAllRequest,
+    ReloadAllResponse,
+    ReloadStepResult,
     ReportGenerationRequest,
     RevertRejectionRequest,
     RevertRejectionResponse,
@@ -1374,6 +1377,152 @@ def plan(req: PlanRequest):
         raise HTTPException(status_code=500, detail=f"Plan generation failed: {exc}") from exc
     finally:
         logger.info("POST /plan completed for case_id=%s", req.case_id)
+
+
+@app.post("/reload_all", response_model=ReloadAllResponse)
+def reload_all(req: ReloadAllRequest) -> ReloadAllResponse:
+    """
+    ON-DEMAND — force-refresh every tab for case_id in one call.
+
+    Runs /intake -> /similar_cases -> /risk_assessment -> /plan, each
+    with reload_ai_summary=True, in that exact dependency order — the
+    same order an investigator would click through the tabs in, and the
+    same order each route's own prerequisite-auto-resolve chain already
+    assumes (see api.pipeline_execution.resolve_prerequisite_case_data).
+
+    This is a thin orchestrator over the existing routes, not a
+    parallel implementation: each step below is a plain Python call to
+    that route's own function — the exact same pattern this codebase
+    already uses for auto-resolving a missing prerequisite (e.g. /plan
+    calling `lambda: risk_assessment(RiskAssessmentRequest(...))` when
+    risk_assessment is missing). Every persistence side effect —
+    Postgres case_ai_summary_store, the Neo4j reasoning pipeline, the
+    warm CASE_STORE, agent_summary_cache's per-tab generated_at — still
+    happens exactly the way it always has, inside those route
+    functions. reload_all adds no new write path of its own, so there
+    is no risk of it drifting out of sync with what a single-tab
+    reload_ai_summary=True call already does.
+
+    Stops at the first failing step rather than pushing on: every step
+    here depends on the one before it having just produced fresh data
+    (e.g. /plan reads /risk_assessment's freshly persisted result), so
+    continuing past a failure would silently run later steps against a
+    now-stale upstream instead of the fresh one this call promised.
+    Every step after the failure is reported "skipped", never attempted.
+
+    Always returns 200 — this is a bulk status report, not a single
+    pass/fail action. The response body's per-step `status` values and
+    top-level `status` (success / partial / failed) carry the actual
+    outcome, so a caller can render "3 of 4 tabs refreshed, Plan
+    failed: <reason>" instead of a single opaque error.
+    """
+    start = time.time()
+    steps: List[ReloadStepResult] = []
+    stopped = False
+
+    # Order matters: each callable is only invoked once its turn comes,
+    # so a request object for step N is never built (and never touches
+    # case_data) before step N-1 has actually completed.
+    step_calls = [
+        ("intake", lambda: intake(intakeRequest(case_id=req.case_id, reload_ai_summary=True))),
+        (
+            "similar_cases",
+            lambda: similar_cases(SimilarCasesRequest(case_id=req.case_id, reload_ai_summary=True)),
+        ),
+        (
+            "risk_assessment",
+            lambda: risk_assessment(RiskAssessmentRequest(case_id=req.case_id, reload_ai_summary=True)),
+        ),
+        ("plan", lambda: plan(PlanRequest(case_id=req.case_id, reload_ai_summary=True))),
+    ]
+
+    for step_name, call_step in step_calls:
+        if stopped:
+            steps.append(ReloadStepResult(step=step_name, status="skipped", duration_seconds=0.0))
+            continue
+
+        step_start = time.time()
+        try:
+            step_response = call_step()
+        except HTTPException as exc:
+            duration = round(time.time() - step_start, 1)
+            logger.error(
+                "reload_all STEP FAILED case_id=%s step=%s status_code=%s detail=%s",
+                req.case_id,
+                step_name,
+                exc.status_code,
+                exc.detail,
+            )
+            steps.append(
+                ReloadStepResult(
+                    step=step_name,
+                    status="failed",
+                    duration_seconds=duration,
+                    error=str(exc.detail),
+                )
+            )
+            stopped = True
+            continue
+        except Exception as exc:  # noqa: BLE001 — isolate one step's failure from the rest
+            duration = round(time.time() - step_start, 1)
+            logger.exception("reload_all STEP FAILED case_id=%s step=%s", req.case_id, step_name)
+            steps.append(
+                ReloadStepResult(
+                    step=step_name,
+                    status="failed",
+                    duration_seconds=duration,
+                    error=str(exc),
+                )
+            )
+            stopped = True
+            continue
+
+        duration = round(time.time() - step_start, 1)
+        step_meta = (step_response.get("details") or {}).get("meta") or {}
+        steps.append(
+            ReloadStepResult(
+                step=step_name,
+                status="success",
+                duration_seconds=duration,
+                agent_summary_source=step_meta.get("agent_summary_source"),
+                stale=step_meta.get("stale"),
+            )
+        )
+
+    overall_duration = round(time.time() - start, 1)
+    succeeded_count = sum(1 for s in steps if s.status == "success")
+    failed_count = sum(1 for s in steps if s.status == "failed")
+    if failed_count == 0:
+        overall_status = "success"
+    elif succeeded_count == 0:
+        overall_status = "failed"
+    else:
+        overall_status = "partial"
+
+    logger.info(
+        "reload_all COMPLETED case_id=%s status=%s duration_seconds=%.1f steps=%s",
+        req.case_id,
+        overall_status,
+        overall_duration,
+        ", ".join(f"{s.step}:{s.status}" for s in steps),
+    )
+    # Best-effort audit row for the bulk action itself, alongside the
+    # four per-step rows each underlying route already writes on its
+    # own via log_agent_call.
+    log_agent_call(
+        case_id=req.case_id,
+        agent_name="reload_all",
+        endpoint="/reload_all",
+        latency_ms=int(overall_duration * 1000),
+        status=overall_status,
+    )
+
+    return ReloadAllResponse(
+        case_id=req.case_id,
+        status=overall_status,
+        duration_seconds=overall_duration,
+        steps=steps,
+    )
 
 
 @app.post("/plan/modify_investigation_steps", response_model=ModifyInvestigationStepsResponse)
