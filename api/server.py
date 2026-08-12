@@ -2031,6 +2031,16 @@ def generate_report(req: ReportGenerationRequest):
             "rules_fired", []
         )
 
+        # similar_cases is likewise ALWAYS a live Neo4j read (see
+        # fetch_live_similar_cases / the /similar_cases route's own
+        # comment on this) — case_data never carries a "similar_cases"
+        # key at all (it is entirely graph-derived and stripped before
+        # persistence), so case_data.get("similar_cases") was always
+        # None here and the report's "Similar Cases" section narrated
+        # "No similar cases identified" regardless of what /similar_cases
+        # had actually found. Fetch it fresh, same as rules_fired above.
+        live_similar_cases = fetch_live_similar_cases(req.case_id)
+
         # Inject the computed network and decision log into the case
         # context the prompt serialises, so the LLM narrates THESE facts
         # (never adds, removes, or reorders them — REPORT_GENERATION scope
@@ -2045,6 +2055,7 @@ def generate_report(req: ReportGenerationRequest):
         case_data_for_prompt = {
             **case_data,
             "rules_fired": fired_rules_only(live_report_rules_fired),
+            "similar_cases": live_similar_cases,
             "related_network": related.get("related_network", []),
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
@@ -2359,6 +2370,14 @@ def generate_report_pdf(req: ReportGenerationRequest):
             "rules_fired", []
         )
 
+        # similar_cases is likewise ALWAYS a live Neo4j read — identical
+        # fix to /generate_report above. case_data never carries a
+        # "similar_cases" key (graph-derived, stripped before
+        # persistence), so the rendered PDF's "Similar Cases" section
+        # always read "No similar cases identified" regardless of what
+        # /similar_cases had actually found.
+        live_similar_cases = fetch_live_similar_cases(req.case_id)
+
         # Same context assembly and prompt as /generate_report — the LLM
         # narrates the Related Network, Reviewed and Excluded Connections,
         # and Decision & Override Log sections; it never decides their
@@ -2366,6 +2385,7 @@ def generate_report_pdf(req: ReportGenerationRequest):
         case_data_for_prompt = {
             **case_data,
             "rules_fired": fired_rules_only(live_report_rules_fired),
+            "similar_cases": live_similar_cases,
             "related_network": related.get("related_network", []),
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
