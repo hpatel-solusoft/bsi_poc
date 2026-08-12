@@ -631,8 +631,8 @@ def _instance(rule_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
         # revert. An investigator deciding whether to revert someone else's
         # rejection needs the reason, not just the fact of it.
         instance["rejection"] = audit
-    # Names + the "why it fired" line are a presentation concern, owned by
-    # rule_inference so rewording never touches this query module.
+    # Names are a presentation concern, owned by rule_inference so
+    # reformatting them never touches this query module.
     for name_key in ("first_name", "last_name", "related_first_name", "related_last_name"):
         if row.get(name_key) is not None:
             instance[name_key] = row[name_key]
@@ -863,13 +863,9 @@ def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, A
                 }
             )
 
-    # Second pass: re-render every narrative with the whole block visible.
-    # Rule 8's line cites Rule 7's and Rule 2's findings by name and number,
-    # and Rule 1's closing clause depends on whether Rule 2 formed a network
-    # from that same pair — none of which exists while the block is still
-    # being assembled in rule-number order. rule_inference.render_block does
-    # that entirely in memory over rows already fetched: no extra queries, no
-    # change to any .cypher file, and rewording stays a one-file concern.
+    # Stamp the rule-level display fields (number, display name, heading)
+    # onto every entry. In-memory over rows already fetched: no extra
+    # queries, no change to any .cypher file.
     rule_inference.render_block(block)
 
     fired_count = sum(1 for entry in block if entry["fired"])

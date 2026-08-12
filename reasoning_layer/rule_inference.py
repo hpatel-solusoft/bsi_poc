@@ -1,47 +1,8 @@
 """
-Owns: turning raw rule matches into what an investigator reads — the
-rule's description, the subject names involved, and a plain-English
-`inference` narrative stating what fired, on what evidence, how it was
-established, and what the system did as a result.
-
-Why this is its own module rather than more code inside rules_fired.py:
-rules_fired.py's job is to ask Neo4j what fired and roll it up into the
-A.4 contract. Composing "Rule 1 (Shared Employer): John Smith and Kevin
-Nunes both hold employment records with BrightPath Home Health LLC — the
-same FEIN 04-7821334..." is a presentation job with entirely different
-reasons to change: reword a sentence, add a field to a display, and
-rules_fired.py should not be touched at all. No Cypher changes anywhere
-in this file's blast radius — every value it renders is already returned
-by the existing queries.
-
-THE NARRATIVE HAS THREE PARTS, ALWAYS IN THIS ORDER:
-
-  1. FINDING     — who or what matched, with the concrete values behind
-                   it (the employer and its FEIN, the address, the
-                   amount against the threshold). An investigator has to
-                   be able to check the claim, which means seeing what
-                   was matched, not just that something was.
-  2. BASIS       — how it was established: a structural match on the case
-                   record, an attribution read out of narrative, and
-                   whether investigator commentary independently
-                   confirmed it. "Confirmed by commentary" and "not yet
-                   confirmed" are different evidentiary positions and the
-                   line must never blur them.
-  3. CONSEQUENCE — what the system did with it: a network formed, a
-                   subject flagged, a recommendation raised. For anything
-                   that is a RECOMMENDATION rather than a finding, the
-                   line says so explicitly and hands the decision back to
-                   the investigator. The system does not escalate cases;
-                   it proposes, and a person decides.
-
-CROSS-RULE CONTEXT. Some findings are only meaningful in terms of other
-findings — Rule 8 is precisely "Rule 7 AND a network rule", and saying so
-by name is the difference between an investigator understanding the
-escalation and having to reverse-engineer it. `InferenceContext` is built
-from the assembled rules_fired block AFTER all fourteen queries have run,
-so those references cost no extra round trip and no new Cypher. A rule
-whose partner rule did not fire simply drops that clause rather than
-asserting a link that is not there.
+Owns: rule display metadata (numbers, headings, descriptions) and turning
+raw subject name parts from a rules_fired instance into a single readable
+name — the small presentation concerns rules_fired.py hands off so that
+renaming a rule or reformatting a name never touches the query module.
 
 Descriptions are read from config/rule.yaml through rule_registry, NOT
 hardcoded here. Display names ARE defined here, because "Rule 13
@@ -49,10 +10,15 @@ hardcoded here. Display names ARE defined here, because "Rule 13
 config's own name for it is the longer "FastTrack Escalation
 Recommendation", which reads badly at the head of a sentence.
 
-Every line is built from data the query actually returned. When a field
-is missing the sentence degrades to what IS known rather than inventing a
-plausible address or employer, because an investigator acting on "same
-address" needs that address to be real.
+This module previously also built a full investigator-facing narrative
+sentence per instance (build_inference / InferenceContext and ~700 lines
+of per-rule prose). That narrative was computed on every pipeline run but
+never attached to the payload — every call site that would have stored it
+(`instance["inference"]`, `entry["inference_summary"]`) was commented out,
+so it was pure dead computation. Removed rather than re-wired back in:
+if/when an investigator-facing narrative is wanted again, it should be
+designed against what the UI actually needs to show, not resurrected from
+code that was already disconnected.
 
 Does NOT own: querying (rules_fired.py), rule execution (rule_engine.py),
 or rule content (rules/*.cypher).
@@ -62,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Optional
 
 from reasoning_layer import rejection, rule_registry
 
@@ -114,54 +80,7 @@ _RULE_DISPLAY_NAMES: Dict[str, str] = {
     "Rule_14_Confirmation_Elevation": "Narrative Corroboration",
 }
 
-# The plain-English name of the network each network-forming rule creates,
-# used both in that rule's own narrative and in the CONSEQUENCE clause of
-# the structural rule that fed it ("An Employer Fraud Network has been
-# formed between the two subjects").
-_NETWORK_NAMES: Dict[str, str] = {
-    "Rule_02_Employer_Fraud_Network": "Employer Fraud Network",
-    "Rule_04_Address_Fraud_Network": "Address Fraud Network",
-    "Rule_06_Identity_Fraud_Network": "Identity Fraud Network",
-    "Rule_09_PCA_CheckSplit": "PCA Check-Split Network",
-}
-
-# Which structural rule feeds which network rule. Used only to add the
-# CONSEQUENCE clause to the structural rule's narrative, and only when the
-# network rule ACTUALLY fired for the same pair — never as an assumption
-# that a structural match will become a network.
-_STRUCTURAL_TO_NETWORK: Dict[str, str] = {
-    "Rule_01_Shared_Employer": "Rule_02_Employer_Fraud_Network",
-    "Rule_03_Shared_Address": "Rule_04_Address_Fraud_Network",
-    "Rule_05_Alias_Identity": "Rule_06_Identity_Fraud_Network",
-}
-
 _RULE_NUMBERS: Dict[str, int] = {rule_id: int(rule_id.split("_")[1]) for rule_id in _RULE_LABELS}
-
-# Mirrors rules_fired._CONFIDENCE_ORDER. Duplicated rather than imported:
-# rules_fired imports this module (for enrich_instance/render_block), so an
-# import the other way would be circular. Both constants encode the same
-# fact about the domain — "High" outranks "Medium" outranks anything else —
-# and the ordering itself is what matters, not where the number lives.
-_CONFIDENCE_RANK: Dict[str, int] = {"High": 2, "Medium": 1}
-
-
-def _match_strength(instance: Dict[str, Any]) -> tuple:
-    """Sort key for ranking same-status matches by evidentiary strength.
-
-    Used only to choose which match becomes a rule's headline
-    `inference_summary` — never to decide which matches exist or which are
-    shown once an investigator expands the rule.
-
-    Higher confidence outranks lower ("High" > "Medium" > "Unresolved"/
-    unknown), and at equal confidence a corroborated match outranks one
-    that is not. Anything else — which subject, which timestamp — is not
-    part of "strongest" and is deliberately left out of the key, so ties
-    fall through to the caller's own (stable) ordering rather than an
-    invented tie-break here.
-    """
-    confidence_rank = _CONFIDENCE_RANK.get(instance.get("confidence"), 0)
-    corroborated = bool(instance.get("corroborated"))
-    return (confidence_rank, corroborated)
 
 
 def rule_label(rule_id: str) -> str:
@@ -181,12 +100,9 @@ def rule_display_name(rule_id: str) -> str:
 
 
 def rule_heading(rule_id: str) -> str:
-    """ "Rule 13 (FastTrack Recommendation)" — the head of every narrative.
-
-    Keeping the rule NUMBER visible matters: investigators and the audit
-    trail refer to findings by number, and a narrative an investigator
-    cannot tie back to a numbered rule cannot be challenged or rejected
-    through /reject_inference.
+    """ "Rule 13 (FastTrack Recommendation)" — a rule's number plus its
+    reading name, used wherever a finding needs to be tied back to a
+    numbered rule an investigator can look up or reject.
     """
     number = rule_number(rule_id)
     name = rule_display_name(rule_id)
@@ -219,43 +135,11 @@ def _descriptions() -> Dict[str, str]:
     }
 
 
-@lru_cache(maxsize=1)
-def _default_params() -> Dict[str, Dict[str, Any]]:
-    """
-    Default rule params from config/rule.yaml, for the narratives that need
-    to quote a threshold back to the reader.
-
-    Config, not the live :InferenceRule node, for the same reason as
-    _descriptions: rendering a sentence must not depend on a Neo4j session.
-    The trade is real and worth naming — an operator who retunes
-    fasttrack_fraud_threshold on the live node changes what the rule DOES
-    immediately, while this line keeps quoting the config default until the
-    next deploy. The threshold is therefore rendered from the case's own
-    recorded values wherever possible, and the config figure is a fallback
-    for the sentence only, never for the decision.
-    """
-    try:
-        config = rule_registry._load_config()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("rule params unavailable for narrative rendering — %s", exc)
-        return {}
-    return {
-        rule_id: dict(entry.get("params") or {})
-        for rule_id, entry in (config.get("rules") or {}).items()
-        if isinstance(entry, dict)
-    }
-
-
 def rule_description(rule_id: str) -> Optional[str]:
     """The rule's description from config/rule.yaml. None when the config
     has no entry — surfaced as null rather than a filler sentence, so a
     missing description is visible and fixable instead of disguised."""
     return _descriptions().get(rule_id)
-
-
-# ======================================================================
-# Small formatting helpers
-# ======================================================================
 
 
 def display_name(first_name: Any, last_name: Any, subject_id: Any = None) -> Optional[str]:
@@ -1032,6 +916,9 @@ def enrich_instance(
 ) -> Dict[str, Any]:
     """Add subject display names, the display `title`, and the narrative
     to one instance."""
+def enrich_instance(rule_id: str, instance: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace an instance's raw first/last name fields with a single
+    display name for the subject and, if present, the related subject."""
     enriched = dict(instance)
 
     subject_name = display_name(
@@ -1065,63 +952,16 @@ def enrich_instance(
     return enriched
 
 
-def render_block(block: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def render_block(block: list) -> list:
     """
-    Second pass over the assembled rules_fired block: rebuild every
-    narrative with full cross-rule context, and add the rule-level display
-    fields.
-
-    Two passes are necessary and cheap. Rule 8's narrative needs Rule 7's
-    and Rule 2's findings, and Rule 1's closing clause needs Rule 2's — but
-    rules_fired assembles the block in rule-number order, so on the first
-    pass those findings do not exist yet. Rather than reorder the block (a
-    contract change) or issue extra queries (a Cypher change), the first
-    pass renders what it can and this pass, which sees everything, renders
-    the rest. It is pure in-memory work over data already fetched.
+    Add the rule-level display fields (rule_number, rule_display_name,
+    rule_heading) to every entry in an assembled rules_fired block.
 
     Mutates and returns the same list — rules_fired hands it straight on.
     """
-    context = InferenceContext(block)
     for entry in block:
         rule_id = entry.get("rule_id")
         entry["rule_number"] = rule_number(rule_id)
         entry["rule_display_name"] = rule_display_name(rule_id)
         entry["rule_heading"] = rule_heading(rule_id)
-
-        instances = entry.get("instances") or []
-        for instance in instances:
-            narrative = build_inference(rule_id, instance, context)
-            # if narrative:
-            #     instance["inference"] = narrative
-            # elif "inference" in instance:
-            #     # A first-pass line that this pass cannot reproduce would be
-            #     # a bug; leaving the stale text would hide it.
-            #     instance.pop("inference")
-
-        # Rule-level narrative: the single line a summary view shows without
-        # expanding the instances. The headline is the STRONGEST candidate
-        # match, not whichever instance the query happened to return first
-        # — a weak match sitting first in Neo4j's result order must not
-        # bury a stronger one for the same rule behind "expand" (see
-        # _match_strength for what "strongest" means).
-        #
-        # Prefer a LIVE finding for the collapsed summary line, unchanged
-        # from before. A rule with one rejected and one active instance
-        # should summarise as the active one; leading with the rejected
-        # line would read, at a glance, as if the whole rule had been
-        # withdrawn. Strength only ranks WITHIN that active/rejected
-        # grouping — it never lets a rejected match outrank an active one.
-        active = [i for i in instances if i.get("inference") and i.get("status", "active") == "active"]
-        candidates = sorted(active, key=_match_strength, reverse=True) or [
-            i for i in instances if i.get("inference")
-        ]
-        # if not candidates:
-        #     entry["inference_summary"] = None
-        # elif len(candidates) == 1:
-        #     entry["inference_summary"] = candidates[0]["inference"]
-        # else:
-        #     entry["inference_summary"] = (
-        #         f"{candidates[0]['inference']} ({len(candidates) - 1} further "
-        #         f"{'match' if len(candidates) == 2 else 'matches'} of this rule on this case.)"
-        #     )
     return block
