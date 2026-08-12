@@ -177,6 +177,34 @@ _RULE_SPECS: Dict[str, _RuleSpec] = {
 
 RULE_IDS_REJECTABLE: List[str] = sorted(_RULE_SPECS)
 
+# Public aliases for the family constants above. _RULE_SPECS stays the one
+# and only rule_id -> family table (module docstring); these exist only so
+# a caller OUTSIDE this module's own reject/revert logic — currently
+# reasoning_layer/rule_inference.py, choosing which fields belong in an
+# instance's display `title` — can branch on family without hardcoding a
+# second copy of the family name strings.
+FAMILY_SYMMETRIC_EDGE = _FAMILY_SYMMETRIC_EDGE
+FAMILY_SUBJECT_CASE_EDGE = _FAMILY_SUBJECT_CASE_EDGE
+FAMILY_NETWORK_EDGE = _FAMILY_NETWORK_EDGE
+FAMILY_SUBJECT_FLAG = _FAMILY_SUBJECT_FLAG
+FAMILY_CASE_FLAG = _FAMILY_CASE_FLAG
+FAMILY_ALLEGATION_FLAG = _FAMILY_ALLEGATION_FLAG
+
+
+def rule_family(rule_id: str) -> Optional[str]:
+    """
+    Public lookup of which family (see module docstring, and the
+    FAMILY_* constants above) `rule_id` belongs to.
+
+    A read-only derivation from _RULE_SPECS, not a second copy of the
+    rule_id -> family mapping — exactly like instance_endpoints() below
+    already is for the reject/revert endpoint pair. Returns None for a
+    rule_id with no entry in _RULE_SPECS (Rule 14 — see that dict's own
+    trailing comment for why it is deliberately absent).
+    """
+    spec = _RULE_SPECS.get(rule_id)
+    return spec.family if spec else None
+
 
 def build_match_id(rule_id: str, subject_id_a: Optional[str], subject_id_b: Optional[str]) -> str:
     """

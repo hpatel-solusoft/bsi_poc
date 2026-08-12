@@ -64,7 +64,7 @@ import logging
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from reasoning_layer import rule_registry
+from reasoning_layer import rejection, rule_registry
 
 logger = logging.getLogger(__name__)
 
@@ -954,10 +954,84 @@ def build_inference(
     return _join([f"{rule_heading(rule_id)}: {body}", _rejection_clause(instance)])
 
 
+# Families whose title carries the case's complaint number as the second
+# field, never its internal case_id — the id is a graph-internal key with
+# no meaning to an investigator, whereas the complaint number is the same
+# identifier they already work from in AppWorks. All three read it from
+# the SAME detail key each family's own rules_fired.py query already
+# returns it under (`complaint_no`):
+#   subject_case_edge (Rule 7/10)   detail.complaint_no  = the related case's
+#   case_flag         (Rule 8/13)   detail.complaint_no  = the escalated/
+#                                    fast-tracked case's
+#   allegation_flag   (Rule 12)     detail.complaint_no  = the case the
+#                                    corroborated allegation belongs to
+_TITLE_COMPLAINT_NUMBER_FAMILIES = (
+    rejection.FAMILY_SUBJECT_CASE_EDGE,
+    rejection.FAMILY_CASE_FLAG,
+    rejection.FAMILY_ALLEGATION_FLAG,
+)
+
+
+def _build_title(
+    rule_id: str,
+    subject_name: Optional[str],
+    related_subject_name: Optional[str],
+    detail: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    The compact label an investigator-facing list renders at the head of
+    one rules_fired instance, so a caller doesn't have to know which of
+    `detail`'s rule-family-specific fields to read just to show WHO/WHAT
+    this row is about.
+
+    `subject_name` is on every family's title (every family has a
+    subject). The second field is family-specific — see
+    reasoning_layer.rejection's family table, the one and only place that
+    grouping is defined:
+
+      symmetric_edge (1/3/5)               -> related_subject_name, the
+                                               other party in the pair.
+      subject_case_edge (7/10),
+      case_flag (8/13),
+      allegation_flag (12)                 -> complaint_number (see
+                                               _TITLE_COMPLAINT_NUMBER_FAMILIES
+                                               above for why never case_id).
+      network_edge (2/4/6/9),
+      subject_flag (11)                    -> subject_name alone. A
+                                               network spans several
+                                               members (already listed in
+                                               detail["members"]) and a hub
+                                               spans several cases
+                                               (detail["hub_case_ids"]) —
+                                               neither has one single
+                                               second party to name here.
+
+    Returns None — never an empty dict — when even subject_name could not
+    be resolved, so a caller can `if title:` rather than special-case an
+    empty-but-present title.
+    """
+    if not subject_name:
+        return None
+
+    title: Dict[str, Any] = {"subject_name": subject_name}
+    family = rejection.rule_family(rule_id)
+
+    if family == rejection.FAMILY_SYMMETRIC_EDGE:
+        if related_subject_name:
+            title["related_subject_name"] = related_subject_name
+    elif family in _TITLE_COMPLAINT_NUMBER_FAMILIES:
+        complaint_number = (detail or {}).get("complaint_no")
+        if complaint_number:
+            title["complaint_number"] = complaint_number
+
+    return title
+
+
 def enrich_instance(
     rule_id: str, instance: Dict[str, Any], context: Optional[InferenceContext] = None
 ) -> Dict[str, Any]:
-    """Add subject display names and the narrative to one instance."""
+    """Add subject display names, the display `title`, and the narrative
+    to one instance."""
     enriched = dict(instance)
 
     subject_name = display_name(
@@ -974,6 +1048,16 @@ def enrich_instance(
         enriched["subject_name"] = subject_name
     if related_name:
         enriched["related_subject_name"] = related_name
+
+    # `title` lives under `detail` (alongside fein/complaint_no/etc.) since
+    # it is itself just another display field derived from this instance,
+    # not a new top-level contract field — existing consumers reading
+    # detail.fein or detail.complaint_no are unaffected.
+    title = _build_title(rule_id, subject_name, related_name, enriched.get("detail"))
+    if title:
+        detail = dict(enriched.get("detail") or {})
+        detail["title"] = title
+        enriched["detail"] = detail
 
     inference = build_inference(rule_id, enriched, context)
     # if inference:
