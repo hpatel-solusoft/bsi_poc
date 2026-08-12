@@ -56,7 +56,7 @@ _REL_RULES: Dict[str, str] = {
           AND r.source_rule = "Rule_01_Shared_Employer"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:EMPLOYED_BY]->(e:Employer)<-[:EMPLOYED_BY]-(b)
-        WITH a, b, r, head(collect({name: e.name, fein: e.fein})) AS emp
+        WITH a, b, r, head(collect({employer_name: e.employer_name, name: e.name, fein: e.fein})) AS emp
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                b.subject_id AS related_subject_id, b.first_name AS related_first_name,
                b.last_name AS related_last_name,
@@ -65,7 +65,7 @@ _REL_RULES: Dict[str, str] = {
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
-               {employer_name: emp.name, fein: coalesce(emp.fein, r.fein)} AS detail
+               {employer_name: coalesce(emp.employer_name, emp.name), fein: coalesce(emp.fein, r.fein)} AS detail
         ORDER BY subject_id, related_subject_id
 """,
     "Rule_03_Shared_Address": """
@@ -102,7 +102,8 @@ _REL_RULES: Dict[str, str] = {
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
-               {alias_pattern: coalesce(r.alias_pattern, r.match_basis)} AS detail
+                       {alias_pattern: coalesce(r.alias_pattern, r.match_basis),
+                    alias_value: coalesce(r.alias_value, r.alias_pattern, r.match_basis)} AS detail
         ORDER BY subject_id, related_subject_id
 """,
     "Rule_10_Merged_Case_Propagation": """
