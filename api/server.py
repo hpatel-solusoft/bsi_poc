@@ -448,11 +448,17 @@ def intake(req: intakeRequest):
         # via AppWorks — see core.narrative_staleness's module docstring)
         # is now ONE of two independent triggers that can make this
         # cache stale; AI-31's (:Case).last_inference_change_at is the
-        # other (an investigator reject/revert). staleness.should_refresh
-        # widens the cache-hit check below from reload_ai_summary alone
-        # to "either trigger fired"; staleness.should_rerun_full_pipeline
-        # narrows back down to core_data-only for the one thing actually
-        # worth re-running from scratch for — see
+        # other (an investigator reject/revert). staleness.stale reports
+        # ONLY the graph trigger to the caller (core_data_changed is
+        # AppWorks's own flag, so echoing it back would be circular —
+        # see StalenessCheck.stale's docstring). staleness.should_auto_refresh
+        # — the gate below — is narrower still: a graph-only change no
+        # longer auto-runs the agent on its own (see
+        # StalenessCheck.should_auto_refresh's docstring for why); only
+        # an explicit reload_ai_summary=True does. Compare
+        # staleness.should_rerun_full_pipeline, which narrows further
+        # still, to core_data-only, for the one thing actually worth
+        # re-running from scratch for — see
         # core.narrative_staleness.StalenessCheck.should_rerun_full_pipeline's
         # docstring for why a graph-only change never warrants it.
         staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
@@ -460,11 +466,13 @@ def intake(req: intakeRequest):
         # Agent-summary cache: if intake has already produced and
         # persisted an agent_summary for this case_id, answer from
         # case_ai_summary_store / warm CASE_STORE WITHOUT calling the LLM
-        # again. Either staleness trigger bypasses this lookup and falls
-        # through to a fresh agent run below (a graph-only trigger still
-        # regenerates the narrative — see run_intake_direct_pipeline's
-        # force argument further down for what it does NOT also do).
-        if not staleness.should_refresh:
+        # again. Only an explicit reload_ai_summary=True bypasses this
+        # lookup and falls through to a fresh agent run below — a
+        # graph-only trigger still reports stale=True in the cache-hit
+        # response's meta below, but does not by itself force a fresh
+        # run (see run_intake_direct_pipeline's force argument further
+        # down for what a fresh run does NOT also do).
+        if not staleness.should_auto_refresh:
             cached = get_cached_route_summary(req.case_id, "intake")
             if cached is not None:
                 cached_case_data, cached_summary = cached
@@ -514,11 +522,15 @@ def intake(req: intakeRequest):
                             "pipeline_status": "cached",
                             "reload_ai_summary": req.reload_ai_summary,
                             "agent_summary_source": "db_cache",
-                            # AI-32: always None on this branch — it is
-                            # only reached when staleness.should_refresh
-                            # is False, i.e. neither trigger fired.
+                            # AI-32/graph-auto-refresh: this branch can be
+                            # reached even when the graph changed
+                            # (should_auto_refresh only cares about an
+                            # explicit reload_ai_summary=True), so `stale`
+                            # correctly reports True on a cache hit when
+                            # that's genuinely the case. The caller, not
+                            # this route, decides whether to act on that
+                            # by requesting an explicit reload.
                             "stale": staleness.stale,
-                            "stale_reason": staleness.stale_reason,
                             "generated_at": get_route_generated_at(cached_case_data, "intake"),
                         },
                     },
@@ -543,14 +555,15 @@ def intake(req: intakeRequest):
         # complaint_intelligence by extract_tool_results above.
         #
         # AI-32: staleness.should_rerun_full_pipeline, NOT
-        # req.reload_ai_summary directly, now controls the Wave 1/2
+        # req.reload_ai_summary directly, controls the Wave 1/2
         # force-rerun inside run_intake_direct_pipeline (it gates
         # enrich_graph_context's own `force` argument) — True only for a
-        # core_data-driven refresh. A graph-only refresh still reaches
-        # this call (staleness.should_refresh already got it past the
-        # cache-hit check above, which is what makes the LLM run again at
-        # all and therefore what regenerates the narrative), but passes
-        # False here, so Wave 1/2 is left exactly as an investigator's
+        # core_data-driven refresh. This call is only reached at all when
+        # should_auto_refresh was True (an explicit reload_ai_summary=True)
+        # or the cache was empty — a graph-only signal with no explicit
+        # reload now serves straight from cache above and never reaches
+        # here (see the cache-hit branch's own AI-32 comment). Either way,
+        # Wave 1/2 is left exactly as an investigator's
         # reject/revert already left it in Neo4j — nothing about AppWorks
         # structural data changed, so nothing there needs recomputing.
         sections, provenance_trail = run_intake_direct_pipeline(
@@ -636,7 +649,6 @@ def intake(req: intakeRequest):
                     "reload_ai_summary": req.reload_ai_summary,
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
-                    "stale_reason": staleness.stale_reason,
                     "generated_at": intake_generated_at,
                 },
             },
@@ -695,17 +707,21 @@ def similar_cases(req: SimilarCasesRequest):
         # core.narrative_staleness's module docstring. /similar_cases has
         # no separate "pipeline" stage of its own (find_structural_matches
         # is already a live, always-fresh Neo4j read regardless of cache
-        # state — see fetch_live_similar_cases below), so unlike /intake
-        # there is nothing to selectively skip: should_refresh alone is
-        # exactly "regenerate the narrative", which is the entirety of
-        # what a refresh means for this route either way.
+        # state — see fetch_live_similar_cases below). staleness.stale
+        # reports the graph trigger only to the caller (see
+        # StalenessCheck.stale's docstring for why core_data is
+        # excluded); should_auto_refresh (the gate below) only fires on
+        # an explicit reload_ai_summary=True — a graph-only change no
+        # longer forces this route to regenerate its narrative on its
+        # own (see StalenessCheck.should_auto_refresh's docstring).
         staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
 
         # Agent-summary cache: if similar_cases has already produced and
         # persisted an agent_summary for this case_id, answer from it
-        # WITHOUT calling the LLM again. Either staleness trigger bypasses
-        # this lookup and falls through to a fresh agent run below.
-        if not staleness.should_refresh:
+        # WITHOUT calling the LLM again. Only an explicit
+        # reload_ai_summary=True bypasses this lookup and falls through
+        # to a fresh agent run below.
+        if not staleness.should_auto_refresh:
             cached_summary = get_route_summary_text(case_data, "similar_cases")
             if cached_summary is not None:
                 # similar_cases is ALWAYS a live Neo4j read, cache hit or
@@ -740,7 +756,6 @@ def similar_cases(req: SimilarCasesRequest):
                             "data_source": data_source,
                             "agent_summary_source": "db_cache",
                             "stale": staleness.stale,
-                            "stale_reason": staleness.stale_reason,
                             "generated_at": get_route_generated_at(case_data, "similar_cases"),
                         },
                     },
@@ -813,7 +828,6 @@ def similar_cases(req: SimilarCasesRequest):
                     "data_source": data_source,
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
-                    "stale_reason": staleness.stale_reason,
                     "generated_at": similar_cases_generated_at,
                 },
             },
@@ -870,15 +884,21 @@ def risk_assessment(req: RiskAssessmentRequest):
         # /similar_cases, /risk_assessment has no separate "pipeline"
         # stage of its own (neo4j_signals/risk_score/risk_tier are
         # already a live, always-fresh recompute regardless of cache
-        # state — see fetch_live_risk_signals below), so should_refresh
-        # alone is exactly "regenerate the narrative".
+        # state — see fetch_live_risk_signals below). staleness.stale
+        # reports the graph trigger only to the caller (see
+        # StalenessCheck.stale's docstring for why core_data is
+        # excluded); should_auto_refresh (the gate below) only fires on
+        # an explicit reload_ai_summary=True — a graph-only change no
+        # longer forces this route to regenerate its narrative on its
+        # own (see StalenessCheck.should_auto_refresh's docstring).
         staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
 
         # Agent-summary cache: if risk_assessment has already produced
         # and persisted an agent_summary for this case_id, answer from it
-        # WITHOUT calling the LLM again. Either staleness trigger bypasses
-        # this lookup and falls through to a fresh agent run below.
-        if not staleness.should_refresh:
+        # WITHOUT calling the LLM again. Only an explicit
+        # reload_ai_summary=True bypasses this lookup and falls through
+        # to a fresh agent run below.
+        if not staleness.should_auto_refresh:
             cached_summary = get_route_summary_text(case_data, "risk_assessment")
             cached_risk_assessment = case_data.get("risk_assessment")
             if (
@@ -941,7 +961,6 @@ def risk_assessment(req: RiskAssessmentRequest):
                             "data_source": data_source,
                             "agent_summary_source": "db_cache",
                             "stale": staleness.stale,
-                            "stale_reason": staleness.stale_reason,
                             "generated_at": get_route_generated_at(case_data, "risk_assessment"),
                         },
                     },
@@ -1036,7 +1055,6 @@ def risk_assessment(req: RiskAssessmentRequest):
                     "data_source": data_source,
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
-                    "stale_reason": staleness.stale_reason,
                     "generated_at": risk_assessment_generated_at,
                 },
             },
@@ -1117,8 +1135,17 @@ def plan(req: PlanRequest):
         # Like /similar_cases and /risk_assessment, /plan has no separate
         # "pipeline" stage of its own (rule_aware_tasks/rules_fired are
         # already a live, always-fresh Neo4j read regardless of cache
-        # state — see fetch_live_rule_aware_tasks/prepare_plan_context),
-        # so should_refresh alone is exactly "regenerate the narrative".
+        # state — see fetch_live_rule_aware_tasks/prepare_plan_context).
+        # Like /similar_cases and /risk_assessment, /plan has no separate
+        # "pipeline" stage of its own (rule_aware_tasks/rules_fired are
+        # already a live, always-fresh Neo4j read regardless of cache
+        # state — see fetch_live_rule_aware_tasks/prepare_plan_context).
+        # staleness.stale reports the graph trigger only to the caller
+        # (see StalenessCheck.stale's docstring for why core_data is
+        # excluded); should_auto_refresh (the gate below) only fires on an
+        # explicit reload_ai_summary=True — a graph-only change no longer
+        # forces this route to regenerate its narrative on its own (see
+        # StalenessCheck.should_auto_refresh's docstring).
         staleness = evaluate_cache_staleness(
             req.case_id, req.reload_ai_summary, cache_generated_at=plan_generated_at_before_call
         )
@@ -1133,11 +1160,12 @@ def plan(req: PlanRequest):
         # served even when a refresh was otherwise indicated — a fresh LLM
         # run would only be discarded in favour of override["modified_steps"]
         # anyway (see run_plan_pipeline below), so skipping straight to it
-        # here saves the wasted LLM call. A staleness trigger only bypasses
-        # the cache when NO override exists; it still falls through to a
-        # fresh agent run below in that case, same as before.
+        # here saves the wasted LLM call. Only an explicit
+        # reload_ai_summary=True bypasses the cache when NO override
+        # exists; it still falls through to a fresh agent run below in
+        # that case, same as before.
         override = get_override(req.case_id)
-        if not staleness.should_refresh or override is not None:
+        if not staleness.should_auto_refresh or override is not None:
             cached_summary = get_route_summary_text(case_data, "plan")
             cached_plan = case_data.get("investigation_plan")
             if cached_summary is not None and isinstance(cached_plan, dict):
@@ -1206,12 +1234,11 @@ def plan(req: PlanRequest):
                             # AI-32: independent of plan_stale above —
                             # plan_stale is specifically about a saved
                             # HUMAN OVERRIDE lagging behind case data
-                            # (Section E.5); stale_reason is about the
+                            # (Section E.5); stale is about the
                             # underlying AI-GENERATED narrative itself.
-                            # Both can be true/non-null at once and mean
+                            # Both can be true at once and mean
                             # different things.
                             "stale": staleness.stale,
-                            "stale_reason": staleness.stale_reason,
                             "generated_at": get_route_generated_at(case_data, "plan"),
                         },
                     },
@@ -1358,7 +1385,6 @@ def plan(req: PlanRequest):
                     "plan_stale": plan_stale,
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
-                    "stale_reason": staleness.stale_reason,
                     "generated_at": plan_generated_at,
                 },
             },
@@ -1727,8 +1753,10 @@ def generate_report(req: ReportGenerationRequest):
     is generated. reload_ai_summary=True always skips SERVING from this
     cache and persists a fresh draft row — though the report_artifacts
     lookup itself still runs even then, purely so the response's
-    stale_reason can report "both" accurately; see the AI-32 comment
-    inline below for why that one extra read is worth its cost here.
+    stale flag can still correctly report a graph-side change even on
+    a request that also happens to pass reload_ai_summary=True; see the
+    AI-32 comment inline below for why that one extra read is worth its
+    cost here.
     """
     start = time.time()
     try:
@@ -1837,9 +1865,9 @@ def generate_report(req: ReportGenerationRequest):
         #      never replacing #1: a defense-in-depth signal, not a
         #      downgrade of the existing precision. Practically this
         #      only ever fires ahead of #1 in the reject-then-revert case
-        #      above, where reporting stale_reason="graph" even though
-        #      the content is provably unchanged is the honest answer —
-        #      an investigator DID touch the graph — while this route
+        #      above, where reporting stale=True even though the content
+        #      is provably unchanged is the honest answer — an
+        #      investigator DID touch the graph — while this route
         #      still correctly serves the (genuinely still-accurate)
         #      cached content either way.
         # Any actual difference means the cached narrative prose
@@ -1855,10 +1883,14 @@ def generate_report(req: ReportGenerationRequest):
         # from this cache — a forced reload must produce fresh prose. The
         # lookup itself still runs either way (a cheap indexed Postgres
         # read next to the LLM call this cache exists to avoid), purely so
-        # stale_reason below can report "both" accurately when core data
-        # AND the graph both changed, instead of silently losing the
-        # graph signal whenever a caller also happens to pass
-        # reload_ai_summary=True.
+        # the response's `stale` flag still correctly reports a graph-side
+        # change even on a request that also happens to pass
+        # reload_ai_summary=True — `stale` reports the graph signal only
+        # (core_data_changed is never folded into it; see
+        # StalenessCheck.stale's docstring for why), so without this
+        # lookup a caller who set reload_ai_summary=True would silently
+        # lose the graph signal from the response instead of just no
+        # longer needing it to decide whether to serve the cache.
         core_data_changed = bool(req.reload_ai_summary)
         cached_report = get_latest_report(req.case_id)
         if cached_report is not None:
@@ -1951,16 +1983,18 @@ def generate_report(req: ReportGenerationRequest):
                             "agent_summary_source": "db_cache",
                             "persisted_to_postgres": True,
                             "stale": staleness.stale,
-                            "stale_reason": staleness.stale_reason,
                         },
                     },
                 }
 
             logger.info(
-                "generate_report CACHE STALE for case_id=%s stale_reason=%s — "
-                "regenerating a fresh report instead of serving report_artifacts",
+                "generate_report CACHE STALE for case_id=%s stale=%s core_data_changed=%s "
+                "graph_changed=%s — regenerating a fresh report instead of serving "
+                "report_artifacts",
                 req.case_id,
-                staleness.stale_reason,
+                staleness.stale,
+                core_data_changed,
+                staleness.graph_changed,
             )
         else:
             # No report has ever been generated for this case_id — a
@@ -2123,7 +2157,6 @@ def generate_report(req: ReportGenerationRequest):
                     "agent_summary_source": "llm",
                     "persisted_to_postgres": persisted is not None,
                     "stale": staleness.stale,
-                    "stale_reason": staleness.stale_reason,
                 },
             },
         }
