@@ -59,7 +59,11 @@ from agent_service.prompt_builders import build_report_generation_prompt
 from agent_service.runner_provider import get_runner
 from api.message_utils import extract_agent_summary, merge_direct_result, merge_provenance
 from api.models import ReportGenerationRequest
-from api.pipeline_execution import evaluate_cache_staleness, fetch_live_graph_findings
+from api.pipeline_execution import (
+    evaluate_cache_staleness,
+    fetch_live_graph_findings,
+    fetch_live_similar_cases,
+)
 from api.response_builders import fired_rules_only, format_provenance_lines, replace_markdown_section
 from core.agent_audit_repository import log_agent_call
 from core.investigation_plan_override_repository import get_override
@@ -395,6 +399,23 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             "rules_fired", []
         )
 
+        # similar_cases for the report narrative is a live Neo4j read,
+        # same pattern as rules_fired immediately above and the same
+        # helper /similar_cases and /risk_assessment already use (see
+        # fetch_live_similar_cases) — case_data (resolved above via CS-4
+        # warm lookup -> Postgres fallback -> ai_summary body) NEVER
+        # carries similar_cases at all
+        # (core.persistence_filters.strip_graph_derived_fields strips the
+        # whole top-level section before every write, by design, so a
+        # stale match list is never served), so case_data.get(
+        # "similar_cases") was always None here regardless of whether
+        # /similar_cases had ever been run for this case, and the "Similar
+        # Cases" section always fell through to the prompt's own "No
+        # similar cases identified." fallback (config/prompts.py). Reading
+        # it fresh means the report reflects the graph as it stands right
+        # now, exactly like every other tab.
+        live_similar_cases = fetch_live_similar_cases(req.case_id)
+
         # Inject the computed network and decision log into the case
         # context the prompt serialises, so the LLM narrates THESE facts
         # (never adds, removes, or reorders them — REPORT_GENERATION scope
@@ -413,6 +434,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
             "decision_log": decision_log_result.get("decision_log", []),
+            "similar_cases": live_similar_cases,
         }
         # case_data_for_prompt above is the FULL context (superset of what
         # the report needs — kept as-is; nothing downstream that reads
@@ -747,6 +769,17 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             "rules_fired", []
         )
 
+        # similar_cases for the report narrative is a live Neo4j read,
+        # identical to the fix in /generate_report above (and the same
+        # helper /similar_cases and /risk_assessment already use via
+        # fetch_live_similar_cases) — case_data never carries similar_cases
+        # at all (core.persistence_filters.strip_graph_derived_fields), so
+        # case_data.get("similar_cases") was always None here too and the
+        # rendered PDF's "Similar Cases" section always read "No similar
+        # cases identified." regardless of whether /similar_cases had ever
+        # been run for this case.
+        live_similar_cases = fetch_live_similar_cases(req.case_id)
+
         # Same context assembly and prompt as /generate_report — the LLM
         # narrates the Related Network, Reviewed and Excluded Connections,
         # and Decision & Override Log sections; it never decides their
@@ -758,6 +791,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             "confidence_summary": related.get("confidence_summary", {}),
             "rejected_count": related.get("rejected_count", 0),
             "decision_log": decision_log_result.get("decision_log", []),
+            "similar_cases": live_similar_cases,
         }
         llm_prompt_context = build_report_llm_context(case_data_for_prompt, case_id=req.case_id)
 
