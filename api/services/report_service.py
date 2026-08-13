@@ -65,7 +65,7 @@ from core.agent_audit_repository import log_agent_call
 from core.investigation_plan_override_repository import get_override
 from core.narrative_staleness import StalenessCheck
 from core.report_artifacts_repository import get_latest_report, save_report
-from reasoning_layer.decision_log import build_decision_log
+from reasoning_layer.decision_log import build_decision_log, render_reviewed_and_excluded_markdown
 from reasoning_layer.neo4j_client import GraphUnavailableError
 from reasoning_layer.report_generation import assemble_related_network
 from reasoning_layer.report_llm_context import build_report_llm_context
@@ -302,6 +302,16 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
                     "Decision & Override Log",
                     decision_log_result["decision_log_markdown"],
                 )
+                # Same treatment for Reviewed and Excluded Connections —
+                # deterministic Python formatting, never LLM-computed
+                # per-entry fallback text. See
+                # reasoning_layer.decision_log.render_reviewed_and_excluded_markdown
+                # for why this section specifically needed this fix.
+                resolved_report_markdown = replace_markdown_section(
+                    resolved_report_markdown,
+                    "Reviewed and Excluded Connections",
+                    render_reviewed_and_excluded_markdown(cached_related_network),
+                )
 
                 duration_seconds = round(time.time() - start, 1)
                 logger.info(
@@ -450,6 +460,21 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
         )
 
         assistant_text = extract_agent_summary(messages)
+
+        # Splice the deterministically-rendered Reviewed and Excluded
+        # Connections section into the LLM's markdown, overwriting
+        # whatever the LLM produced for it. The LLM has been observed
+        # writing "not recorded" for notation fields it was actually
+        # given real values for (see
+        # reasoning_layer.decision_log.render_reviewed_and_excluded_markdown's
+        # docstring) — same fix already applied to Decision & Override
+        # Log via decision_log_markdown, applied here to the section
+        # that was actually failing in production.
+        assistant_text = replace_markdown_section(
+            assistant_text,
+            "Reviewed and Excluded Connections",
+            render_reviewed_and_excluded_markdown(related.get("related_network", [])),
+        )
 
         merged_provenance = merge_provenance(
             case_data.get("provenance_trail", []),
@@ -657,6 +682,13 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
                         "Decision & Override Log",
                         decision_log_result["decision_log_markdown"],
                     )
+                    # Same treatment for Reviewed and Excluded Connections
+                    # — see /generate_report above for why.
+                    resolved_report_markdown = replace_markdown_section(
+                        resolved_report_markdown,
+                        "Reviewed and Excluded Connections",
+                        render_reviewed_and_excluded_markdown(cached_related_network),
+                    )
 
                     duration_seconds = round(time.time() - start, 1)
                     logger.info(
@@ -758,6 +790,16 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
         )
 
         assistant_text = extract_agent_summary(messages)
+
+        # Splice the deterministically-rendered Reviewed and Excluded
+        # Connections section into the LLM's markdown — identical fix to
+        # /generate_report above, applied here too since this route runs
+        # its own independent LLM call rather than reusing that one.
+        assistant_text = replace_markdown_section(
+            assistant_text,
+            "Reviewed and Excluded Connections",
+            render_reviewed_and_excluded_markdown(related.get("related_network", [])),
+        )
 
         report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         generated_at = datetime.now(timezone.utc).isoformat()

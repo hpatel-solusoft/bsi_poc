@@ -7,6 +7,12 @@ connections were reviewed and excluded (Section 8.7 / Report Design:
 "Reviewed and Excluded Connections" already carries the per-connection
 detail; the Decision Log never repeats it).
 
+Also owns deterministically rendering that "Reviewed and Excluded
+Connections" section itself (render_reviewed_and_excluded_markdown) —
+same module as the Decision & Override Log renderer above it because
+both exist for the identical reason and follow the identical pattern:
+neither section's per-entry formatting is left to the LLM.
+
 Same governance as reasoning_layer/report_generation.py: pure,
 synchronous formatting over data the caller already fetched. This
 module makes no Postgres or Neo4j call of its own — /generate_report
@@ -194,6 +200,85 @@ def build_decision_log(
         len(rejected_connections),
     )
     return _envelope(result, sources)
+
+
+# Human-readable label for each relationship_type
+# reasoning_layer.report_generation.assemble_related_network's
+# _RELATED_NETWORK_QUERY can return — a closed, fixed set (that query
+# has exactly six UNION ALL branches), so this mapping is exhaustive by
+# construction; the .replace("_", " ").lower() fallback in
+# _relationship_type_plain_words only exists as a safety net if a new
+# branch is ever added to that query without a matching entry added here.
+_RELATIONSHIP_TYPE_PLAIN_WORDS: Dict[str, str] = {
+    "SHARES_EMPLOYER_WITH": "shared employer",
+    "SHARES_ADDRESS_WITH": "shared address",
+    "SHARES_ALIAS_PATTERN_WITH": "shared alias pattern",
+    "MEMBER_OF_FRAUD_NETWORK": "fraud network membership",
+    "HAS_PRIOR_GUILTY_CASE": "prior guilty case",
+    "APPEARS_IN_CASE": "merged case association",
+}
+
+
+def _relationship_type_plain_words(relationship_type: Optional[str]) -> str:
+    if not relationship_type:
+        return "connection"
+    return _RELATIONSHIP_TYPE_PLAIN_WORDS.get(relationship_type, relationship_type.replace("_", " ").lower())
+
+
+def render_reviewed_and_excluded_markdown(related_network: List[Dict[str, Any]]) -> str:
+    """
+    Deterministically render the "## Reviewed and Excluded Connections"
+    section body from `related_network`
+    (reasoning_layer.report_generation.assemble_related_network's own
+    result["related_network"] list, or the equivalent list read back
+    from a cached report) — no LLM in the loop. Same style and same
+    rationale as render_decision_log_markdown above.
+
+    Filters `related_network` down to entries whose status == "rejected"
+    itself — the caller does not need to pre-filter (though doing so is
+    also safe: entries that are not status == "rejected" are ignored
+    either way).
+
+    This exists for the identical reason render_decision_log_markdown
+    does: leaving this section's per-entry formatting to the LLM (i.e.
+    "for each rejected entry, write investigator_id or 'not recorded',
+    rejected_at or 'not recorded', reason or 'not recorded'") is itself
+    content logic, which Report Design ACTIONS #3 explicitly rules out
+    ("No AI involved in content, just formatting"). In production the
+    LLM was observed writing "not recorded" for a field it had actually
+    been given a real value for — silently discarding provided data
+    instead of reporting it, on an audit-trail section where that is a
+    compliance problem, not a cosmetic one. Building the exact text here
+    and having the prompt copy it verbatim removes that failure mode
+    entirely: `or "not recorded"` cannot be second-guessed in Python the
+    way it can be by a model.
+
+    Mirrors config/prompts.py REPORT_GENERATION_PROMPT's own "##
+    Reviewed and Excluded Connections" formatting rules exactly — keep
+    the two in sync if either changes.
+    """
+    rejected_entries = [entry for entry in (related_network or []) if entry.get("status") == "rejected"]
+
+    if not rejected_entries:
+        return "No connections have been reviewed and excluded."
+
+    count = len(rejected_entries)
+    plural = "" if count == 1 else "s"
+    lines: List[str] = [f"{count} connection{plural} were reviewed and excluded by an investigator."]
+    lines.append("")
+
+    for entry in rejected_entries:
+        label = entry.get("counterpart_label") or entry.get("counterpart_id") or "Unknown"
+        plain_type = _relationship_type_plain_words(entry.get("relationship_type"))
+        rejection = entry.get("rejection") or {}
+        investigator_id = rejection.get("investigator_id") or "not recorded"
+        rejected_at = rejection.get("rejected_at") or "not recorded"
+        reason = rejection.get("reason") or "not recorded"
+        lines.append(
+            f"* **{label}** ({plain_type}) — Reviewed by: {investigator_id} on {rejected_at}. Reason: {reason}."
+        )
+
+    return "\n".join(lines)
 
 
 def render_decision_log_markdown(entries: List[Dict[str, Any]]) -> str:
