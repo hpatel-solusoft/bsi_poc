@@ -621,13 +621,26 @@ class InferredRelationship(BaseModel):
     # is computed correctly but silently dropped here, since a
     # response_model strips any key it doesn't declare.
     match_id: Optional[str] = None
-    # AI-30/AI-31: only populated for Rule_08/Rule_13 rows (the
-    # case-flag family) — None for every other rule_id, which has no
-    # case-level auto-invalidation concept. Same reason match_id above
-    # needs an explicit field: an undeclared key is silently stripped by
-    # this response_model, not merely omitted.
+    # AI-30/AI-31: cascade attribution (reasoning_layer/cascade.py's
+    # DOWNSTREAM_DEPENDENTS walk) — who auto-invalidated or reinstated
+    # this fact as a side effect of a DIFFERENT rule's reject/revert,
+    # which upstream rule triggered it, when, and why. Populated for
+    # Rule_02/04/06/08/09/13 rows (every rule cascade.py can ever
+    # auto-invalidate/reinstate); None for every other rule_id, and for
+    # Rule_09 specifically even among those six (it can never itself be
+    # a cascade target — see reasoning_layer/rule_audit.py's Rule_09
+    # query comment). Same reason match_id above needs an explicit
+    # field: an undeclared key is silently stripped by this
+    # response_model, not merely omitted.
     auto_invalidated: Optional[bool] = None
     invalidated_by_rule_id: Optional[str] = None
+    invalidated_reason: Optional[str] = None
+    invalidated_by_investigator: Optional[str] = None
+    invalidated_at: Optional[str] = None
+    reinstated_by_rule_id: Optional[str] = None
+    reinstated_reason: Optional[str] = None
+    reinstated_by_investigator: Optional[str] = None
+    reinstated_at: Optional[str] = None
 
 
 class RuleAuditEntry(BaseModel):

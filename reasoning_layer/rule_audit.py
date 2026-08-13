@@ -111,7 +111,27 @@ _REL_QUERIES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id_a, (n.network_type + ":" + n.network_key) AS subject_id_b,
                "MEMBER_OF_FRAUD_NETWORK" AS relationship_type, r.confidence AS confidence,
                toString(r.asserted_at) AS asserted_at, coalesce(r.corroborated, false) AS corroborated,
-               r.status AS status
+               r.status AS status,
+               // AI-30/AI-31: cascade attribution parity with the
+               // case-flag family below (Rule_08/Rule_13) — see
+               // reasoning_layer/cascade.py's _AUTO_INVALIDATE_MEMBERSHIP/
+               // _MARK_REINSTATED_MEMBERSHIP for what writes these.
+               // invalidated_at doubles as the relationship's
+               // rejected_at, shared with a MANUAL rejection
+               // (reasoning_layer/rejection.py) — auto_invalidated is
+               // what tells the two apart, exactly as
+               // reasoning_layer/cascade.py's own module docstring
+               // ("AUTO-INVALIDATION IS ALWAYS DISTINGUISHABLE...")
+               // already documents for this relationship.
+               r.auto_invalidated AS auto_invalidated,
+               r.invalidated_by_rule_id AS invalidated_by_rule_id,
+               r.invalidated_reason AS invalidated_reason,
+               r.invalidated_by_investigator_id AS invalidated_by_investigator,
+               (CASE WHEN r.auto_invalidated = true THEN toString(r.rejected_at) ELSE null END) AS invalidated_at,
+               r.reinstated_by_rule_id AS reinstated_by_rule_id,
+               r.reinstated_reason AS reinstated_reason,
+               r.reinstated_by_investigator_id AS reinstated_by_investigator,
+               toString(r.reinstated_at) AS reinstated_at
     """,
     "Rule_04_Address_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
@@ -119,7 +139,16 @@ _REL_QUERIES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id_a, (n.network_type + ":" + n.network_key) AS subject_id_b,
                "MEMBER_OF_FRAUD_NETWORK" AS relationship_type, r.confidence AS confidence,
                toString(r.asserted_at) AS asserted_at, coalesce(r.corroborated, false) AS corroborated,
-               r.status AS status
+               r.status AS status,
+               r.auto_invalidated AS auto_invalidated,
+               r.invalidated_by_rule_id AS invalidated_by_rule_id,
+               r.invalidated_reason AS invalidated_reason,
+               r.invalidated_by_investigator_id AS invalidated_by_investigator,
+               (CASE WHEN r.auto_invalidated = true THEN toString(r.rejected_at) ELSE null END) AS invalidated_at,
+               r.reinstated_by_rule_id AS reinstated_by_rule_id,
+               r.reinstated_reason AS reinstated_reason,
+               r.reinstated_by_investigator_id AS reinstated_by_investigator,
+               toString(r.reinstated_at) AS reinstated_at
     """,
     "Rule_06_Identity_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
@@ -127,7 +156,16 @@ _REL_QUERIES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id_a, (n.network_type + ":" + n.network_key) AS subject_id_b,
                "MEMBER_OF_FRAUD_NETWORK" AS relationship_type, r.confidence AS confidence,
                toString(r.asserted_at) AS asserted_at, coalesce(r.corroborated, false) AS corroborated,
-               r.status AS status
+               r.status AS status,
+               r.auto_invalidated AS auto_invalidated,
+               r.invalidated_by_rule_id AS invalidated_by_rule_id,
+               r.invalidated_reason AS invalidated_reason,
+               r.invalidated_by_investigator_id AS invalidated_by_investigator,
+               (CASE WHEN r.auto_invalidated = true THEN toString(r.rejected_at) ELSE null END) AS invalidated_at,
+               r.reinstated_by_rule_id AS reinstated_by_rule_id,
+               r.reinstated_reason AS reinstated_reason,
+               r.reinstated_by_investigator_id AS reinstated_by_investigator,
+               toString(r.reinstated_at) AS reinstated_at
     """,
     "Rule_09_PCA_CheckSplit": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
@@ -135,7 +173,26 @@ _REL_QUERIES: Dict[str, str] = {
         RETURN a.subject_id AS subject_id_a, (n.network_type + ":" + n.network_key) AS subject_id_b,
                "MEMBER_OF_FRAUD_NETWORK" AS relationship_type, r.confidence AS confidence,
                toString(r.asserted_at) AS asserted_at, coalesce(r.corroborated, false) AS corroborated,
-               r.status AS status
+               r.status AS status,
+               // Rule_09 is deliberately absent from
+               // reasoning_layer.cascade._NETWORK_TYPE_BY_RULE_ID (see
+               // that module's own comment: it never appears as a
+               // DOWNSTREAM_DEPENDENTS value, only ever as an upstream
+               // key for Rule_08) — so it can never itself be
+               // auto-invalidated by this mechanism. These columns are
+               // still selected, for output-shape symmetry with the
+               // other three MEMBER_OF_FRAUD_NETWORK rules, and will
+               // simply read null/false since cascade.py never writes
+               // them for a Rule_09 edge.
+               r.auto_invalidated AS auto_invalidated,
+               r.invalidated_by_rule_id AS invalidated_by_rule_id,
+               r.invalidated_reason AS invalidated_reason,
+               r.invalidated_by_investigator_id AS invalidated_by_investigator,
+               (CASE WHEN r.auto_invalidated = true THEN toString(r.rejected_at) ELSE null END) AS invalidated_at,
+               r.reinstated_by_rule_id AS reinstated_by_rule_id,
+               r.reinstated_reason AS reinstated_reason,
+               r.reinstated_by_investigator_id AS reinstated_by_investigator,
+               toString(r.reinstated_at) AS reinstated_at
     """,
 }
 
@@ -167,7 +224,14 @@ _PROP_QUERIES: Dict[str, str] = {
                // consumer still missing it — added here for parity, pure
                // field pass-through (no cascade.py change needed).
                c.risk_escalation_auto_invalidated AS auto_invalidated,
-               c.risk_escalation_invalidated_by_rule_id AS invalidated_by_rule_id
+               c.risk_escalation_invalidated_by_rule_id AS invalidated_by_rule_id,
+               c.risk_escalation_invalidated_reason AS invalidated_reason,
+               c.risk_escalation_invalidated_by_investigator_id AS invalidated_by_investigator,
+               toString(c.risk_escalation_invalidated_at) AS invalidated_at,
+               c.risk_escalation_reinstated_by_rule_id AS reinstated_by_rule_id,
+               c.risk_escalation_reinstated_reason AS reinstated_reason,
+               c.risk_escalation_reinstated_by_investigator_id AS reinstated_by_investigator,
+               toString(c.risk_escalation_reinstated_at) AS reinstated_at
     """,
     "Rule_12_SLAM_Wage_Corroboration": """
         MATCH (c:Case)-[:HAS_ALLEGATION]->(al:Allegation)-[:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject)
@@ -187,7 +251,14 @@ _PROP_QUERIES: Dict[str, str] = {
                c.fasttrack_recommendation_status AS status,
                // AI-30/AI-31: same parity fix as Rule_08 above.
                c.fasttrack_recommendation_auto_invalidated AS auto_invalidated,
-               c.fasttrack_recommendation_invalidated_by_rule_id AS invalidated_by_rule_id
+               c.fasttrack_recommendation_invalidated_by_rule_id AS invalidated_by_rule_id,
+               c.fasttrack_recommendation_invalidated_reason AS invalidated_reason,
+               c.fasttrack_recommendation_invalidated_by_investigator_id AS invalidated_by_investigator,
+               toString(c.fasttrack_recommendation_invalidated_at) AS invalidated_at,
+               c.fasttrack_recommendation_reinstated_by_rule_id AS reinstated_by_rule_id,
+               c.fasttrack_recommendation_reinstated_reason AS reinstated_reason,
+               c.fasttrack_recommendation_reinstated_by_investigator_id AS reinstated_by_investigator,
+               toString(c.fasttrack_recommendation_reinstated_at) AS reinstated_at
     """,
 }
 
@@ -219,12 +290,33 @@ def get_rule_audit(case_id: str) -> dict:
                 {subject_id_a, subject_id_b, relationship_type,
                  confidence, asserted_at, corroborated,
                  status: "active" | "rejected", match_id,
-                 # AI-30/AI-31: only populated for Rule_08/Rule_13 rows
-                 # (the case-flag family) — null on every other rule's
-                 # rows, which have no case-level auto-invalidation
-                 # concept of their own.
+                 # AI-30/AI-31: cascade attribution — populated for
+                 # Rule_02/04/06/08/09/13 rows (every rule cascade.py can
+                 # ever auto-invalidate/reinstate — Rule_09's are always
+                 # null, since it can never itself be a downstream
+                 # target; see reasoning_layer/cascade.py's
+                 # DOWNSTREAM_DEPENDENTS/_NETWORK_TYPE_BY_RULE_ID
+                 # comments). null on every other rule's rows, which
+                 # have no cascade concept of their own. When and by
+                 # whom this fact was most recently auto-invalidated (if
+                 # currently rejected because of that) or reinstated (if
+                 # currently active again after having been
+                 # auto-invalidated) — the exact fields a manual
+                 # rejection's own POST /reject_inference /
+                 # /revert_rejection response already returns
+                 # (investigator_id, changed_at, rule_id), mirrored here
+                 # for a cascaded fact so a caller viewing this later
+                 # (not just at the moment of the original reject/revert
+                 # call) still sees who/when/which-rule.
                  auto_invalidated: bool | None,
-                 invalidated_by_rule_id: str | None}
+                 invalidated_by_rule_id: str | None,
+                 invalidated_reason: str | None,
+                 invalidated_by_investigator: str | None,
+                 invalidated_at: str | None,
+                 reinstated_by_rule_id: str | None,
+                 reinstated_reason: str | None,
+                 reinstated_by_investigator: str | None,
+                 reinstated_at: str | None}
               ],
             }
           ],
@@ -314,13 +406,24 @@ def get_rule_audit(case_id: str) -> dict:
                     # MODIFIER_RULE_ID — the one rule_id excluded above —
                     # has no rejectable instance at all).
                     "match_id": build_match_id(rule_id, row["subject_id_a"], row["subject_id_b"]),
-                    # AI-30/AI-31: present only on Rule_08/Rule_13 rows
-                    # (the only queries above that RETURN these columns);
+                    # AI-30/AI-31: cascade attribution — who auto-
+                    # invalidated/reinstated this fact, which upstream
+                    # rule triggered it, when, and why. Present for
+                    # Rule_02/04/06/08/09/13 rows (the only queries above
+                    # that RETURN these columns; Rule_09's are always
+                    # null — see that query's own comment for why);
                     # .get(...) rather than row[...] is what makes every
                     # other rule's rows degrade to None instead of a
                     # KeyError.
                     "auto_invalidated": row.get("auto_invalidated"),
                     "invalidated_by_rule_id": row.get("invalidated_by_rule_id"),
+                    "invalidated_reason": row.get("invalidated_reason"),
+                    "invalidated_by_investigator": row.get("invalidated_by_investigator"),
+                    "invalidated_at": row.get("invalidated_at"),
+                    "reinstated_by_rule_id": row.get("reinstated_by_rule_id"),
+                    "reinstated_reason": row.get("reinstated_reason"),
+                    "reinstated_by_investigator": row.get("reinstated_by_investigator"),
+                    "reinstated_at": row.get("reinstated_at"),
                 }
                 for row in rows
                 if row["subject_id_a"] is not None

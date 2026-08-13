@@ -39,19 +39,20 @@ rejected" both fall out of the exact same query correctly, with
 nothing extra to write.
 
 AUTO-INVALIDATION IS ALWAYS DISTINGUISHABLE FROM A MANUAL REJECTION:
-the reject direction SETs status="rejected" plus two audit fields —
-<field>_auto_invalidated=true and <field>_invalidated_by_rule_id=
-<upstream rule_id> — on the downstream fact, instead of the
-investigator-attributed rejected_by/rejected_at/rejection_reason
-reasoning_layer/rejection.py stamps on a manual rejection. The
-case-level field names (risk_escalation_*, fasttrack_recommendation_*)
-match the ones already named in the BSI Phase 2 task list (AI-31); the
-equivalent pair on a MEMBER_OF_FRAUD_NETWORK relationship
-(auto_invalidated/invalidated_by_rule_id — no field-name prefix needed,
-since it lives on one relationship rather than two case-level
-properties) is this module's own extension of the same idea, for the
-same auditability, not literally named in the original cascade design
-doc but consistent with its intent.
+the reject direction SETs status="rejected" plus THREE audit fields —
+<field>_auto_invalidated=true, <field>_invalidated_by_rule_id=
+<upstream rule_id>, and <field>_invalidated_at=<timestamp> — on the
+downstream fact, instead of the investigator-attributed rejected_by/
+rejected_at/rejection_reason reasoning_layer/rejection.py stamps on a
+manual rejection. The case-level field names (risk_escalation_*,
+fasttrack_recommendation_*) match the ones already named in the BSI
+Phase 2 task list (AI-31); the equivalent pair on a
+MEMBER_OF_FRAUD_NETWORK relationship (auto_invalidated/
+invalidated_by_rule_id/invalidated_by_investigator_id/rejected_at — no
+field-name prefix needed, since it lives on one relationship rather
+than two case-level properties) is this module's own extension of the
+same idea, for the same auditability, not literally named in the
+original cascade design doc but consistent with its intent.
 
 REVERT NEVER JUST FLIPS A STATUS BACK: it re-invokes the downstream
 rule's OWN write query via reasoning_layer.rule_engine.execute_rules,
@@ -100,6 +101,7 @@ _CASE_FLAG_FIELDS: Dict[str, Dict[str, Optional[str]]] = {
         "invalidated_by": "risk_escalation_invalidated_by_rule_id",
         "invalidated_reason": "risk_escalation_invalidated_reason",
         "invalidated_by_investigator": "risk_escalation_invalidated_by_investigator_id",
+        "invalidated_at": "risk_escalation_invalidated_at",
         "reinstated_by": "risk_escalation_reinstated_by_rule_id",
         "reinstated_reason": "risk_escalation_reinstated_reason",
         "reinstated_at": "risk_escalation_reinstated_at",
@@ -112,6 +114,7 @@ _CASE_FLAG_FIELDS: Dict[str, Dict[str, Optional[str]]] = {
         "invalidated_by": "fasttrack_recommendation_invalidated_by_rule_id",
         "invalidated_reason": "fasttrack_recommendation_invalidated_reason",
         "invalidated_by_investigator": "fasttrack_recommendation_invalidated_by_investigator_id",
+        "invalidated_at": "fasttrack_recommendation_invalidated_at",
         "reinstated_by": "fasttrack_recommendation_reinstated_by_rule_id",
         "reinstated_reason": "fasttrack_recommendation_reinstated_reason",
         "reinstated_at": "fasttrack_recommendation_reinstated_at",
@@ -333,7 +336,8 @@ def _auto_invalidate(
             c.{fields['auto_invalidated']} = true,
             c.{fields['invalidated_by']} = $upstream_rule_id,
             c.{fields['invalidated_reason']} = $reason,
-            c.{fields['invalidated_by_investigator']} = $investigator_id
+            c.{fields['invalidated_by_investigator']} = $investigator_id,
+            c.{fields['invalidated_at']} = $timestamp
         RETURN count(c) AS updated
         """
         record = session.run(
@@ -342,6 +346,7 @@ def _auto_invalidate(
             subject_id=subject_id,
             upstream_rule_id=upstream_rule_id,
             reason=reason,
+            timestamp=timestamp,
             investigator_id=investigator_id,
         ).single()
         return bool(record and record["updated"])
@@ -453,7 +458,8 @@ def _direct_reinstate(
             c.{fields['reinstated_reason']} = $reason,
             c.{fields['reinstated_by_investigator']} = $investigator_id,
             c.{fields['reinstated_at']} = $timestamp
-        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']}, c.{fields['invalidated_by_investigator']}
+        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']},
+               c.{fields['invalidated_by_investigator']}, c.{fields['invalidated_at']}
         RETURN count(c) AS updated
         """
         record = session.run(
@@ -518,7 +524,8 @@ def _mark_reinstated(
             c.{fields['reinstated_reason']} = $reason,
             c.{fields['reinstated_by_investigator']} = $investigator_id,
             c.{fields['reinstated_at']} = $timestamp
-        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']}, c.{fields['invalidated_by_investigator']}
+        REMOVE c.{fields['invalidated_by']}, c.{fields['invalidated_reason']},
+               c.{fields['invalidated_by_investigator']}, c.{fields['invalidated_at']}
         """
         session.run(
             query,
@@ -831,6 +838,32 @@ def _walk(
                         changes,
                         depth + 1,
                     )
+                else:
+                    # The upstream condition genuinely broke (condition_holds
+                    # is False — this branch is only reached then), but
+                    # _auto_invalidate found nothing in the graph to
+                    # invalidate: no active downstream_rule_id fact exists
+                    # for this subject at all (it may simply never have
+                    # fired — nothing wrong there), OR one exists but this
+                    # module's own targeting missed it (a network_type
+                    # mismatch, a case-flag subject_field mismatch, etc — a
+                    # real bug worth investigating). Logged at WARNING,
+                    # distinct from the DEBUG "condition still holds, no
+                    # cascade needed" case below, specifically so this
+                    # situation is distinguishable from server logs alone
+                    # instead of both looking identical (empty
+                    # cascade_changes) to the caller.
+                    logger.warning(
+                        "cascade: condition broke (%s no longer active for subject_id=%s) "
+                        "but no active %s fact was found to auto-invalidate for case_id=%s — "
+                        "either %s never fired for this subject (not a problem) or this "
+                        "module's targeting missed an existing fact (worth investigating)",
+                        relationship_type,
+                        subject_id,
+                        downstream_rule_id,
+                        case_id,
+                        downstream_rule_id,
+                    )
 
             elif direction == "revert" and condition_holds:
                 changed = _reinstate(
@@ -877,6 +910,52 @@ def _walk(
                         changes,
                         depth + 1,
                     )
+                else:
+                    # Mirror of the reject-direction warning above: the
+                    # condition genuinely came back (condition_holds is
+                    # True — this branch is only reached then), but
+                    # _reinstate found nothing to bring back — either the
+                    # fact was never auto-invalidated in the first place
+                    # (an investigator manually rejected it instead, which
+                    # _reinstate deliberately never touches — not a
+                    # problem), or something about the coalesce-trap
+                    # fallback / rule re-run failed silently (worth
+                    # investigating).
+                    logger.warning(
+                        "cascade: condition restored (%s active again for subject_id=%s) "
+                        "but no auto-invalidated %s fact was found to reinstate for "
+                        "case_id=%s — either it was never auto-invalidated (e.g. a manual "
+                        "rejection instead, not a problem) or reinstatement failed silently "
+                        "(worth investigating)",
+                        relationship_type,
+                        subject_id,
+                        downstream_rule_id,
+                        case_id,
+                    )
+
+            else:
+                # The common, entirely expected case: this subject's
+                # upstream condition for downstream_rule_id didn't change
+                # state in the direction that would warrant a cascade —
+                # reject: it still holds (e.g. subject_id has ANOTHER
+                # active edge of relationship_type, so downstream_rule_id's
+                # condition is untouched by this one instance being
+                # rejected); revert: it still doesn't hold. DEBUG, not
+                # WARNING — this is the majority-case, silent-by-design
+                # outcome, but now at least traceable if someone needs to
+                # confirm "did cascade even check this subject" rather
+                # than only ever seeing it for changes that did happen.
+                logger.debug(
+                    "cascade: no %s needed for case_id=%s rule_id=%s subject_id=%s — "
+                    "%s condition_holds=%s (checked because %s changed)",
+                    "auto-invalidation" if direction == "reject" else "reinstatement",
+                    case_id,
+                    downstream_rule_id,
+                    subject_id,
+                    relationship_type,
+                    condition_holds,
+                    upstream_rule_id,
+                )
 
 
 def cascade_reject(
