@@ -287,7 +287,7 @@ Generate your response using EXACTLY the following Markdown template.
 [If rules_fired is empty, write exactly: "No inference rules fired for this case."]
  
 ### Risk Assessment
-[One short paragraph, 2-3 sentences. State the risk tier and risk score exactly as given in "risk_assessment". Then describe any signals given in "graph_signals" (for example temporal acceleration, corroboration ratio, or role distribution) in plain language. Do not interpret or infer anything beyond the values given, and do not mention a signal that is not present in the data.]
+[One short paragraph, 2-3 sentences. State the risk tier and risk score exactly as given in "risk_assessment". Then describe any signals given in "neo4j_signals" (for example temporal acceleration, corroboration ratio, or role distribution) in plain language. Do not interpret or infer anything beyond the values given, and do not mention a signal that is not present in the data.]
  
 ### Similar Cases
 [One sentence only. State how many similar cases were identified and the highest similarity score among them, using the values already given in "similar_cases". Do not list individual cases or match reasons here — full detail belongs on the Similar Cases tab. If similar_cases is empty or not provided, write exactly: "No similar cases identified."]
