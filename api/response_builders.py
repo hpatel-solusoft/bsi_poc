@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
+from reasoning_layer.rules_fired_view import build_rules_fired_view
 from utils import html_converter
 
 logger = logging.getLogger(__name__)
@@ -361,7 +362,10 @@ def resolve_plan_agent_summary(
 
 def fired_rules_only(rules_fired: Optional[List[dict]]) -> List[dict]:
     """
-    Drop the rules that did not fire, for the API response only.
+    Drop the rules that did not fire, and reshape what's left into the
+    render-agnostic UI contract (reasoning_layer/rules_fired_view.py,
+    documented in frontend/rules_fired_ui_contract.md) — for the API
+    response only.
 
     The pipeline deliberately builds and stores the FULL fixed block of 14
     entries: reasoning_layer.pipeline._merge_rules_fired folds per-subject
@@ -374,13 +378,19 @@ def fired_rules_only(rules_fired: Optional[List[dict]]) -> List[dict]:
     saying fired: false are noise on a screen whose job is to show what the
     graph actually found, so the trim happens HERE, at the response
     boundary, and nowhere earlier. CASE_STORE, the merge, rule-aware task
-    generation and the rule audit trail all keep the full block.
+    generation and the rule audit trail all keep reading the full,
+    original A.4-shaped block — only this function's return value, which
+    every /intake / /investigation_plan / /report_generation route sends
+    to the frontend, is reshaped.
 
     Entries that are not dicts are dropped rather than passed through: a
     malformed entry cannot be shown to have fired, and forwarding it would
-    push the problem into the UI.
+    push the problem into the UI. build_rules_fired_view applies the same
+    defensiveness to the reshape itself (a rule_id with no render shape —
+    Rule 14 — is dropped, never emitted with a made-up `render` value).
     """
-    return [entry for entry in (rules_fired or []) if isinstance(entry, dict) and entry.get("matched")]
+    matched = [entry for entry in (rules_fired or []) if isinstance(entry, dict) and entry.get("matched")]
+    return build_rules_fired_view(matched)
 
 
 def build_confidence_summary(rules_fired: Optional[List[dict]]) -> Dict[str, int]:

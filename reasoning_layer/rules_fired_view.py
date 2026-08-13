@@ -39,7 +39,7 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 
 from reasoning_layer import rejection
-from reasoning_layer.rule_inference import display_name
+from reasoning_layer.rule_inference import display_name, format_money
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +145,36 @@ def _chip_label(key: str) -> str:
     return _CHIP_LABELS.get(key) or key.replace("_", " ").title()
 
 
-def _chip_display_value(value: Any) -> str:
+# key -> formatter, for the handful of fields whose raw graph value needs
+# reformatting before an investigator reads it — today just `fraud_amount`,
+# which Neo4j can hand back as an int or a float depending on how it was
+# written (47850 vs 47850.0), and either way "47850.0" is not money. Reuses
+# rule_inference.format_money — the SAME "$47,850" formatting already used
+# in every narrative that quotes a fraud amount — so the chip and the
+# sentence next to it never disagree on how the number reads. Falls back to
+# the generic str()/join formatting in `_chip_display_value` for every key
+# not listed here, so a 15th rule's new `detail` field still renders
+# sensibly with zero changes to this dict.
+_CHIP_VALUE_FORMATTERS: Dict[str, Any] = {
+    "fraud_amount": format_money,
+}
+
+
+def _chip_display_value(key: str, value: Any) -> Optional[str]:
     """Every chip value is a display string — the frontend's one
     `ChipList` component renders `value` as-is, never branching on its
     Python type. A list (e.g. hub_case_ids) renders as a comma-joined
-    string; anything else as str()."""
+    string; a key in `_CHIP_VALUE_FORMATTERS` goes through its
+    formatter first (e.g. `fraud_amount` -> "$47,850"); anything else
+    falls back to str().
+
+    Returns None (never a stringified "None") when a formatter can't
+    make sense of the value — the caller drops the chip entirely rather
+    than showing a broken one.
+    """
+    formatter = _CHIP_VALUE_FORMATTERS.get(key)
+    if formatter is not None:
+        return formatter(value)
     if isinstance(value, (list, tuple, set)):
         return ", ".join(str(v) for v in value if v is not None and str(v).strip())
     return str(value)
@@ -182,7 +207,7 @@ def build_chips(detail: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
             continue
         if value is None or value == "" or value == []:
             continue
-        display_value = _chip_display_value(value)
+        display_value = _chip_display_value(key, value)
         if not display_value:
             continue
         if display_value not in chips_by_value:
