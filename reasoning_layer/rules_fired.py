@@ -52,7 +52,7 @@ _CONFIDENCE_ORDER = {"Unresolved": 0, "Medium": 1, "High": 2}
 _REL_RULES: Dict[str, str] = {
     "Rule_01_Shared_Employer": """
         MATCH (a:Subject)-[r:SHARES_EMPLOYER_WITH]-(b:Subject)
-        WHERE a.subject_id IN $scope_subject_ids AND a.subject_id < b.subject_id
+        WHERE (a.subject_id = $subject_id OR b.subject_id = $subject_id) AND a.subject_id < b.subject_id
           AND r.source_rule = "Rule_01_Shared_Employer"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:EMPLOYED_BY]->(e:Employer)<-[:EMPLOYED_BY]-(b)
@@ -70,7 +70,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_03_Shared_Address": """
         MATCH (a:Subject)-[r:SHARES_ADDRESS_WITH]-(b:Subject)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE (a.subject_id = $subject_id OR b.subject_id = $subject_id) AND a.subject_id < b.subject_id
           AND r.source_rule = "Rule_03_Shared_Address"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:HAS_ADDRESS]->(addr:Address)<-[:HAS_ADDRESS]-(b)
@@ -91,7 +91,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_05_Alias_Identity": """
         MATCH (a:Subject)-[r:SHARES_ALIAS_PATTERN_WITH]-(b:Subject)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE (a.subject_id = $subject_id OR b.subject_id = $subject_id) AND a.subject_id < b.subject_id
           AND r.source_rule = "Rule_05_Alias_Identity"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
@@ -108,7 +108,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_10_Merged_Case_Propagation": """
         MATCH (a:Subject)-[r:APPEARS_IN_CASE]->(c:Case)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND r.source_rule = "Rule_10_Merged_Case_Propagation"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
@@ -123,7 +123,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_02_Employer_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND r.source_rule = "Rule_02_Employer_Fraud_Network"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network, even when several scope subjects
@@ -203,6 +203,7 @@ _REL_RULES: Dict[str, str] = {
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
         ORDER BY related_network_key
 """,
+    # WHERE a.subject_id = $subject_id
     "Rule_04_Address_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
         WHERE a.subject_id IN $scope_subject_ids
@@ -282,7 +283,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_06_Identity_Fraud_Network": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND r.source_rule = "Rule_06_Identity_Fraud_Network"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network — see Rule_02's comment above for
@@ -359,7 +360,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_09_PCA_CheckSplit": """
         MATCH (a:Subject)-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND r.source_rule = "Rule_09_PCA_CheckSplit"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         // Collapse to ONE row per network — see Rule_02's comment above for
@@ -436,7 +437,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_07_Prior_Guilty": """
         MATCH (a:Subject)-[r:HAS_PRIOR_GUILTY_CASE]->(c:Case)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND r.source_rule = "Rule_07_Prior_Guilty"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
@@ -452,7 +453,7 @@ _REL_RULES: Dict[str, str] = {
 """,
     "Rule_14_Confirmation_Elevation": """
         MATCH (a:Subject)-[r]-(other)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND r.corroborated_by = "Rule_14_Confirmation_Elevation"
           AND coalesce(r.status, "active") IN ["active", "rejected"]
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
@@ -477,7 +478,7 @@ _REL_RULES: Dict[str, str] = {
 _PROP_RULES: Dict[str, str] = {
     "Rule_11_Cross_Case_Hub": """
         MATCH (a:Subject)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND a.cross_case_source_rule = "Rule_11_Cross_Case_Hub"
           // Rejection sets is_cross_case=false and cross_case_rejected=true
           // (rejection.py's _BULK_REJECT_SUBJECT_FLAG), so matching only on
@@ -525,7 +526,7 @@ _PROP_RULES: Dict[str, str] = {
 """,
     "Rule_12_SLAM_Wage_Corroboration": """
         MATCH (c:Case)-[:HAS_ALLEGATION]->(al:Allegation)-[att:ALLEGATION_LIKELY_AGAINST_SUBJECT]->(a:Subject)
-        WHERE a.subject_id IN $scope_subject_ids
+        WHERE a.subject_id = $subject_id
           AND al.wage_corroboration_rule = "Rule_12_SLAM_Wage_Corroboration"
           AND coalesce(al.wage_corroboration_status, "active") IN ["active", "rejected"]
         OPTIONAL MATCH (a)-[:HAS_WAGE_RECORD_WITH]->(e:Employer)
