@@ -261,19 +261,36 @@ _REJECTION_AUDIT_KEYS = (
     "auto_invalidated",
     "invalidated_by_rule_id",
     "invalidated_reason",
+    "invalidated_by_investigator",
+    "invalidated_at",
     "reinstated_by_rule_id",
     "reinstated_reason",
+    "reinstated_by_investigator",
     "reinstated_at",
 )
 
 
 def build_rejection(instance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The `rejection` object a `status: "rejected"` instance carries —
-    what the "Rejected Details" link opens. None for anything else, so
-    the frontend's `if rejection:` never has to distinguish "not
-    rejected" from "rejected with an empty audit trail"."""
-    if instance.get("status") != "rejected":
-        return None
+    """The `rejection` audit object an instance carries, whenever it has
+    one — who rejected/reverted it, when, and why (plus the equivalent
+    cascade fields: which rule auto-invalidated or reinstated it, and
+    who/when for that).
+
+    Deliberately NOT gated on `instance.get("status") == "rejected"`
+    (an earlier version of this function was, and that gate was itself
+    the bug: a revert or a cascade reinstate flips status back to
+    "active" in the SAME write that also stamps reverted_by/
+    revert_reason/reverted_at or reinstated_by_rule_id/
+    reinstated_reason/reinstated_at onto the fact — gating on
+    status == "rejected" threw that information straight back away the
+    instant it became visible, so an investigator looking at a fact
+    AFTER reverting it, or after a cascade reinstated it, saw no audit
+    trail at all). The correct question is "does this instance have ANY
+    audit fields at all" — which `out or None` below already answers on
+    its own — not "is it currently rejected". Returns None only when
+    every one of _REJECTION_CORE_KEYS/_REJECTION_AUDIT_KEYS is
+    genuinely absent, so the frontend's `if rejection:` still never has
+    to distinguish "never touched" from "touched but empty"."""
     raw = instance.get("rejection") or {}
     out = {k: raw[k] for k in _REJECTION_CORE_KEYS if raw.get(k) not in (None, "")}
     for k in _REJECTION_AUDIT_KEYS:
@@ -323,7 +340,18 @@ def build_member_view(member: Dict[str, Any]) -> Dict[str, Any]:
 def build_grouped_instance_view(instance: Dict[str, Any]) -> Dict[str, Any]:
     """One `grouped` instance — a network header plus its member rows.
     `instances` for a network-family rule holds one of these PER
-    NETWORK, never one per member (rules_fired_ui_contract.md)."""
+    NETWORK, never one per member (rules_fired_ui_contract.md).
+
+    `rejection` here is the same audit object build_flat_instance_view
+    already attaches for every other family — this function used to
+    omit it entirely, which is why a network cascade-invalidated by
+    Rule 1 (or later reinstated by a revert) showed no rule/reason/who/
+    when at all: the data was present on `instance["rejection"]`
+    (reasoning_layer/rules_fired.py's Cypher already assembles it), it
+    was just never copied into this view's output dict. See
+    build_rejection's own docstring for why this is unconditional, not
+    gated on current status.
+    """
     detail = instance.get("detail") or {}
     members = [build_member_view(m) for m in (detail.get("members") or [])]
     network_type = detail.get("network_type")
@@ -339,6 +367,7 @@ def build_grouped_instance_view(instance: Dict[str, Any]) -> Dict[str, Any]:
         "title": title,
         "member_count": len(members),
         "members": members,
+        "rejection": build_rejection(instance),
     }
 
 

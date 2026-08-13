@@ -150,16 +150,35 @@ _REL_RULES: Dict[str, str] = {
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
              head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
+             // BUG FIX: this used to filter to
+             // `WHERE coalesce(rel.status, "active") = "rejected"` --
+             // meaning `rejection` came back null the instant status
+             // flipped back to "active" (a revert, or a cascade
+             // reinstate), silently discarding the very reverted_by/
+             // revert_reason/reverted_at (or reinstated_by_rule_id/
+             // reinstated_reason/reinstated_at) fields that same status
+             // flip had just written. Filtering on "does this edge have
+             // ANY audit trail at all" instead of "is it CURRENTLY
+             // rejected" is what makes revert/reinstate history survive
+             // being looked at again after the fact, exactly the way
+             // Rule_01/03/05's own unconditional per-row `rejection`
+             // map already does (those never filtered by status to
+             // begin with -- only this aggregated, one-row-per-network
+             // shape did).
              head([rel IN scope_rels
-                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
+                      OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
+                    invalidated_by_investigator: rel.invalidated_by_investigator_id,
+                    invalidated_at: rel.rejected_at,
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
+                    reinstated_by_investigator: rel.reinstated_by_investigator_id,
                     reinstated_at: rel.reinstated_at}]) AS rejection
         // Rejected members are kept in the member list, carrying their own
         // status. Dropping them emptied the list for a rejected network and
@@ -208,16 +227,35 @@ _REL_RULES: Dict[str, str] = {
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
              head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
+             // BUG FIX: this used to filter to
+             // `WHERE coalesce(rel.status, "active") = "rejected"` --
+             // meaning `rejection` came back null the instant status
+             // flipped back to "active" (a revert, or a cascade
+             // reinstate), silently discarding the very reverted_by/
+             // revert_reason/reverted_at (or reinstated_by_rule_id/
+             // reinstated_reason/reinstated_at) fields that same status
+             // flip had just written. Filtering on "does this edge have
+             // ANY audit trail at all" instead of "is it CURRENTLY
+             // rejected" is what makes revert/reinstate history survive
+             // being looked at again after the fact, exactly the way
+             // Rule_01/03/05's own unconditional per-row `rejection`
+             // map already does (those never filtered by status to
+             // begin with -- only this aggregated, one-row-per-network
+             // shape did).
              head([rel IN scope_rels
-                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
+                      OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
+                    invalidated_by_investigator: rel.invalidated_by_investigator_id,
+                    invalidated_at: rel.rejected_at,
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
+                    reinstated_by_investigator: rel.reinstated_by_investigator_id,
                     reinstated_at: rel.reinstated_at}]) AS rejection
         // Rejected members are kept in the member list, carrying their own
         // status. Dropping them emptied the list for a rejected network and
@@ -266,16 +304,35 @@ _REL_RULES: Dict[str, str] = {
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
              head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
+             // BUG FIX: this used to filter to
+             // `WHERE coalesce(rel.status, "active") = "rejected"` --
+             // meaning `rejection` came back null the instant status
+             // flipped back to "active" (a revert, or a cascade
+             // reinstate), silently discarding the very reverted_by/
+             // revert_reason/reverted_at (or reinstated_by_rule_id/
+             // reinstated_reason/reinstated_at) fields that same status
+             // flip had just written. Filtering on "does this edge have
+             // ANY audit trail at all" instead of "is it CURRENTLY
+             // rejected" is what makes revert/reinstate history survive
+             // being looked at again after the fact, exactly the way
+             // Rule_01/03/05's own unconditional per-row `rejection`
+             // map already does (those never filtered by status to
+             // begin with -- only this aggregated, one-row-per-network
+             // shape did).
              head([rel IN scope_rels
-                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
+                      OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
+                    invalidated_by_investigator: rel.invalidated_by_investigator_id,
+                    invalidated_at: rel.rejected_at,
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
+                    reinstated_by_investigator: rel.reinstated_by_investigator_id,
                     reinstated_at: rel.reinstated_at}]) AS rejection
         // Rejected members are kept in the member list, carrying their own
         // status. Dropping them emptied the list for a rejected network and
@@ -324,16 +381,35 @@ _REL_RULES: Dict[str, str] = {
                            WHERE coalesce(rel.status, "active") = "active")
                   THEN "active" ELSE "rejected" END AS status,
              head([rel IN scope_rels | rel.asserted_at]) AS asserted_at_raw,
+             // BUG FIX: this used to filter to
+             // `WHERE coalesce(rel.status, "active") = "rejected"` --
+             // meaning `rejection` came back null the instant status
+             // flipped back to "active" (a revert, or a cascade
+             // reinstate), silently discarding the very reverted_by/
+             // revert_reason/reverted_at (or reinstated_by_rule_id/
+             // reinstated_reason/reinstated_at) fields that same status
+             // flip had just written. Filtering on "does this edge have
+             // ANY audit trail at all" instead of "is it CURRENTLY
+             // rejected" is what makes revert/reinstate history survive
+             // being looked at again after the fact, exactly the way
+             // Rule_01/03/05's own unconditional per-row `rejection`
+             // map already does (those never filtered by status to
+             // begin with -- only this aggregated, one-row-per-network
+             // shape did).
              head([rel IN scope_rels
-                   WHERE coalesce(rel.status, "active") = "rejected" |
+                   WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
+                      OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
                    {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
+                    invalidated_by_investigator: rel.invalidated_by_investigator_id,
+                    invalidated_at: rel.rejected_at,
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
+                    reinstated_by_investigator: rel.reinstated_by_investigator_id,
                     reinstated_at: rel.reinstated_at}]) AS rejection
         // Rejected members are kept in the member list, carrying their own
         // status. Dropping them emptied the list for a rejected network and
@@ -438,8 +514,11 @@ _PROP_RULES: Dict[str, str] = {
                 auto_invalidated: c.risk_escalation_auto_invalidated,
                 invalidated_by_rule_id: c.risk_escalation_invalidated_by_rule_id,
                 invalidated_reason: c.risk_escalation_invalidated_reason,
+                invalidated_by_investigator: c.risk_escalation_invalidated_by_investigator_id,
+                invalidated_at: c.risk_escalation_invalidated_at,
                 reinstated_by_rule_id: c.risk_escalation_reinstated_by_rule_id,
                 reinstated_reason: c.risk_escalation_reinstated_reason,
+                reinstated_by_investigator: c.risk_escalation_reinstated_by_investigator_id,
                 reinstated_at: c.risk_escalation_reinstated_at} AS rejection,
                {complaint_no: c.complaint_number, fraud_amount: c.fraud_amount} AS detail
         ORDER BY related_case_id
@@ -486,8 +565,11 @@ _PROP_RULES: Dict[str, str] = {
                 auto_invalidated: c.fasttrack_recommendation_auto_invalidated,
                 invalidated_by_rule_id: c.fasttrack_recommendation_invalidated_by_rule_id,
                 invalidated_reason: c.fasttrack_recommendation_invalidated_reason,
+                invalidated_by_investigator: c.fasttrack_recommendation_invalidated_by_investigator_id,
+                invalidated_at: c.fasttrack_recommendation_invalidated_at,
                 reinstated_by_rule_id: c.fasttrack_recommendation_reinstated_by_rule_id,
                 reinstated_reason: c.fasttrack_recommendation_reinstated_reason,
+                reinstated_by_investigator: c.fasttrack_recommendation_reinstated_by_investigator_id,
                 reinstated_at: c.fasttrack_recommendation_reinstated_at} AS rejection,
                {complaint_no: c.complaint_number, fraud_amount: c.fraud_amount} AS detail
         ORDER BY related_case_id
@@ -776,20 +858,42 @@ def _dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     query is deduped here regardless of family, rather than trusting
     each Cypher file to never produce one.
 
-    Keeps the FIRST row for a given key. Every query in _REL_RULES and
-    _PROP_RULES orders its results (ORDER BY subject_id, related_subject_id
-    or equivalent), so "first" is deterministic across repeated calls,
-    not an arbitrary pick.
+    Prefers a row that CARRIES rejection/revert/cascade audit data over
+    one that doesn't, rather than blindly keeping whichever row a given
+    query's ORDER BY happened to place first. This matters specifically
+    for a pre-existing duplicate: if a case already has two parallel
+    relationships for the same pair from before the deterministic-MERGE
+    fix above landed, an investigator's reject/revert only ever touches
+    ONE of them (whichever the locate query's WHERE clause matches), so
+    the OTHER keeps sailing through with no audit trail at all — a
+    plain "keep the first" dedupe could then discard the very row
+    documenting what an investigator just did, in favor of the "clean"
+    duplicate that never saw the action, making a real reject or revert
+    look like it silently vanished. Every query's own ORDER BY still
+    decides ties between two rows that are equally (un)informative — a
+    row with audit data always wins regardless of where it falls in
+    that order.
     """
-    seen = set()
-    deduped: List[Dict[str, Any]] = []
+    seen: Dict[tuple, Dict[str, Any]] = {}
+    order: List[tuple] = []
     for row in rows:
         key = instance_identity_key(row)
-        if key in seen:
+        if key not in seen:
+            seen[key] = row
+            order.append(key)
             continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped
+        if not _row_has_audit_trail(seen[key]) and _row_has_audit_trail(row):
+            seen[key] = row
+    return [seen[key] for key in order]
+
+
+def _row_has_audit_trail(row: Dict[str, Any]) -> bool:
+    """Whether this row's own `rejection` map (as returned straight off
+    the Cypher — see _dedupe_rows's docstring for why this, not just
+    `row.get("status") == "rejected"`, is the right test) carries any
+    reject/revert/cascade field at all, current status notwithstanding."""
+    rejection = row.get("rejection") or {}
+    return any(v is not None and v != "" for v in rejection.values())
 
 
 def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
