@@ -483,15 +483,34 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
 
         assistant_text = extract_agent_summary(messages)
 
+        # Splice the deterministically-rendered Decision & Override Log
+        # section into the LLM's markdown, overwriting whatever the LLM
+        # produced for it (AI-42). Until this fix, this splice only ran
+        # on the report-cache-hit path above — a freshly-generated
+        # report relied on the LLM to render this section itself, which
+        # is exactly the per-entry formatting REPORT_GENERATION_PROMPT's
+        # "No AI involved in content, just formatting" rule (Report
+        # Design ACTIONS #3) rules out. decision_log_result is already
+        # the same build_decision_log output used for the cache-hit
+        # case above, so this makes every report — fresh or cached —
+        # get identical, deterministic text for this section.
+        assistant_text = replace_markdown_section(
+            assistant_text,
+            "Decision & Override Log",
+            decision_log_result["decision_log_markdown"],
+        )
+
         # Splice the deterministically-rendered Reviewed and Excluded
-        # Connections section into the LLM's markdown, overwriting
-        # whatever the LLM produced for it. The LLM has been observed
-        # writing "not recorded" for notation fields it was actually
-        # given real values for (see
+        # Connections section into the LLM's markdown. The LLM is never
+        # asked to draft this section in the first place (see
+        # REPORT_GENERATION_PROMPT's placeholder under that header) —
+        # a prior fix (AI-40) moved its per-entry formatting out of the
+        # prompt entirely after the LLM was observed writing "not
+        # recorded" for notation fields it was actually given real
+        # values for (see
         # reasoning_layer.decision_log.render_reviewed_and_excluded_markdown's
-        # docstring) — same fix already applied to Decision & Override
-        # Log via decision_log_markdown, applied here to the section
-        # that was actually failing in production.
+        # docstring). This splice is what actually populates the
+        # section's body.
         assistant_text = replace_markdown_section(
             assistant_text,
             "Reviewed and Excluded Connections",
@@ -824,6 +843,17 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
         )
 
         assistant_text = extract_agent_summary(messages)
+
+        # Splice the deterministically-rendered Decision & Override Log
+        # section into the LLM's markdown — identical fix to
+        # /generate_report above (AI-42), applied here too since this
+        # route runs its own independent LLM call rather than reusing
+        # that one.
+        assistant_text = replace_markdown_section(
+            assistant_text,
+            "Decision & Override Log",
+            decision_log_result["decision_log_markdown"],
+        )
 
         # Splice the deterministically-rendered Reviewed and Excluded
         # Connections section into the LLM's markdown — identical fix to

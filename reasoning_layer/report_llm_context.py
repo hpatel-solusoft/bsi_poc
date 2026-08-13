@@ -16,6 +16,12 @@ the pipeline as a prompt payload:
   * agent_summary_cache          - operational/session cache, not report content
   * provenance_trail             - audit trail, not narrative content
   * network_match_flag           - internal graph-match boolean, not a report fact
+  * decision_log                 - the Decision & Override Log section is rendered
+                                    entirely deterministically (AI-42,
+                                    reasoning_layer.decision_log.build_decision_log)
+                                    and spliced into the LLM's markdown after the
+                                    fact; the LLM is never asked to write any part
+                                    of that section, so it has no use for this list.
   * complaint_intelligence.subjects - every co-subject's full profile, when the
                                     report is scoped to the Primary Subject only
   * risk_assessment              - the full evaluated risk-rule catalogue
@@ -28,11 +34,24 @@ the pipeline as a prompt payload:
                                     escalation_criteria, data_sources,
                                     plan_narrative, ...), when only the steps
                                     are narrated
-  * rules_fired[*].instances[*].rejection.{rejected_by, revert_reason,
-    reverted_at, reverted_by}    - who rejected/reverted a finding and when;
-                                    the LLM only needs THAT and WHY a finding
-                                    was rejected, not the investigator-attribution
-                                    detail. `reason` and `rejected_at` are kept.
+  * related_network[*].rejection - investigator_id / rejected_at / reason (and
+                                    rule_id, already duplicated by the entry's own
+                                    source_rule) for every rejected connection. The
+                                    Reviewed and Excluded Connections section is
+                                    rendered entirely deterministically (AI-40,
+                                    reasoning_layer.decision_log.
+                                    render_reviewed_and_excluded_markdown) from the
+                                    route's own related_network, not from anything
+                                    the LLM writes, so this per-rejection audit
+                                    detail has no reader in the prompt.
+  * rules_fired[*].instances     - per-match detail (subject names, ids, display
+                                    chips) for EVERY rule, not only the
+                                    prior-guilty ones. The report writes one
+                                    summary sentence per rule ("Rule X — Confidence:
+                                    Y. ...") and never reads a match's per-instance
+                                    detail, so only the rule-level summary fields
+                                    (rule_id, heading, description, confidence,
+                                    active_count) are kept.
   * prior guilty case lists      - Rule_07_Prior_Guilty's per-instance case
                                     breakdown, the equivalent
                                     HAS_PRIOR_GUILTY_CASE entries in
@@ -56,9 +75,9 @@ the pipeline as a prompt payload:
                                     countable information.
 
 This module is the SINGLE place that derives the trimmed prompt context. It
-is called from api/server.py's /generate_report route, immediately before
-build_report_generation_prompt() is invoked, on a deep copy of
-case_data_for_prompt. It touches NOTHING else:
+is called from api/services/report_service.py's run_generate_report and
+run_generate_report_pdf, immediately before build_report_generation_prompt()
+is invoked, on a deep copy of case_data_for_prompt. It touches NOTHING else:
 
   * The full case_data_for_prompt dict is still what gets persisted to
     report_artifacts and returned to the caller in the route's response --
@@ -89,13 +108,28 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 
 # Top-level case_data keys that never belong in the report LLM prompt.
-_TOP_LEVEL_KEYS_TO_DROP = ("agent_summary_cache", "provenance_trail", "network_match_flag")
+# decision_log is here (AI-43) alongside the original three: the Decision &
+# Override Log section is now always rendered deterministically and spliced
+# into the LLM's markdown after the fact (AI-42), so the LLM never reads
+# this list at all.
+_TOP_LEVEL_KEYS_TO_DROP = ("agent_summary_cache", "provenance_trail", "network_match_flag", "decision_log")
 
-# Rejection/revert-audit attribution fields stripped from every rule
-# instance's "rejection" block. "reason" and "rejected_at" are kept —
-# they are narrative-relevant ("this was rejected, and why"); WHO
-# rejected/reverted it and when the revert happened are not.
-_REJECTION_FIELDS_TO_STRIP = ("rejected_by", "revert_reason", "reverted_at", "reverted_by")
+# rules_fired entry fields kept for the report LLM — the rule-level summary
+# the "Rules Fired" section narrates one sentence from. Everything else on
+# the entry (render, family, corroborated, revertable, total_count, and
+# above all "instances" — the per-match names/ids/display chips) is dropped
+# by omission (AI-43): the report never writes per-match detail, so the LLM
+# never needs to see it. active_count is the rule's live-match count (see
+# reasoning_layer.rules_fired_view.build_rule_view) — computed from active
+# instances only, matching evidence_count's original "never hand a rejected
+# finding to a report/plan/copilot consumer as live evidence" contract.
+_RULES_FIRED_SUMMARY_FIELDS: Tuple[str, ...] = (
+    "rule_id",
+    "heading",
+    "description",
+    "confidence",
+    "active_count",
+)
 
 # rule_id prefixes whose "instances" list is a pure prior-guilty-case
 # enumeration (one instance per prior case). evidence_count / rejected_count
@@ -141,15 +175,13 @@ _SIMILAR_CASE_MATCH_FIELDS: Tuple[str, ...] = (
 _INVESTIGATION_PLAN_KEPT_FIELDS: Tuple[str, ...] = ("investigation_steps",)
 
 
-def _strip_rejection_audit_fields(rejection: Any) -> Any:
-    if not isinstance(rejection, dict):
-        return rejection
-    return {k: v for k, v in rejection.items() if k not in _REJECTION_FIELDS_TO_STRIP}
-
-
 def _trim_rules_fired(rules_fired: Any) -> Any:
-    """Strip rejection-audit attribution from every instance, and drop the
-    per-case `instances` list entirely for prior-guilty rules (count-only)."""
+    """Collapse every rule entry down to its rule-level summary fields
+    (see _RULES_FIRED_SUMMARY_FIELDS) — the per-match `instances` list
+    (subject names, ids, display chips) is dropped in full for all 14
+    rules, not only the prior-guilty ones (AI-43): the report writes one
+    summary sentence per rule and never reads a match's per-instance
+    detail."""
     if not isinstance(rules_fired, list):
         return rules_fired
 
@@ -158,24 +190,7 @@ def _trim_rules_fired(rules_fired: Any) -> Any:
         if not isinstance(entry, dict):
             trimmed.append(entry)
             continue
-
-        entry = dict(entry)  # shallow copy — only "instances" is rewritten
-        rule_id = str(entry.get("rule_id") or "")
-        instances = entry.get("instances")
-
-        if isinstance(instances, list):
-            if rule_id.startswith(_PRIOR_GUILTY_RULE_PREFIXES):
-                entry.pop("instances", None)
-            else:
-                new_instances = []
-                for inst in instances:
-                    if isinstance(inst, dict) and "rejection" in inst:
-                        inst = dict(inst)
-                        inst["rejection"] = _strip_rejection_audit_fields(inst["rejection"])
-                    new_instances.append(inst)
-                entry["instances"] = new_instances
-
-        trimmed.append(entry)
+        trimmed.append({k: v for k, v in entry.items() if k in _RULES_FIRED_SUMMARY_FIELDS})
     return trimmed
 
 
@@ -236,6 +251,25 @@ def _trim_prior_guilty_related_network(related_network: Any) -> Tuple[Any, int]:
             continue
         kept.append(entry)
     return kept, prior_guilty_count
+
+
+def _trim_related_network_rejection_detail(related_network: Any) -> Any:
+    """Drop every entry's `rejection` block (investigator_id, rejected_at,
+    reason, rule_id — reasoning_layer.report_generation.assemble_related_network)
+    entirely (AI-43). The Reviewed and Excluded Connections section is
+    rendered deterministically from the route's own related_network, never
+    narrated by the LLM (AI-40), so this per-rejection audit detail has no
+    reader in the prompt; entries themselves (and their `status`) are kept
+    unchanged."""
+    if not isinstance(related_network, list):
+        return related_network
+    trimmed: List[Any] = []
+    for entry in related_network:
+        if isinstance(entry, dict) and "rejection" in entry:
+            entry = dict(entry)
+            entry.pop("rejection", None)
+        trimmed.append(entry)
+    return trimmed
 
 
 def _trim_graph_context_prior_guilty(graph_context: Any) -> Any:
@@ -304,12 +338,14 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     response, or anything else.
 
     Trims applied (see module docstring for the full reasoning):
-      1. Drops agent_summary_cache, provenance_trail, network_match_flag.
+      1. Drops agent_summary_cache, provenance_trail, network_match_flag,
+         decision_log.
       2. complaint_intelligence.subjects -> Primary Subject only.
-      3. rules_fired[*].instances[*].rejection -> drops
-         rejected_by / revert_reason / reverted_at / reverted_by.
-      4. rules_fired entries for prior-guilty rules -> drop "instances"
-         (evidence_count / rejected_count already carry the count).
+      3. related_network[*] -> drops the "rejection" block
+         (investigator_id / rejected_at / reason / rule_id) entirely.
+      4. rules_fired entries, for ALL 14 rules -> collapsed to rule-level
+         summary fields only (rule_id, heading, description, confidence,
+         active_count); the per-match "instances" list is dropped in full.
       5. risk_assessment -> scores + related fields only, not the full
          evaluated risk-rule list.
       6. similar_cases -> count + similarity_score + matched allegation
@@ -352,8 +388,11 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     if "complaint_intelligence" in context:
         context["complaint_intelligence"] = _trim_subjects_to_primary(context["complaint_intelligence"])
 
-    # 3 & 4. rules_fired: strip rejection-audit attribution; drop
-    # prior-guilty per-case instance lists.
+    # 3. related_network[*].rejection -> dropped entirely.
+    if "related_network" in context:
+        context["related_network"] = _trim_related_network_rejection_detail(context["related_network"])
+
+    # 4. rules_fired -> rule-level summary fields only, for all 14 rules.
     if "rules_fired" in context:
         context["rules_fired"] = _trim_rules_fired(context["rules_fired"])
 
