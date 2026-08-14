@@ -38,6 +38,7 @@ generation (agent_service/prompt_builders.py).
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from reasoning_layer.neo4j_client import get_session
@@ -61,10 +62,39 @@ _LISTED_ACTIVE_CONFIDENCE = {"High", "Medium"}
 # 8.7 asks for, deliberately narrower than rules_fired's whole-scope
 # aggregate.
 #
-# from_key/to_key are carried through unevaluated so Python can correlate
-# a rejected instance to its :Rejection record without this module having
-# to re-derive each rule's key encoding — that encoding belongs to the
-# rule file that wrote it (rules/*.cypher), not here.
+# Every branch's final RETURN column, `rejection_raw`, exists ONLY so
+# Python (_resolve_review_notation) can build the "Reviewed and Excluded
+# Connections" notation (investigator, when, why) straight off THIS
+# relationship's own audit properties — the same properties
+# reasoning_layer/rejection.py (manual reject/revert) and
+# reasoning_layer/cascade.py (auto-invalidate/auto-reinstate) already
+# write there, and the SAME source rules_fired.py's own _REL_RULES
+# queries already read for the identical purpose (see e.g. Rule_01's
+# `{rejected_by: r.rejected_by, ...} AS rejection`). A Neo4j UNION
+# requires identical COLUMN NAMES across branches, not identical map
+# SHAPES — MEMBER_OF_FRAUD_NETWORK is the one branch whose
+# `rejection_raw` map carries extra invalidate/reinstate keys (see that
+# branch's own comment), which is fine.
+#
+# Previously this notation came from a SEPARATE lookup against
+# dedicated :Rejection nodes (a `_REJECTIONS_QUERY` joined in Python via
+# a from_key/to_key/relationship_type match — both now removed, along
+# with the from_key/to_key columns that existed only to feed that
+# match). That mechanism silently under-reported: cascade.py's
+# auto-invalidation NEVER creates a :Rejection node (see that module's
+# own "AUTO-INVALIDATION IS ALWAYS DISTINGUISHABLE FROM A MANUAL
+# REJECTION" docstring section) — it writes invalidated_by_rule_id /
+# invalidated_reason / invalidated_by_investigator_id / invalidated_at
+# directly onto the relationship (or, for Rule 8/13, the :Case) instead.
+# A connection excluded by cascade therefore had no :Rejection node to
+# find, and the old lookup's failure-to-match fell through to the "not
+# recorded" placeholder for investigator/date — even though cascade.py
+# deliberately carries the real upstream investigator_id and the real
+# original reason text through every hop (see cascade.py's _walk, "Same
+# original reason carries through every hop"). Reading the
+# relationship's own properties directly, exactly like rules_fired.py
+# already does, fixes this without a second data source that can go
+# stale relative to the first.
 _RELATED_NETWORK_QUERY = """
 MATCH (s:Subject {subject_id: $subject_id})-[r:SHARES_EMPLOYER_WITH]-(o:Subject)
 WHERE r.status IN ["active", "rejected"]
@@ -74,7 +104,8 @@ RETURN "SHARES_EMPLOYER_WITH" AS relationship_type,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
-       s.subject_id AS from_key, o.subject_id AS to_key
+       {rejected_by: r.rejected_by, rejected_at: r.rejected_at, reason: r.rejection_reason,
+        reverted_by: r.reverted_by, reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection_raw
 
 UNION ALL
 MATCH (s:Subject {subject_id: $subject_id})-[r:SHARES_ADDRESS_WITH]-(o:Subject)
@@ -85,7 +116,8 @@ RETURN "SHARES_ADDRESS_WITH" AS relationship_type,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
-       s.subject_id AS from_key, o.subject_id AS to_key
+       {rejected_by: r.rejected_by, rejected_at: r.rejected_at, reason: r.rejection_reason,
+        reverted_by: r.reverted_by, reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection_raw
 
 UNION ALL
 MATCH (s:Subject {subject_id: $subject_id})-[r:SHARES_ALIAS_PATTERN_WITH]-(o:Subject)
@@ -96,7 +128,8 @@ RETURN "SHARES_ALIAS_PATTERN_WITH" AS relationship_type,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
-       s.subject_id AS from_key, o.subject_id AS to_key
+       {rejected_by: r.rejected_by, rejected_at: r.rejected_at, reason: r.rejection_reason,
+        reverted_by: r.reverted_by, reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection_raw
 
 UNION ALL
 MATCH (s:Subject {subject_id: $subject_id})-[r:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
@@ -107,7 +140,23 @@ RETURN "MEMBER_OF_FRAUD_NETWORK" AS relationship_type,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
-       s.subject_id AS from_key, (n.network_type + ":" + n.network_key) AS to_key
+       // The one relationship type a cascade auto-invalidation (never a
+       // manual reject) can land on — see reasoning_layer/cascade.py's
+       // _AUTO_INVALIDATE_MEMBERSHIP, which SETs exactly these fields
+       // directly on this same MEMBER_OF_FRAUD_NETWORK edge. All other
+       // branches in this UNION can only ever carry the manual
+       // rejected_by/reverted_by pair (per
+       // rule_registry.DOWNSTREAM_DEPENDENTS / cascade.py's
+       // _NETWORK_TYPE_BY_RULE_ID — only Rule 2/4/6 network membership
+       // and the Rule 8/13 case flags are ever cascade targets), so
+       // only this branch's map needs the extra keys.
+       {rejected_by: r.rejected_by, rejected_at: r.rejected_at, reason: r.rejection_reason,
+        reverted_by: r.reverted_by, reverted_at: r.reverted_at, revert_reason: r.revert_reason,
+        auto_invalidated: r.auto_invalidated, invalidated_by_rule_id: r.invalidated_by_rule_id,
+        invalidated_reason: r.invalidated_reason, invalidated_by_investigator: r.invalidated_by_investigator_id,
+        invalidated_at: r.invalidated_at, reinstated_by_rule_id: r.reinstated_by_rule_id,
+        reinstated_reason: r.reinstated_reason, reinstated_by_investigator: r.reinstated_by_investigator_id,
+        reinstated_at: r.reinstated_at} AS rejection_raw
 
 UNION ALL
 MATCH (s:Subject {subject_id: $subject_id})-[r:HAS_PRIOR_GUILTY_CASE]->(c:Case)
@@ -118,7 +167,8 @@ RETURN "HAS_PRIOR_GUILTY_CASE" AS relationship_type,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
-       s.subject_id AS from_key, c.case_id AS to_key
+       {rejected_by: r.rejected_by, rejected_at: r.rejected_at, reason: r.rejection_reason,
+        reverted_by: r.reverted_by, reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection_raw
 
 UNION ALL
 MATCH (s:Subject {subject_id: $subject_id})-[r:APPEARS_IN_CASE]->(c:Case)
@@ -130,24 +180,8 @@ RETURN "APPEARS_IN_CASE" AS relationship_type,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
-       s.subject_id AS from_key, c.case_id AS to_key
-"""
-
-# Every :Rejection currently in force (status "active" on the Rejection
-# node itself — see reasoning_layer/schema.cypher) that names this
-# subject on either side. relationship_type + from_key/to_key is the
-# only correlation key available (Data Persistence C.1) — there is no
-# foreign key from a Rejection to the specific relationship instance it
-# suppressed, by design (a Rejection is written before re-assertion is
-# attempted again, per Section 9.4).
-_REJECTIONS_QUERY = """
-MATCH (rej:Rejection)
-WHERE rej.status = "active"
-  AND (rej.from_key = $subject_id OR rej.to_key = $subject_id)
-RETURN rej.relationship_type AS relationship_type,
-       rej.from_key AS from_key, rej.to_key AS to_key,
-       rej.rejected_by AS investigator_id, rej.rejected_at AS rejected_at,
-       rej.reason AS reason, rej.rule_id AS rule_id
+       {rejected_by: r.rejected_by, rejected_at: r.rejected_at, reason: r.rejection_reason,
+        reverted_by: r.reverted_by, reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection_raw
 """
 
 
@@ -162,21 +196,97 @@ def _envelope(result: Dict[str, Any]) -> dict:
     }
 
 
-def _find_rejection(entry: Dict[str, Any], rejections: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Best-effort correlation of one rejected relationship instance to
-    its :Rejection notation, by relationship_type plus order-insensitive
-    from_key/to_key membership. Rule guard queries (rules/*.cypher) key a
-    Rejection by an unordered pair for every symmetric subject-subject
-    type and by an exact directed pair for subject->case / subject->
-    network types — checking membership both ways covers both shapes
-    without this module re-deriving each rule's own encoding."""
-    pair = {entry["from_key"], entry["to_key"]}
-    for rej in rejections:
-        if rej["relationship_type"] != entry["relationship_type"]:
-            continue
-        if {rej["from_key"], rej["to_key"]} == pair:
-            return rej
-    return None
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Best-effort ISO-8601 parse, mirroring
+    reasoning_layer/rules_fired_view.py's own `_parse_ts` (kept as a
+    small local copy rather than a cross-module import of a
+    module-private helper). Returns None — never raises — for anything
+    missing or malformed, so a bad/absent timestamp just loses that side
+    of the "which is more recent" comparison below instead of blowing up
+    the whole report."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_review_notation(raw: Optional[Dict[str, Any]], source_rule: Optional[str]) -> Dict[str, Any]:
+    """
+    Build the {investigator_id, rejected_at, reason, rule_id} notation
+    "Reviewed and Excluded Connections" shows for ONE already-rejected
+    related_network row, straight from that relationship's own audit
+    properties (`raw` — the `rejection_raw` map _RELATED_NETWORK_QUERY
+    now returns per row) — never from a separate :Rejection node lookup
+    (see this module's own top-of-file comment, above
+    _RELATED_NETWORK_QUERY, for why that mechanism under-reported).
+
+    A currently-"rejected" row got that way through exactly one of two
+    write paths, never both at once for the SAME rejection event:
+
+      * a MANUAL reject (reasoning_layer/rejection.py) — rejected_by /
+        rejected_at / reason (rejection_reason on the edge).
+      * a CASCADE auto-invalidation (reasoning_layer/cascade.py — only
+        ever possible on a MEMBER_OF_FRAUD_NETWORK edge, per
+        cascade.py's _NETWORK_TYPE_BY_RULE_ID / _CASE_FLAG_FIELDS) —
+        invalidated_by_rule_id / invalidated_reason /
+        invalidated_by_investigator (the investigator who triggered the
+        UPSTREAM reject that caused this hop — cascade.py's own
+        docstring: "the same original reason carries through every
+        hop") / invalidated_at.
+
+    `raw` may ALSO carry a stale reverted_by/reverted_at (or
+    reinstated_by_rule_id/reinstated_at) pair from a PAST revert/
+    reinstate that was itself later superseded by the CURRENT
+    rejection — a revert/reinstate is exactly what flips status back to
+    "active", so its presence here never explains why THIS row is
+    rejected right now. Only the reject and invalidate candidates are
+    ever compared; whichever has an actor wins, and if both do, whichever
+    has the later parsed timestamp wins (an unparseable/missing
+    timestamp loses the tiebreak but never disqualifies its candidate
+    outright when it is the only one with an actor at all).
+
+    Degrades to the all-None "not recorded" placeholder — matching the
+    prior contract exactly — only when NEITHER candidate has an actor,
+    e.g. legacy graph data written before rejection.py/cascade.py
+    started stamping these fields. A rejected fact is still listed with
+    a blank notation in that case rather than dropped (Principle 14):
+    the gap itself is worth surfacing, not hiding.
+    """
+    raw = raw or {}
+
+    human = None
+    if raw.get("rejected_by"):
+        human = {
+            "investigator_id": raw.get("rejected_by"),
+            "rejected_at": raw.get("rejected_at"),
+            "reason": raw.get("reason"),
+            "rule_id": source_rule,
+        }
+
+    cascade = None
+    if raw.get("invalidated_by_rule_id"):
+        cascade = {
+            "investigator_id": raw.get("invalidated_by_investigator"),
+            "rejected_at": raw.get("invalidated_at") or raw.get("rejected_at"),
+            "reason": raw.get("invalidated_reason"),
+            "rule_id": raw.get("invalidated_by_rule_id"),
+        }
+
+    if human and cascade:
+        human_ts = _parse_ts(human["rejected_at"])
+        cascade_ts = _parse_ts(cascade["rejected_at"])
+        if cascade_ts and (not human_ts or cascade_ts > human_ts):
+            candidate = cascade
+        else:
+            candidate = human
+    else:
+        candidate = human or cascade
+
+    if candidate is None:
+        return {"investigator_id": None, "rejected_at": None, "reason": None, "rule_id": source_rule}
+    return candidate
 
 
 def assemble_related_network(case_id: str, subject_id: str) -> dict:
@@ -184,9 +294,12 @@ def assemble_related_network(case_id: str, subject_id: str) -> dict:
     Assemble the Related Network section for one Primary Subject
     (Section 8.7 / D1): every currently-active High/Medium-confidence
     inferred relationship touching them, plus every rejected one, each
-    rejected entry carrying investigator/date/reason notation when a
-    matching :Rejection record exists. A rejected fact is never silently
-    omitted, regardless of confidence — Principle 14.
+    rejected entry carrying investigator/date/reason notation resolved
+    from that relationship's OWN audit properties — see
+    _resolve_review_notation's docstring for exactly how a manual
+    reject and a cascade auto-invalidation are each recognised. A
+    rejected fact is never silently omitted, regardless of confidence
+    — Principle 14.
 
     Args:
         case_id: the case this report is being generated for. Used only
@@ -228,7 +341,6 @@ def assemble_related_network(case_id: str, subject_id: str) -> dict:
 
     with get_session() as session:
         raw_rows = session.run(_RELATED_NETWORK_QUERY, subject_id=subject_id).data()
-        rejection_rows = session.run(_REJECTIONS_QUERY, subject_id=subject_id).data()
 
     counts = {"high": 0, "medium": 0, "unresolved": 0}
     related_network: List[Dict[str, Any]] = []
@@ -259,25 +371,13 @@ def assemble_related_network(case_id: str, subject_id: str) -> dict:
         }
 
         if status == "rejected":
-            match = _find_rejection(row, rejection_rows)
-            entry["rejection"] = (
-                {
-                    "investigator_id": match["investigator_id"],
-                    "rejected_at": match["rejected_at"],
-                    "reason": match["reason"],
-                    "rule_id": match["rule_id"],
-                }
-                if match
-                else {
-                    "investigator_id": None,
-                    "rejected_at": None,
-                    "reason": None,
-                    "rule_id": None,
-                }
-            )
-            # Never silently omitted: a rejected fact is listed with a
-            # blank notation rather than dropped, if no :Rejection record
-            # correlates — the gap itself is worth surfacing, not hiding.
+            entry["rejection"] = _resolve_review_notation(row.get("rejection_raw"), row.get("source_rule"))
+            # Never silently omitted: a rejected fact is listed with
+            # whatever notation resolves — including an all-None one, if
+            # neither a reject nor an invalidate candidate has an actor —
+            # rather than dropped. See _resolve_review_notation's own
+            # docstring for how a manual reject and a cascade
+            # auto-invalidation are each recognised.
 
         related_network.append(entry)
 
