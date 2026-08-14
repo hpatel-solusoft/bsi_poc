@@ -837,11 +837,45 @@ def reload_all(req: ReloadAllRequest) -> ReloadAllResponse:
     """
     ON-DEMAND — force-refresh every tab for case_id in one call.
 
-    Runs /intake -> /similar_cases -> /risk_assessment -> /plan, each
-    with reload_ai_summary=True, in that exact dependency order — the
-    same order an investigator would click through the tabs in, and the
-    same order each route's own prerequisite-auto-resolve chain already
-    assumes (see api.pipeline_execution.resolve_prerequisite_case_data).
+    Runs /graph/ingest -> /intake -> /similar_cases -> /risk_assessment
+    -> /plan, in that exact dependency order — the same order an
+    investigator would click through the tabs in, and the same order
+    each route's own prerequisite-auto-resolve chain already assumes
+    (see api.pipeline_execution.resolve_prerequisite_case_data).
+
+    The /graph/ingest step is what makes this a genuine "refresh
+    everything from source" action rather than "re-run the LLM against
+    whatever happens to already be in Neo4j". Every other step here
+    reads its case data through the reload_ai_summary=True cache-bypass
+    (core_data_changed, see core.narrative_staleness), but that bypass
+    only forces AppWorks to be re-fetched for the AUTO/ON-DEMAND
+    sections themselves — it was never what kept Neo4j's structural
+    data (subjects, addresses, employers, wages, allegations,
+    commentary) current. Until AppWorks' own lifecycle event is wired
+    up (see /graph/ingest's docstring), the only thing that pushes a
+    fresh AppWorks read into Neo4j at all is a POST /graph/ingest call,
+    and reload_all previously never made one — an investigator could
+    hit "reload" all day and still have /intake's Wave 1/2 rules
+    reasoning over yesterday's graph.
+
+    Run with run_rules=True (the /graph/ingest default) rather than
+    False: reload_all is the one caller that should always want a
+    graph that is both freshly loaded AND freshly reasoned before
+    anything downstream reads it, not staged as a separate step — see
+    GraphIngestRequest's own docstring on why run_rules only ever
+    defaults to True, "a loaded-but-unreasoned graph looks complete
+    and is not". This does mean Wave 1/2 runs twice in the same
+    request: once here inside /graph/ingest, and again a few lines
+    down inside /intake, because /intake's own reload_ai_summary=True
+    unconditionally clears pipeline_execution_state and reruns
+    (staleness.should_rerun_full_pipeline in api.pipeline_execution)
+    regardless of what /graph/ingest just did — it has no way to know
+    a reasoning pass already happened in this same call. That
+    duplication is redundant work, not a correctness risk: every rule
+    write is MERGE/SET (Principle 15), so a second pass over unchanged
+    data reasserts the same facts rather than producing different or
+    duplicate ones. The added latency is the deliberate trade for
+    never serving a stale-graph reasoning pass under this endpoint.
 
     This is a thin orchestrator over the existing routes, not a
     parallel implementation: each step below is a plain Python call to
@@ -849,24 +883,32 @@ def reload_all(req: ReloadAllRequest) -> ReloadAllResponse:
     already uses for auto-resolving a missing prerequisite (e.g. /plan
     calling `lambda: risk_assessment(RiskAssessmentRequest(...))` when
     risk_assessment is missing). Every persistence side effect —
-    Postgres case_ai_summary_store, the Neo4j reasoning pipeline, the
-    warm CASE_STORE, agent_summary_cache's per-tab generated_at — still
+    the Neo4j structural sync (and its own stale-edge reconciliation,
+    see etl/graph_sync.py's RECONCILE section), Postgres
+    case_ai_summary_store, the Neo4j reasoning pipeline, the warm
+    CASE_STORE, agent_summary_cache's per-tab generated_at — still
     happens exactly the way it always has, inside those route
     functions. reload_all adds no new write path of its own, so there
     is no risk of it drifting out of sync with what a single-tab
-    reload_ai_summary=True call already does.
+    reload_ai_summary=True call (or a direct POST /graph/ingest call)
+    already does.
 
     Stops at the first failing step rather than pushing on: every step
     here depends on the one before it having just produced fresh data
-    (e.g. /plan reads /risk_assessment's freshly persisted result), so
+    (e.g. /plan reads /risk_assessment's freshly persisted result, and
+    /intake's Wave 1/2 rules read whatever /graph/ingest just wrote), so
     continuing past a failure would silently run later steps against a
     now-stale upstream instead of the fresh one this call promised.
     Every step after the failure is reported "skipped", never attempted.
+    A /graph/ingest failure therefore stops the whole run rather than
+    falling back to reasoning over a possibly-stale graph — a partial
+    reload that silently skipped the one step that actually refreshes
+    Neo4j would be worse than an obvious failure here.
 
     Always returns 200 — this is a bulk status report, not a single
     pass/fail action. The response body's per-step `status` values and
     top-level `status` (success / partial / failed) carry the actual
-    outcome, so a caller can render "3 of 4 tabs refreshed, Plan
+    outcome, so a caller can render "3 of 5 tabs refreshed, Plan
     failed: <reason>" instead of a single opaque error.
     """
     start = time.time()
@@ -877,6 +919,10 @@ def reload_all(req: ReloadAllRequest) -> ReloadAllResponse:
     # so a request object for step N is never built (and never touches
     # case_data) before step N-1 has actually completed.
     step_calls = [
+        (
+            "graph_ingest",
+            lambda: graph_ingest(GraphIngestRequest(case_ids=[req.case_id], run_rules=True)),
+        ),
         ("intake", lambda: intake(intakeRequest(case_id=req.case_id, reload_ai_summary=True))),
         (
             "similar_cases",

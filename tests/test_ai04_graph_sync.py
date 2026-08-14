@@ -205,20 +205,30 @@ def test_fetch_reads_status_fraud_amount_fasttrack_and_fein_fields():
 
 
 class FakeRecord:
-    def __init__(self, n: int = 1):
-        self._n = n
+    """Stubs a Neo4j Record's __getitem__. Supports both the plain "n"
+    shape every original _Q_* write query returns, and the richer
+    "deleted" / "flagged" / "retired_candidate_ids" shape the
+    RECONCILE section's _RECONCILE_* queries return (see
+    etl/graph_sync.py's run_prune) — one fake covers both so
+    RecordingTx does not need to know which kind of query it is
+    replaying."""
+
+    _DEFAULTS = {"n": 1, "deleted": 0, "flagged": 0, "retired_candidate_ids": []}
+
+    def __init__(self, **overrides):
+        self._values = {**self._DEFAULTS, **overrides}
 
     def __getitem__(self, key):
-        assert key == "n"
-        return self._n
+        assert key in self._values, f"unexpected key {key!r} requested from a stubbed Neo4j record"
+        return self._values[key]
 
 
 class FakeResult:
-    def __init__(self, n: int = 1):
-        self._n = n
+    def __init__(self, **overrides):
+        self._overrides = overrides
 
     def single(self):
-        return FakeRecord(self._n)
+        return FakeRecord(**self._overrides)
 
 
 class RecordingTx:
@@ -230,7 +240,7 @@ class RecordingTx:
 
     def run(self, query, **params):
         self.calls.append({"query": query, "params": params})
-        return FakeResult(n=1)
+        return FakeResult()
 
 
 def _sample_case_payload() -> Dict[str, Any]:
@@ -378,6 +388,27 @@ def test_load_case_graph_uses_one_write_transaction():
     assert counts["employers"] == 1
     assert counts["wage_records"] == 1
     assert counts["commentary"] == 1
+    # RECONCILE runs inside the same execute_write call as everything
+    # above (etl/graph_sync.py's _tx_load calls _tx_prune_stale directly,
+    # not a second session/transaction) — its per-relationship-type
+    # deleted/flagged counts land under counts["pruned"], not as
+    # additional top-level keys, so they don't collide with the
+    # entity-count keys asserted above.
+    assert "pruned" in counts
+    for rel_key in (
+        "appears_in_case",
+        "allegations",
+        "addresses",
+        "aliases",
+        "employers",
+        "wage_records",
+        "commentary",
+        "co_subject_pairs",
+    ):
+        assert rel_key in counts["pruned"]
+        assert counts["pruned"][rel_key] == {"deleted": 0, "flagged": 0}
+    assert counts["pruned"]["allegations_removed"] == 0
+    assert counts["pruned"]["commentary_removed"] == 0
     assert fake_tx.calls  # every query really went through the one shared tx
 
 

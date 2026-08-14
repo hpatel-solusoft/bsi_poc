@@ -121,7 +121,7 @@ def mark_started(case_id: str) -> None:
     _write(_MARK_STARTED, {"case_id": case_id}, "mark_started")
 
 
-def mark_loaded(case_id: str, counts: Dict[str, int]) -> None:
+def mark_loaded(case_id: str, counts: Dict[str, Any]) -> None:
     """Record that the case's data has been loaded into Neo4j, with per-entity node counts."""
     _write(_MARK_LOADED, {"case_id": case_id, "counts": json.dumps(counts)}, "mark_loaded")
 

@@ -35,6 +35,18 @@ WHAT CHANGED FROM THE FIRST ETL ROUND (and why):
      sources; only Case commentary was ever loaded.
   7. Node-level provenance (source_system / source_table / retrieved_at)
      in addition to Section 3.3's relationship-level pair.
+  8. Reconciled, not just additive. Every write above is a MERGE, which
+     handles create/update but never removal — a record deleted at the
+     AppWorks source used to stay in the graph forever. The RECONCILE
+     section (below the _Q_* write queries) closes that gap: it uses
+     the retrieved_at stamp every write above already sets to detect an
+     ETL-owned edge this run's fetch no longer reports, and retires it
+     after two consecutive misses (never on the first, since a
+     transient AppWorks fetch failure and a genuine deletion look
+     identical from here — see that section's own docstring). Scoped
+     strictly to the eight relationship types this file writes; never
+     touches a rule-inferred relationship, a :Rejection record, or
+     :FraudNetwork, and never a full-case wipe.
 """
 
 from __future__ import annotations
@@ -531,7 +543,8 @@ SET al.allegation_type = a.allegation_type,
     al.source_table    = a.source_table,
     al.retrieved_at    = a.retrieved_at
 MERGE (c)-[r:HAS_ALLEGATION]->(al)
-SET r.source_table = "Allegations_Workfolder_Id", r.retrieved_at = a.retrieved_at
+SET r.source_table = "Allegations_Workfolder_Id", r.retrieved_at = a.retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(al) AS n
 """
 
@@ -551,7 +564,8 @@ MERGE (subj)-[r:APPEARS_IN_CASE]->(c)
 SET r.subject_role = s.subject_role,
     r.is_primary   = s.is_primary,
     r.source_table = "Workfolder_SubjectsRelationship",
-    r.retrieved_at = s.retrieved_at
+    r.retrieved_at = s.retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(subj) AS n
 """
 
@@ -568,7 +582,8 @@ SET addr.street            = row.street,
     addr.source_table      = "Subject_Address",
     addr.retrieved_at      = $retrieved_at
 MERGE (s)-[r:HAS_ADDRESS]->(addr)
-SET r.source_table = "Subject_Address", r.retrieved_at = $retrieved_at
+SET r.source_table = "Subject_Address", r.retrieved_at = $retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(r) AS n
 """
 
@@ -580,7 +595,8 @@ SET al.source_system = $source_system,
     al.source_table  = "Subject_Alias",
     al.retrieved_at  = $retrieved_at
 MERGE (s)-[r:HAS_ALIAS]->(al)
-SET r.source_table = "Subject_Alias", r.retrieved_at = $retrieved_at
+SET r.source_table = "Subject_Alias", r.retrieved_at = $retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(r) AS n
 """
 
@@ -602,7 +618,8 @@ MERGE (s)-[r:EMPLOYED_BY]->(e)
 SET r.start_date   = row.start_date,
     r.end_date     = row.end_date,
     r.source_table = "Subject_Job",
-    r.retrieved_at = $retrieved_at
+    r.retrieved_at = $retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(r) AS n
 """
 
@@ -622,7 +639,8 @@ SET r.period_start = row.period_start,
     r.wage_quarter = row.wage_quarter,
     r.wage_amount  = row.wage_amount,
     r.source_table = "Subject_SubjectWages",
-    r.retrieved_at = $retrieved_at
+    r.retrieved_at = $retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(r) AS n
 """
 
@@ -661,13 +679,16 @@ OPTIONAL MATCH (al:Allegation {allegation_id: row.attach_id})
   WHERE row.attach_to = "allegation"
 FOREACH (x IN CASE WHEN c IS NOT NULL THEN [c] ELSE [] END |
     MERGE (x)-[r:HAS_COMMENTARY]->(comm)
-    SET r.source_table = row.source_table, r.retrieved_at = $retrieved_at)
+    SET r.source_table = row.source_table, r.retrieved_at = $retrieved_at,
+        r._prune_pending = null, r._prune_flagged_at = null)
 FOREACH (x IN CASE WHEN s IS NOT NULL THEN [s] ELSE [] END |
     MERGE (x)-[r:HAS_COMMENTARY]->(comm)
-    SET r.source_table = row.source_table, r.retrieved_at = $retrieved_at)
+    SET r.source_table = row.source_table, r.retrieved_at = $retrieved_at,
+        r._prune_pending = null, r._prune_flagged_at = null)
 FOREACH (x IN CASE WHEN al IS NOT NULL THEN [al] ELSE [] END |
     MERGE (x)-[r:HAS_COMMENTARY]->(comm)
-    SET r.source_table = row.source_table, r.retrieved_at = $retrieved_at)
+    SET r.source_table = row.source_table, r.retrieved_at = $retrieved_at,
+        r._prune_pending = null, r._prune_flagged_at = null)
 RETURN count(DISTINCT comm) AS n
 """
 
@@ -678,9 +699,267 @@ MATCH (b:Subject {subject_id: pair.b})
 MERGE (a)-[r:IS_CO_SUBJECT_WITH]-(b)
 SET r.case_id      = $case_id,
     r.source_table = "Workfolder_SubjectsRelationship",
-    r.retrieved_at = $retrieved_at
+    r.retrieved_at = $retrieved_at,
+    r._prune_pending = null, r._prune_flagged_at = null
 RETURN count(r) AS n
 """
+
+# ============================================================
+# RECONCILE — retire ETL-owned edges AppWorks no longer reports
+#
+# Every _Q_* query above is additive only: it is a MERGE, so a
+# HAS_ADDRESS / HAS_ALIAS / EMPLOYED_BY / HAS_WAGE_RECORD_WITH /
+# HAS_ALLEGATION / HAS_COMMENTARY / APPEARS_IN_CASE / IS_CO_SUBJECT_WITH
+# edge that existed from a prior sync and simply is not present in
+# THIS run's fetch is left completely untouched above. Left alone
+# forever, that is the gap this section closes: an investigator removes
+# a stale address, alias, allegation, employer record, wage record, or
+# comment in AppWorks, and — before this section existed — the graph
+# went on reporting it as current indefinitely, because nothing ever
+# looked at what used to be there and is now gone.
+#
+# NOT "clear the case subgraph and reload". That would be both wrong
+# and dangerous here: the rule-inferred relationships
+# (SHARES_EMPLOYER_WITH, SHARES_ADDRESS_WITH, SHARES_ALIAS_PATTERN_WITH,
+# MEMBER_OF_FRAUD_NETWORK, HAS_PRIOR_GUILTY_CASE,
+# ALLEGATION_LIKELY_AGAINST_SUBJECT — see reasoning_layer/rules/*.cypher)
+# and every :Rejection record an investigator has ever filed live in the
+# SAME graph as this case's source data, and Principle 14 makes a
+# rejection a PERMANENT record, never a silent deletion. A full-case
+# wipe-and-reingest would take all of that out with it on every single
+# sync. So this section is scoped, by relationship TYPE, to exactly the
+# eight relationship types the _Q_* queries above write — it never
+# references a rule-created type or :Rejection or :FraudNetwork — and it
+# only ever deletes the specific stale EDGE, never a shared node.
+# :Address / :Alias / :Employer can legitimately be referenced by other
+# subjects or other cases and are never deleted here, only unlinked from
+# the one subject whose record went away. Only owned, single-parent
+# child records — :Allegation, :Commentary — are ever removed as nodes,
+# and only once orphaned (see the GC queries and _tx_prune_stale below).
+#
+# TWO-SYNC CONFIRMATION, NOT DELETE-ON-FIRST-MISS:
+# appworks_utils.safe_fetch / get_relationship_items both swallow a
+# transient AppWorks failure (a timed-out call, an expired token
+# mid multi-call fetch) into an EMPTY result — logged, not raised, by
+# design, so one bad sub-fetch does not fail the whole case (see that
+# module's own docstring). That means "this row is missing from today's
+# fetch" is not reliably "AppWorks deleted this row"; it can just as
+# easily be "AppWorks hiccupped while this run happened to fetch it."
+# Deleting on the first miss would let one transient failure silently
+# erase real investigative data — a worse failure mode than "a genuine
+# deletion takes one extra sync to fully catch up." So a relationship
+# missing from this run's fetch is first FLAGGED (r._prune_pending =
+# true, r._prune_flagged_at = $retrieved_at) rather than deleted, and is
+# only actually deleted once it is confirmed missing AGAIN on a later
+# run while still flagged. Any relationship the next successful MERGE
+# touches again clears the flag itself (every _Q_* query's SET clause
+# above now sets r._prune_pending = null, r._prune_flagged_at = null) —
+# a transient failure heals itself on the very next successful sync,
+# before it could ever reach the second miss that would delete anything.
+# ============================================================
+
+_RECONCILE_APPEARS_IN_CASE = """
+MATCH (s:Subject)-[r:APPEARS_IN_CASE]->(c:Case {case_id: $case_id})
+WHERE r.retrieved_at <> $retrieved_at
+WITH r, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged
+"""
+
+_RECONCILE_ALLEGATIONS = """
+MATCH (c:Case {case_id: $case_id})-[r:HAS_ALLEGATION]->(al:Allegation)
+WHERE r.retrieved_at <> $retrieved_at
+WITH r, al, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged,
+       collect(CASE WHEN already_flagged THEN al.allegation_id END) AS retired_candidate_ids
+"""
+
+# Address/Alias/Employer nodes are shared reference data (Section 3.1's
+# match-key nodes), never owned by one subject or one case — only the
+# edge is scoped to $subject_ids (this run's fetched subjects; a
+# subject who fell off the case entirely this run was never re-fetched
+# at all, so their edges are correctly left untouched rather than
+# guessed at) and only the edge is ever deleted, never the node.
+_RECONCILE_ADDRESSES = """
+MATCH (s:Subject)-[r:HAS_ADDRESS]->(addr:Address)
+WHERE s.subject_id IN $subject_ids AND r.retrieved_at <> $retrieved_at
+WITH r, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged
+"""
+
+_RECONCILE_ALIASES = """
+MATCH (s:Subject)-[r:HAS_ALIAS]->(al:Alias)
+WHERE s.subject_id IN $subject_ids AND r.retrieved_at <> $retrieved_at
+WITH r, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged
+"""
+
+_RECONCILE_EMPLOYERS = """
+MATCH (s:Subject)-[r:EMPLOYED_BY]->(e:Employer)
+WHERE s.subject_id IN $subject_ids AND r.retrieved_at <> $retrieved_at
+WITH r, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged
+"""
+
+_RECONCILE_WAGES = """
+MATCH (s:Subject)-[r:HAS_WAGE_RECORD_WITH]->(e:Employer)
+WHERE s.subject_id IN $subject_ids AND r.retrieved_at <> $retrieved_at
+WITH r, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged
+"""
+
+# Commentary can hang off Case, Subject, or Allegation (Section 5.3 Step
+# 3's three narrative sources). Scoped to this case's own Case node,
+# this run's fetched subjects, and this run's fetched allegations —
+# an allegation already gone this run (see _RECONCILE_ALLEGATIONS above)
+# is not in $allegation_ids, so its own commentary edges are correctly
+# left for a later run to reconcile once that allegation's HAS_ALLEGATION
+# edge has actually been confirmed-deleted, not guessed at here.
+_RECONCILE_COMMENTARY = """
+MATCH (parent)-[r:HAS_COMMENTARY]->(comm:Commentary)
+WHERE r.retrieved_at <> $retrieved_at
+  AND (
+    (parent:Case AND parent.case_id = $case_id)
+    OR (parent:Subject AND parent.subject_id IN $subject_ids)
+    OR (parent:Allegation AND parent.allegation_id IN $allegation_ids)
+  )
+WITH r, comm, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged,
+       collect(CASE WHEN already_flagged THEN comm.comment_id END) AS retired_candidate_ids
+"""
+
+# id(), not elementId(): the FOREACH-conditional idiom above this
+# section was chosen specifically to stay valid on both 4.x and 5.x
+# while the target Neo4j version is still settling (see _Q_COMMENTARY's
+# own comment); elementId() does not exist before 5.0, so id() is used
+# here for the same cross-version reason, deprecated-but-functional on
+# 5.x rather than unavailable on 4.x. Needed because IS_CO_SUBJECT_WITH
+# is stored undirected (MERGE (a)-[r]-(b) with no arrow, see
+# _Q_CO_SUBJECTS) — an undirected MATCH on the same pattern would
+# otherwise visit the one stored relationship twice, once from each
+# endpoint, and attempt to DELETE it twice in the same query.
+_RECONCILE_CO_SUBJECTS = """
+MATCH (a:Subject)-[r:IS_CO_SUBJECT_WITH]-(b:Subject)
+WHERE r.case_id = $case_id AND r.retrieved_at <> $retrieved_at AND id(a) < id(b)
+WITH r, coalesce(r._prune_pending, false) AS already_flagged
+FOREACH (_ IN CASE WHEN already_flagged THEN [1] ELSE [] END | DELETE r)
+FOREACH (_ IN CASE WHEN NOT already_flagged THEN [1] ELSE [] END |
+    SET r._prune_pending = true, r._prune_flagged_at = $retrieved_at)
+RETURN count(CASE WHEN already_flagged THEN 1 END) AS deleted,
+       count(CASE WHEN NOT already_flagged THEN 1 END) AS flagged
+"""
+
+# Orphan cleanup for owned, single-parent child node types only — never
+# for :Address / :Alias / :Employer (see the section docstring above).
+# Takes the specific candidate ids the confirmed-delete queries above
+# just collected, rather than scanning either label globally, and
+# re-checks degree at cleanup time rather than trusting the earlier
+# collect(): if some OTHER still-live edge reaches this exact node
+# (e.g. a :Commentary shared narrative source, or an :Allegation whose
+# HAS_COMMENTARY edge has not yet been confirmed-deleted this same
+# pass), it is left alone rather than detached from data it is still
+# actually attached to.
+_RECONCILE_GC_ALLEGATIONS = """
+UNWIND $ids AS aid
+MATCH (al:Allegation {allegation_id: aid})
+WHERE NOT (al)--()
+DETACH DELETE al
+RETURN count(al) AS n
+"""
+
+_RECONCILE_GC_COMMENTARY = """
+UNWIND $ids AS cid
+MATCH (comm:Commentary {comment_id: cid})
+WHERE NOT (comm)--()
+DETACH DELETE comm
+RETURN count(comm) AS n
+"""
+
+
+def _tx_prune_stale(
+    tx,
+    case_id: str,
+    subject_ids: List[str],
+    allegation_ids: List[str],
+    retrieved_at: str,
+) -> Dict[str, Any]:
+    """
+    Second half of the same write transaction _tx_load runs: retire the
+    ETL-owned edges this run's fetch no longer reports. See the
+    RECONCILE section docstring above for what this does and does not
+    touch, and why a miss is flagged before it is ever deleted.
+
+    Deliberately degenerate-safe on empty input: if $subject_ids or
+    $allegation_ids come back empty (e.g. a transient failure at the
+    top of fetch_case_graph rather than in one sub-fetch), every
+    `IN $subject_ids` / `IN $allegation_ids` predicate below matches
+    nothing, so this call flags and deletes nothing that run, rather
+    than a subject-scoped or allegation-scoped WHERE clause silently
+    turning into "matches everything".
+    """
+    common = {"case_id": case_id, "subject_ids": subject_ids, "retrieved_at": retrieved_at}
+    result: Dict[str, Any] = {}
+
+    def run_prune(query: str, key: str, **params):
+        record = tx.run(query, **common, **params).single()
+        result[key] = {
+            "deleted": int(record["deleted"]) if record and record["deleted"] is not None else 0,
+            "flagged": int(record["flagged"]) if record and record["flagged"] is not None else 0,
+        }
+        return record
+
+    run_prune(_RECONCILE_APPEARS_IN_CASE, "appears_in_case")
+    alleg_record = run_prune(_RECONCILE_ALLEGATIONS, "allegations")
+    run_prune(_RECONCILE_ADDRESSES, "addresses")
+    run_prune(_RECONCILE_ALIASES, "aliases")
+    run_prune(_RECONCILE_EMPLOYERS, "employers")
+    run_prune(_RECONCILE_WAGES, "wage_records")
+    comm_record = run_prune(_RECONCILE_COMMENTARY, "commentary", allegation_ids=allegation_ids)
+    run_prune(_RECONCILE_CO_SUBJECTS, "co_subject_pairs")
+
+    retired_allegation_ids = list((alleg_record["retired_candidate_ids"] if alleg_record else []) or [])
+    retired_comment_ids = list((comm_record["retired_candidate_ids"] if comm_record else []) or [])
+
+    gc_allegations = 0
+    if retired_allegation_ids:
+        rec = tx.run(_RECONCILE_GC_ALLEGATIONS, ids=retired_allegation_ids).single()
+        gc_allegations = int(rec["n"]) if rec and rec["n"] is not None else 0
+
+    gc_commentary = 0
+    if retired_comment_ids:
+        rec = tx.run(_RECONCILE_GC_COMMENTARY, ids=retired_comment_ids).single()
+        gc_commentary = int(rec["n"]) if rec and rec["n"] is not None else 0
+
+    result["allegations_removed"] = gc_allegations
+    result["commentary_removed"] = gc_commentary
+    return result
 
 
 def _flatten(subjects: List[Dict[str, Any]], child_key: str) -> List[Dict[str, Any]]:
@@ -694,12 +973,16 @@ def _flatten(subjects: List[Dict[str, Any]], child_key: str) -> List[Dict[str, A
     return rows
 
 
-def _tx_load(tx, data: Dict[str, Any]) -> Dict[str, int]:
+def _tx_load(tx, data: Dict[str, Any]) -> Dict[str, Any]:
     case = data["case"]
     case_id = case["case_id"]
     retrieved_at = data["retrieved_at"]
     common = {"source_system": SOURCE_SYSTEM, "retrieved_at": retrieved_at, "case_id": case_id}
-    counts: Dict[str, int] = {}
+    # int for every entity-count key; "pruned" (added at the end,
+    # below) is itself a Dict[str, Any] of per-relationship-type
+    # deleted/flagged sub-counts, so the value type here is Any, not
+    # int.
+    counts: Dict[str, Any] = {}
 
     def run(query: str, key: str, **params) -> None:
         """Execute one Cypher write and record its affected-node count under key."""
@@ -757,10 +1040,19 @@ def _tx_load(tx, data: Dict[str, Any]) -> Dict[str, int]:
     else:
         counts["co_subject_pairs"] = 0
 
+    # RECONCILE — same write transaction, so a mid-prune failure leaves
+    # the case exactly as it was before this sync started, same
+    # atomicity guarantee load_case_graph's docstring makes for the
+    # writes above. Runs last and reads $subject_ids / $allegation_ids
+    # from what THIS run's fetch actually returned (ids, not the raw
+    # objects — the RECONCILE section's own docstring covers why every
+    # predicate below is scoped to these rather than a full-case sweep).
+    counts["pruned"] = _tx_prune_stale(tx, case_id, ids, [a["allegation_id"] for a in allegations], retrieved_at)
+
     return counts
 
 
-def load_case_graph(data: Dict[str, Any]) -> Dict[str, int]:
+def load_case_graph(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Write fetch_case_graph()'s output into Neo4j in ONE write transaction.
     Atomic by design: a case is either fully in the graph or not in it at
@@ -770,11 +1062,24 @@ def load_case_graph(data: Dict[str, Any]) -> Dict[str, int]:
     case_id = data["case"]["case_id"]
     with get_session() as session:
         counts = session.execute_write(_tx_load, data)
+    pruned = counts.get("pruned") or {}
+    deleted_total = sum(v.get("deleted", 0) for v in pruned.values() if isinstance(v, dict))
+    flagged_total = sum(v.get("flagged", 0) for v in pruned.values() if isinstance(v, dict))
     logger.info("etl.graph_sync: LOADED case_id=%s %s", case_id, counts)
+    if deleted_total or flagged_total:
+        logger.info(
+            "etl.graph_sync: RECONCILE case_id=%s retired=%d newly_flagged=%d "
+            "allegations_removed=%d commentary_removed=%d — see counts.pruned for the per-type breakdown",
+            case_id,
+            deleted_total,
+            flagged_total,
+            pruned.get("allegations_removed", 0),
+            pruned.get("commentary_removed", 0),
+        )
     return counts
 
 
-def sync_case(case_id: str) -> Dict[str, int]:
+def sync_case(case_id: str) -> Dict[str, Any]:
     """Fetch then load, for one case. Retry policy belongs to the caller
     (etl/ingest_service.py), not here."""
     return load_case_graph(fetch_case_graph(case_id))

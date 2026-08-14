@@ -48,8 +48,14 @@ class PlanRequest(BaseModel):
 
 class ReloadAllRequest(BaseModel):
     """POST /reload_all — force-refresh every ON-DEMAND tab for case_id
-    in one call: /intake, /similar_cases, /risk_assessment, /plan, each
-    run with reload_ai_summary=True, in that exact dependency order."""
+    in one call: /graph/ingest (structural AppWorks -> Neo4j re-sync,
+    run_rules=True — the graph is both freshly loaded and freshly
+    reasoned before anything else runs), then /intake, /similar_cases,
+    /risk_assessment, /plan, each run with reload_ai_summary=True — in
+    that exact dependency order. See the reload_all route's own
+    docstring for why /graph/ingest has to run first, and why running
+    it with run_rules=True means Wave 1/2 reasoning happens twice in
+    one call (redundant, not incorrect — see that docstring)."""
 
     case_id: str
 

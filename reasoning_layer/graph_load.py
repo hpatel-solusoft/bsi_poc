@@ -42,6 +42,18 @@ logger = logging.getLogger(__name__)
 # edge rather than duplicating it. The rejection guard is a WHERE before
 # the MERGE, so a rejected attribution is never re-asserted and its
 # status:"rejected" is never quietly flipped back.
+#
+# WITH r ORDER BY r.asserted_at DESC LIMIT 1 before the RETURN is a
+# defensive guard, not the normal path: al and s are each matched by a
+# unique key, and the MERGE pattern is directed, so in the ordinary
+# case there is exactly one (al)-[r]->(s) either way. It only changes
+# anything if duplicate ALLEGATION_LIKELY_AGAINST_SUBJECT edges already
+# exist between the same pair (stale data from before this write path
+# was idempotent) — MERGE matches ALL of them, not just one, and a bare
+# `.single()` on more than one row silently keeps an arbitrary row and
+# warns. This makes that arbitrary choice a deliberate, deterministic
+# one (most recently asserted) instead of whatever the driver happened
+# to keep.
 _WRITE_ATTRIBUTION = """
 MATCH (al:Allegation {allegation_id: $allegation_id})
 MATCH (s:Subject {subject_id: $subject_id})
@@ -61,6 +73,9 @@ SET r.confidence         = $confidence,
     r.asserted_at        = $asserted_at,
     r.rationale          = $rationale,
     r.source_comment_ids = $source_comment_ids
+WITH r
+ORDER BY r.asserted_at DESC
+LIMIT 1
 RETURN elementId(r) AS rel_id
 """
 
@@ -79,10 +94,26 @@ LIMIT 1
 # (elementId is checked against the live graph) before it is recorded as
 # confirmed. An LLM that invents a plausible-looking element id would
 # otherwise cause Rule 14 to elevate nothing while reporting success.
+#
+# ()-[r]-() is deliberately undirected: a corroboration can point at a
+# relationship of any type this pipeline writes (EMPLOYED_BY,
+# ALLEGATION_LIKELY_AGAINST_SUBJECT, IS_CO_SUBJECT_WITH, ...), and this
+# query has no way to know which direction the caller's relationship_ref
+# was originally asserted in — an elementId lookup should not have to
+# guess. The cost of that is Neo4j's own undirected-match behavior:
+# with both endpoints anonymous, the SAME physical relationship is
+# visited once per traversal direction, so a bare `.single()` on this
+# result sees two identical rows for one relationship and warns
+# ("Expected a result with a single record, but found multiple"),
+# silently dropping one. WITH DISTINCT comm, r collapses those two
+# identical (comm, r) bindings back to the one real match before the
+# write and the RETURN — same fix as etl/graph_sync.py's
+# _RECONCILE_CO_SUBJECTS applies to the same undirected-match shape.
 _WRITE_CORROBORATION = """
 MATCH (comm:Commentary {comment_id: $comment_id})
 MATCH ()-[r]-()
 WHERE elementId(r) = $relationship_ref
+WITH DISTINCT comm, r
 SET comm.confirms_relationship_ids =
         CASE WHEN comm.confirms_relationship_ids IS NULL
              THEN [$relationship_ref]
