@@ -168,14 +168,25 @@ _REL_RULES: Dict[str, str] = {
              head([rel IN scope_rels
                    WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
                       OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
-                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                   // rel.rejected_at is ONE physical property shared by a
+                   // genuine manual reject AND an auto-invalidate cascade
+                   // write (rel.auto_invalidated is what tells them apart --
+                   // see rule_audit.py's identical pattern/comment for this
+                   // same relationship type). Exposing it unconditionally as
+                   // both a bare `rejected_at` and an unconditional
+                   // `invalidated_at` let a pure-cascade write (rejected_by
+                   // never set) masquerade as a manual reject downstream.
+                   // Each is now gated on the field that actually signals
+                   // ITS kind of event, matching rule_audit.py's own guard.
+                   {rejected_by: rel.rejected_by,
+                    rejected_at: (CASE WHEN rel.rejected_by IS NOT NULL THEN rel.rejected_at ELSE null END),
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
                     invalidated_by_investigator: rel.invalidated_by_investigator_id,
-                    invalidated_at: rel.rejected_at,
+                    invalidated_at: (CASE WHEN rel.auto_invalidated = true THEN rel.rejected_at ELSE null END),
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
                     reinstated_by_investigator: rel.reinstated_by_investigator_id,
@@ -203,16 +214,22 @@ _REL_RULES: Dict[str, str] = {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active"),
+                 // Same shared-property gating as the network-level
+                 // `rejection` map above -- mm.rejected_at is written for
+                 // both a manual reject and a cascade auto-invalidate of
+                 // THIS member's own edge, so each side is gated on the
+                 // field that actually signals its kind of event.
                  rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
                                     OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
-                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                              THEN {rejected_by: mm.rejected_by,
+                                    rejected_at: (CASE WHEN mm.rejected_by IS NOT NULL THEN mm.rejected_at ELSE null END),
                                     reason: mm.rejection_reason, reverted_by: mm.reverted_by,
                                     reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
                                     auto_invalidated: mm.auto_invalidated,
                                     invalidated_by_rule_id: mm.invalidated_by_rule_id,
                                     invalidated_reason: mm.invalidated_reason,
                                     invalidated_by_investigator: mm.invalidated_by_investigator_id,
-                                    invalidated_at: mm.rejected_at,
+                                    invalidated_at: (CASE WHEN mm.auto_invalidated = true THEN mm.rejected_at ELSE null END),
                                     reinstated_by_rule_id: mm.reinstated_by_rule_id,
                                     reinstated_reason: mm.reinstated_reason,
                                     reinstated_by_investigator: mm.reinstated_by_investigator_id,
@@ -271,14 +288,25 @@ _REL_RULES: Dict[str, str] = {
              head([rel IN scope_rels
                    WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
                       OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
-                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                   // rel.rejected_at is ONE physical property shared by a
+                   // genuine manual reject AND an auto-invalidate cascade
+                   // write (rel.auto_invalidated is what tells them apart --
+                   // see rule_audit.py's identical pattern/comment for this
+                   // same relationship type). Exposing it unconditionally as
+                   // both a bare `rejected_at` and an unconditional
+                   // `invalidated_at` let a pure-cascade write (rejected_by
+                   // never set) masquerade as a manual reject downstream.
+                   // Each is now gated on the field that actually signals
+                   // ITS kind of event, matching rule_audit.py's own guard.
+                   {rejected_by: rel.rejected_by,
+                    rejected_at: (CASE WHEN rel.rejected_by IS NOT NULL THEN rel.rejected_at ELSE null END),
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
                     invalidated_by_investigator: rel.invalidated_by_investigator_id,
-                    invalidated_at: rel.rejected_at,
+                    invalidated_at: (CASE WHEN rel.auto_invalidated = true THEN rel.rejected_at ELSE null END),
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
                     reinstated_by_investigator: rel.reinstated_by_investigator_id,
@@ -306,16 +334,22 @@ _REL_RULES: Dict[str, str] = {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active"),
+                 // Same shared-property gating as the network-level
+                 // `rejection` map above -- mm.rejected_at is written for
+                 // both a manual reject and a cascade auto-invalidate of
+                 // THIS member's own edge, so each side is gated on the
+                 // field that actually signals its kind of event.
                  rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
                                     OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
-                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                              THEN {rejected_by: mm.rejected_by,
+                                    rejected_at: (CASE WHEN mm.rejected_by IS NOT NULL THEN mm.rejected_at ELSE null END),
                                     reason: mm.rejection_reason, reverted_by: mm.reverted_by,
                                     reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
                                     auto_invalidated: mm.auto_invalidated,
                                     invalidated_by_rule_id: mm.invalidated_by_rule_id,
                                     invalidated_reason: mm.invalidated_reason,
                                     invalidated_by_investigator: mm.invalidated_by_investigator_id,
-                                    invalidated_at: mm.rejected_at,
+                                    invalidated_at: (CASE WHEN mm.auto_invalidated = true THEN mm.rejected_at ELSE null END),
                                     reinstated_by_rule_id: mm.reinstated_by_rule_id,
                                     reinstated_reason: mm.reinstated_reason,
                                     reinstated_by_investigator: mm.reinstated_by_investigator_id,
@@ -373,14 +407,25 @@ _REL_RULES: Dict[str, str] = {
              head([rel IN scope_rels
                    WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
                       OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
-                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                   // rel.rejected_at is ONE physical property shared by a
+                   // genuine manual reject AND an auto-invalidate cascade
+                   // write (rel.auto_invalidated is what tells them apart --
+                   // see rule_audit.py's identical pattern/comment for this
+                   // same relationship type). Exposing it unconditionally as
+                   // both a bare `rejected_at` and an unconditional
+                   // `invalidated_at` let a pure-cascade write (rejected_by
+                   // never set) masquerade as a manual reject downstream.
+                   // Each is now gated on the field that actually signals
+                   // ITS kind of event, matching rule_audit.py's own guard.
+                   {rejected_by: rel.rejected_by,
+                    rejected_at: (CASE WHEN rel.rejected_by IS NOT NULL THEN rel.rejected_at ELSE null END),
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
                     invalidated_by_investigator: rel.invalidated_by_investigator_id,
-                    invalidated_at: rel.rejected_at,
+                    invalidated_at: (CASE WHEN rel.auto_invalidated = true THEN rel.rejected_at ELSE null END),
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
                     reinstated_by_investigator: rel.reinstated_by_investigator_id,
@@ -408,16 +453,22 @@ _REL_RULES: Dict[str, str] = {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active"),
+                 // Same shared-property gating as the network-level
+                 // `rejection` map above -- mm.rejected_at is written for
+                 // both a manual reject and a cascade auto-invalidate of
+                 // THIS member's own edge, so each side is gated on the
+                 // field that actually signals its kind of event.
                  rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
                                     OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
-                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                              THEN {rejected_by: mm.rejected_by,
+                                    rejected_at: (CASE WHEN mm.rejected_by IS NOT NULL THEN mm.rejected_at ELSE null END),
                                     reason: mm.rejection_reason, reverted_by: mm.reverted_by,
                                     reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
                                     auto_invalidated: mm.auto_invalidated,
                                     invalidated_by_rule_id: mm.invalidated_by_rule_id,
                                     invalidated_reason: mm.invalidated_reason,
                                     invalidated_by_investigator: mm.invalidated_by_investigator_id,
-                                    invalidated_at: mm.rejected_at,
+                                    invalidated_at: (CASE WHEN mm.auto_invalidated = true THEN mm.rejected_at ELSE null END),
                                     reinstated_by_rule_id: mm.reinstated_by_rule_id,
                                     reinstated_reason: mm.reinstated_reason,
                                     reinstated_by_investigator: mm.reinstated_by_investigator_id,
@@ -475,14 +526,25 @@ _REL_RULES: Dict[str, str] = {
              head([rel IN scope_rels
                    WHERE rel.rejected_by IS NOT NULL OR rel.reverted_by IS NOT NULL
                       OR rel.invalidated_by_rule_id IS NOT NULL OR rel.reinstated_by_rule_id IS NOT NULL |
-                   {rejected_by: rel.rejected_by, rejected_at: rel.rejected_at,
+                   // rel.rejected_at is ONE physical property shared by a
+                   // genuine manual reject AND an auto-invalidate cascade
+                   // write (rel.auto_invalidated is what tells them apart --
+                   // see rule_audit.py's identical pattern/comment for this
+                   // same relationship type). Exposing it unconditionally as
+                   // both a bare `rejected_at` and an unconditional
+                   // `invalidated_at` let a pure-cascade write (rejected_by
+                   // never set) masquerade as a manual reject downstream.
+                   // Each is now gated on the field that actually signals
+                   // ITS kind of event, matching rule_audit.py's own guard.
+                   {rejected_by: rel.rejected_by,
+                    rejected_at: (CASE WHEN rel.rejected_by IS NOT NULL THEN rel.rejected_at ELSE null END),
                     reason: rel.rejection_reason, reverted_by: rel.reverted_by,
                     reverted_at: rel.reverted_at, revert_reason: rel.revert_reason,
                     auto_invalidated: rel.auto_invalidated,
                     invalidated_by_rule_id: rel.invalidated_by_rule_id,
                     invalidated_reason: rel.invalidated_reason,
                     invalidated_by_investigator: rel.invalidated_by_investigator_id,
-                    invalidated_at: rel.rejected_at,
+                    invalidated_at: (CASE WHEN rel.auto_invalidated = true THEN rel.rejected_at ELSE null END),
                     reinstated_by_rule_id: rel.reinstated_by_rule_id,
                     reinstated_reason: rel.reinstated_reason,
                     reinstated_by_investigator: rel.reinstated_by_investigator_id,
@@ -510,16 +572,22 @@ _REL_RULES: Dict[str, str] = {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active"),
+                 // Same shared-property gating as the network-level
+                 // `rejection` map above -- mm.rejected_at is written for
+                 // both a manual reject and a cascade auto-invalidate of
+                 // THIS member's own edge, so each side is gated on the
+                 // field that actually signals its kind of event.
                  rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
                                     OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
-                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                              THEN {rejected_by: mm.rejected_by,
+                                    rejected_at: (CASE WHEN mm.rejected_by IS NOT NULL THEN mm.rejected_at ELSE null END),
                                     reason: mm.rejection_reason, reverted_by: mm.reverted_by,
                                     reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
                                     auto_invalidated: mm.auto_invalidated,
                                     invalidated_by_rule_id: mm.invalidated_by_rule_id,
                                     invalidated_reason: mm.invalidated_reason,
                                     invalidated_by_investigator: mm.invalidated_by_investigator_id,
-                                    invalidated_at: mm.rejected_at,
+                                    invalidated_at: (CASE WHEN mm.auto_invalidated = true THEN mm.rejected_at ELSE null END),
                                     reinstated_by_rule_id: mm.reinstated_by_rule_id,
                                     reinstated_reason: mm.reinstated_reason,
                                     reinstated_by_investigator: mm.reinstated_by_investigator_id,
