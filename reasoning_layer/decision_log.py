@@ -205,10 +205,12 @@ def build_decision_log(
 # Human-readable label for each relationship_type
 # reasoning_layer.report_generation.assemble_related_network's
 # _RELATED_NETWORK_QUERY can return — a closed, fixed set (that query
-# has exactly six UNION ALL branches), so this mapping is exhaustive by
-# construction; the .replace("_", " ").lower() fallback in
-# _relationship_type_plain_words only exists as a safety net if a new
-# branch is ever added to that query without a matching entry added here.
+# has eight UNION ALL branches: the six genuine relationship types plus
+# the Rule 8 / Rule 13 case-flag branches), so this mapping is
+# exhaustive by construction; the .replace("_", " ").lower() fallback
+# in _relationship_type_plain_words only exists as a safety net if a
+# new branch is ever added to that query without a matching entry added
+# here.
 _RELATIONSHIP_TYPE_PLAIN_WORDS: Dict[str, str] = {
     "SHARES_EMPLOYER_WITH": "shared employer",
     "SHARES_ADDRESS_WITH": "shared address",
@@ -216,6 +218,8 @@ _RELATIONSHIP_TYPE_PLAIN_WORDS: Dict[str, str] = {
     "MEMBER_OF_FRAUD_NETWORK": "fraud network membership",
     "HAS_PRIOR_GUILTY_CASE": "prior guilty case",
     "APPEARS_IN_CASE": "merged case association",
+    "CASE_RISK_ESCALATION": "case risk escalation",
+    "FASTTRACK_RECOMMENDATION": "fasttrack recommendation",
 }
 
 

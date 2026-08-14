@@ -380,6 +380,78 @@ def build_rejection(instance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return out or None
 
 
+def resolve_reviewer_notation(rejection: Optional[Dict[str, Any]], rule_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Collapse a `rejection` object (build_rejection's own output, above —
+    or an equivalent raw dict carrying the same field names straight off
+    a relationship/case, e.g. reasoning_layer/report_generation.py's
+    `rejection_raw`) down to the single {investigator_id, rejected_at,
+    reason, rule_id} notation a report reads as "who reviewed this, when,
+    and why" — the shape reasoning_layer.report_generation.
+    assemble_related_network's `related_network[*].rejection` and
+    reasoning_layer.report_llm_context's flag-family rule notation both
+    use.
+
+    build_rejection can return BOTH the human pair (rejected_by/
+    rejected_at/reason) and the cascade pair (invalidated_by_rule_id/
+    invalidated_reason/invalidated_by_investigator/invalidated_at)
+    together, if both ever had an actor (e.g. manually rejected once,
+    later cascade-invalidated by an unrelated upstream reject, or vice
+    versa) — build_rejection's own job is only picking the more recent
+    side WITHIN each pair, not choosing between the two pairs. This
+    function makes that second choice: whichever pair has the LATER
+    parsed timestamp wins; if only one pair has an actor at all, that one
+    is used regardless of timestamp parsing. revert/reinstate fields are
+    never candidates here — a revert or reinstate is exactly what flips
+    the fact back to active, so their presence never explains a fact
+    that is CURRENTLY excluded; only the reject/invalidate pair matters
+    once a caller is asking "why is this excluded right now".
+
+    `rule_id` is the fallback attribution for a plain human reject (the
+    rule this specific fact belongs to, since a manual reject has no
+    "which rule caused this" of its own — it IS the rule). A cascade
+    candidate always names its own real upstream rule_id
+    (invalidated_by_rule_id) instead, since that is a DIFFERENT, more
+    specific fact ("rejected because Rule_01 was rejected", not merely
+    "this is a Rule_02 fact").
+
+    Degrades to the all-None "not recorded" placeholder when neither
+    pair has an actor — never omitted, matching every other rejection
+    notation in this codebase (Principle 14): a gap is worth surfacing,
+    not hiding.
+    """
+    rejection = rejection or {}
+
+    human = None
+    if rejection.get("rejected_by"):
+        human = {
+            "investigator_id": rejection.get("rejected_by"),
+            "rejected_at": rejection.get("rejected_at"),
+            "reason": rejection.get("reason"),
+            "rule_id": rule_id,
+        }
+
+    cascade = None
+    if rejection.get("invalidated_by_rule_id"):
+        cascade = {
+            "investigator_id": rejection.get("invalidated_by_investigator"),
+            "rejected_at": rejection.get("invalidated_at") or rejection.get("rejected_at"),
+            "reason": rejection.get("invalidated_reason"),
+            "rule_id": rejection.get("invalidated_by_rule_id"),
+        }
+
+    if human and cascade:
+        human_ts = _parse_ts(human["rejected_at"])
+        cascade_ts = _parse_ts(cascade["rejected_at"])
+        candidate = cascade if (cascade_ts and (not human_ts or cascade_ts > human_ts)) else human
+    else:
+        candidate = human or cascade
+
+    if candidate is None:
+        return {"investigator_id": None, "rejected_at": None, "reason": None, "rule_id": rule_id}
+    return candidate
+
+
 # --- pair / single instance ------------------------------------------------
 
 
@@ -449,54 +521,19 @@ def build_grouped_instance_view(instance: Dict[str, Any]) -> Dict[str, Any]:
     gated on current status.
     """
     detail = instance.get("detail") or {}
-    raw_members = detail.get("members") or []
-    members = [build_member_view(m) for m in raw_members]
-
+    members = [build_member_view(m) for m in (detail.get("members") or [])]
     network_type = detail.get("network_type")
-    # Rule 2 (Employer Fraud Network) is the one network type whose
-    # :FraudNetwork node carries a human-readable name (n.employer_name,
-    # read onto `detail` by rules_fired.py's Rule_02 Cypher) alongside its
-    # network_key (the FEIN). Lead the title with that name so an
-    # investigator reads "Acme Staffing LLC Employer Network" rather than
-    # just "Employer Network" with the FEIN sitting alone in the secondary
-    # line below it. Other network types (Address, Identity, ...) have no
-    # employer_name in their `detail`, so they fall back to the plain
-    # "{network_type} Network" title exactly as before.
-    employer_name = detail.get("employer_name")
-    if network_type and employer_name:
-        title_primary = f"{employer_name} {network_type} Network"
-    elif network_type:
-        title_primary = f"{network_type} Network"
-    else:
-        title_primary = "Network"
-    title: Dict[str, Any] = {"primary": title_primary}
+    title: Dict[str, Any] = {"primary": f"{network_type} Network" if network_type else "Network"}
     network_key = detail.get("network_key")
     if network_key:
         title["secondary"] = network_key
-
-    # active_count/total_count HERE are scoped to THIS ONE network's own
-    # members -- distinct from build_rule_view's active_count/total_count
-    # one level up, which count NETWORKS (how many of rule 2/4/6/9's
-    # instances are active), not members within any single one of them.
-    # Rolling every network's members into one rule-wide tally hid how
-    # large/active any individual network actually was, which is what an
-    # investigator looking at ONE network card needs, not the total across
-    # every network the rule ever formed. Derived from raw_members (each
-    # carrying its own `status`, coalesced to "active" by the Cypher above)
-    # rather than from `members`, so a future change to build_member_view's
-    # output shape can never silently break this count.
-    active_count = sum(1 for m in raw_members if m.get("status", "active") == "active")
-    total_count = len(raw_members)
-
     return {
         "match_id": None,
         "status": instance.get("status", "active"),
         "confidence": instance.get("confidence", "Unresolved"),
         "corroborated": bool(instance.get("corroborated", False)),
         "title": title,
-        "member_count": total_count,
-        "active_count": active_count,
-        "total_count": total_count,
+        "member_count": len(members),
         "members": members,
         "rejection": build_rejection(instance),
     }
