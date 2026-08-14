@@ -238,6 +238,32 @@ def _single_title(instance: Dict[str, Any]) -> Dict[str, Any]:
     return {"primary": instance.get("subject_name")}
 
 
+def _format_address_network_key(network_key: Optional[str]) -> str:
+    """Format Rule 4 (Address Fraud Network) address key from pipe-delimited
+    format (e.g., "244 elmwood ave|quincy|ma|02169") into a readable format
+    (e.g., "244 Elmwood Ave, Quincy, MA 02169").
+
+    The network_key format from rules_fired.py's Rule_04 Cypher is lowercased,
+    pipe-joined, and punctuation-stripped to enable graph matching. This
+    function reconstructs the human-readable address for display.
+    """
+    if not network_key or not isinstance(network_key, str):
+        return network_key or ""
+    parts = network_key.split("|")
+    if len(parts) == 4:
+        street, city, state, zipcode = parts
+        # Title-case street and city, uppercase state
+        formatted_street = " ".join(
+            word.capitalize() for word in street.split()
+        )
+        formatted_city = " ".join(
+            word.capitalize() for word in city.split()
+        )
+        formatted_state = state.upper()
+        return f"{formatted_street}, {formatted_city}, {formatted_state} {zipcode}"
+    return network_key
+
+
 def build_title(rule_id: str, instance: Dict[str, Any]) -> Dict[str, Any]:
     """The compact `{primary, secondary?, connector?}` label a `pair` or
     `single` InstanceRow renders at its head. `secondary`/`connector`
@@ -523,9 +549,29 @@ def build_grouped_instance_view(instance: Dict[str, Any]) -> Dict[str, Any]:
     detail = instance.get("detail") or {}
     members = [build_member_view(m) for m in (detail.get("members") or [])]
     network_type = detail.get("network_type")
-    title: Dict[str, Any] = {"primary": f"{network_type} Network" if network_type else "Network"}
+    # Rule 2 (Employer Fraud Network) is the one network type whose
+    # :FraudNetwork node carries a human-readable name (n.employer_name,
+    # read onto `detail` by rules_fired.py's Rule_02 Cypher) alongside its
+    # network_key (the FEIN). Lead the title with that name so an
+    # investigator reads "Acme Staffing LLC Employer Network" rather than
+    # just "Employer Network" with the FEIN sitting alone in the secondary
+    # line below it. Other network types (Address, Identity, ...) have no
+    # employer_name in their `detail`, so they fall back to the plain
+    # "{network_type} Network" title exactly as before.
+    employer_name = detail.get("employer_name")
+    if network_type and employer_name:
+        title_primary = f"{employer_name} {network_type} Network"
+    elif network_type:
+        title_primary = f"{network_type} Network"
+    else:
+        title_primary = "Network"
+    title: Dict[str, Any] = {"primary": title_primary}
     network_key = detail.get("network_key")
     if network_key:
+        # Format address keys from pipe-delimited format into
+        # human-readable address format (Rule 4)
+        if network_type == "Address":
+            network_key = _format_address_network_key(network_key)
         title["secondary"] = network_key
     return {
         "match_id": None,
