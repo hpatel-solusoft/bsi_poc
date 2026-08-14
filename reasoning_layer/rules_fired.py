@@ -670,7 +670,20 @@ _PROP_RULES: Dict[str, str] = {
         WHERE c.case_id = $case_id
           AND c.risk_escalation_source_rule = "Rule_08_Recidivist_Escalation"
           AND coalesce(c.risk_escalation_status, "active") IN ["active", "rejected"]
-        RETURN c.risk_escalation_subject_id AS subject_id, c.case_id AS related_case_id,
+        // Same first_name/last_name lookup Rule_07's query already does off
+        // its own matched Subject node `a` — this rule instead asserts onto
+        // the :Case (see the module's "Property-writing rules" comment
+        // above _PROP_RULES), so the Subject has to be looked up separately
+        // by the id the escalation already carries, rather than falling
+        // out of the same MATCH for free. Without this, _instance()/
+        // enrich_instance() (reasoning_layer/rule_inference.py) have no
+        // first_name/last_name to build subject_name from and display_name
+        // falls back to the bare subject_id, so an investigator saw
+        // "658636801" as the title where every other single-render rule
+        // (7, 11, 12) shows a name.
+        OPTIONAL MATCH (a:Subject {subject_id: c.risk_escalation_subject_id})
+        RETURN c.risk_escalation_subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
+               c.case_id AS related_case_id,
                c.risk_escalation_confidence AS confidence, false AS corroborated,
                coalesce(c.risk_escalation_status, "active") AS status,
                toString(c.risk_escalation_asserted_at) AS asserted_at,
@@ -721,7 +734,16 @@ _PROP_RULES: Dict[str, str] = {
         MATCH (c:Case {case_id: $case_id})
         WHERE c.fasttrack_recommendation_rule = "Rule_13_FastTrack_Escalation"
           AND coalesce(c.fasttrack_recommendation_status, "active") IN ["active", "rejected"]
-        RETURN $subject_id AS subject_id, c.case_id AS related_case_id,
+        // Same reasoning as Rule_08's own comment just above: this rule
+        // asserts onto the :Case, not a Subject, so first_name/last_name
+        // have to be looked up separately off the bound $subject_id param
+        // (scope["primary_subject_id"], per build_rules_fired's own
+        // comment on that parameter) rather than falling out of a Subject
+        // MATCH this query never has. Without it, display_name() has
+        // nothing but the bare id to fall back to.
+        OPTIONAL MATCH (a:Subject {subject_id: $subject_id})
+        RETURN $subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
+               c.case_id AS related_case_id,
                c.fasttrack_recommendation_confidence AS confidence, false AS corroborated,
                coalesce(c.fasttrack_recommendation_status, "active") AS status,
                toString(c.fasttrack_recommendation_asserted_at) AS asserted_at,
