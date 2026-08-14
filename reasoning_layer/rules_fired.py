@@ -189,10 +189,35 @@ _REL_RULES: Dict[str, str] = {
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
+        // Each member carries its OWN reject/revert/cascade audit trail off
+        // its own `mm` edge -- this is a per-member fact, distinct from the
+        // network-level `rejection` computed above (which only reflects
+        // whichever scope-subject's `r` edge happened to carry audit data).
+        // Same "any audit field at all, not just current status" test as
+        // the network-level `rejection` above, for the same reason: a
+        // revert/reinstate on THIS member's edge must survive being looked
+        // at again after the member's own status has flipped back to
+        // "active". See build_member_view (reasoning_layer/rules_fired_view.py)
+        // for where this is consumed.
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
-                 status: coalesce(mm.status, "active")
+                 status: coalesce(mm.status, "active"),
+                 rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
+                                    OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
+                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                                    reason: mm.rejection_reason, reverted_by: mm.reverted_by,
+                                    reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
+                                    auto_invalidated: mm.auto_invalidated,
+                                    invalidated_by_rule_id: mm.invalidated_by_rule_id,
+                                    invalidated_reason: mm.invalidated_reason,
+                                    invalidated_by_investigator: mm.invalidated_by_investigator_id,
+                                    invalidated_at: mm.rejected_at,
+                                    reinstated_by_rule_id: mm.reinstated_by_rule_id,
+                                    reinstated_reason: mm.reinstated_reason,
+                                    reinstated_by_investigator: mm.reinstated_by_investigator_id,
+                                    reinstated_at: mm.reinstated_at}
+                              ELSE null END
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
@@ -267,10 +292,35 @@ _REL_RULES: Dict[str, str] = {
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
+        // Each member carries its OWN reject/revert/cascade audit trail off
+        // its own `mm` edge -- this is a per-member fact, distinct from the
+        // network-level `rejection` computed above (which only reflects
+        // whichever scope-subject's `r` edge happened to carry audit data).
+        // Same "any audit field at all, not just current status" test as
+        // the network-level `rejection` above, for the same reason: a
+        // revert/reinstate on THIS member's edge must survive being looked
+        // at again after the member's own status has flipped back to
+        // "active". See build_member_view (reasoning_layer/rules_fired_view.py)
+        // for where this is consumed.
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
-                 status: coalesce(mm.status, "active")
+                 status: coalesce(mm.status, "active"),
+                 rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
+                                    OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
+                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                                    reason: mm.rejection_reason, reverted_by: mm.reverted_by,
+                                    reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
+                                    auto_invalidated: mm.auto_invalidated,
+                                    invalidated_by_rule_id: mm.invalidated_by_rule_id,
+                                    invalidated_reason: mm.invalidated_reason,
+                                    invalidated_by_investigator: mm.invalidated_by_investigator_id,
+                                    invalidated_at: mm.rejected_at,
+                                    reinstated_by_rule_id: mm.reinstated_by_rule_id,
+                                    reinstated_reason: mm.reinstated_reason,
+                                    reinstated_by_investigator: mm.reinstated_by_investigator_id,
+                                    reinstated_at: mm.reinstated_at}
+                              ELSE null END
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
@@ -344,10 +394,35 @@ _REL_RULES: Dict[str, str] = {
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
+        // Each member carries its OWN reject/revert/cascade audit trail off
+        // its own `mm` edge -- this is a per-member fact, distinct from the
+        // network-level `rejection` computed above (which only reflects
+        // whichever scope-subject's `r` edge happened to carry audit data).
+        // Same "any audit field at all, not just current status" test as
+        // the network-level `rejection` above, for the same reason: a
+        // revert/reinstate on THIS member's edge must survive being looked
+        // at again after the member's own status has flipped back to
+        // "active". See build_member_view (reasoning_layer/rules_fired_view.py)
+        // for where this is consumed.
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
-                 status: coalesce(mm.status, "active")
+                 status: coalesce(mm.status, "active"),
+                 rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
+                                    OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
+                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                                    reason: mm.rejection_reason, reverted_by: mm.reverted_by,
+                                    reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
+                                    auto_invalidated: mm.auto_invalidated,
+                                    invalidated_by_rule_id: mm.invalidated_by_rule_id,
+                                    invalidated_reason: mm.invalidated_reason,
+                                    invalidated_by_investigator: mm.invalidated_by_investigator_id,
+                                    invalidated_at: mm.rejected_at,
+                                    reinstated_by_rule_id: mm.reinstated_by_rule_id,
+                                    reinstated_reason: mm.reinstated_reason,
+                                    reinstated_by_investigator: mm.reinstated_by_investigator_id,
+                                    reinstated_at: mm.reinstated_at}
+                              ELSE null END
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,
@@ -421,10 +496,35 @@ _REL_RULES: Dict[str, str] = {
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
+        // Each member carries its OWN reject/revert/cascade audit trail off
+        // its own `mm` edge -- this is a per-member fact, distinct from the
+        // network-level `rejection` computed above (which only reflects
+        // whichever scope-subject's `r` edge happened to carry audit data).
+        // Same "any audit field at all, not just current status" test as
+        // the network-level `rejection` above, for the same reason: a
+        // revert/reinstate on THIS member's edge must survive being looked
+        // at again after the member's own status has flipped back to
+        // "active". See build_member_view (reasoning_layer/rules_fired_view.py)
+        // for where this is consumed.
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
-                 status: coalesce(mm.status, "active")
+                 status: coalesce(mm.status, "active"),
+                 rejection: CASE WHEN mm.rejected_by IS NOT NULL OR mm.reverted_by IS NOT NULL
+                                    OR mm.invalidated_by_rule_id IS NOT NULL OR mm.reinstated_by_rule_id IS NOT NULL
+                              THEN {rejected_by: mm.rejected_by, rejected_at: mm.rejected_at,
+                                    reason: mm.rejection_reason, reverted_by: mm.reverted_by,
+                                    reverted_at: mm.reverted_at, revert_reason: mm.revert_reason,
+                                    auto_invalidated: mm.auto_invalidated,
+                                    invalidated_by_rule_id: mm.invalidated_by_rule_id,
+                                    invalidated_reason: mm.invalidated_reason,
+                                    invalidated_by_investigator: mm.invalidated_by_investigator_id,
+                                    invalidated_at: mm.rejected_at,
+                                    reinstated_by_rule_id: mm.reinstated_by_rule_id,
+                                    reinstated_reason: mm.reinstated_reason,
+                                    reinstated_by_investigator: mm.reinstated_by_investigator_id,
+                                    reinstated_at: mm.reinstated_at}
+                              ELSE null END
              }) AS members_raw
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                n.network_key AS related_network_key,

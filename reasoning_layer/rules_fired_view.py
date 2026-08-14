@@ -36,6 +36,7 @@ the contract: no `switch(rule_id)` anywhere, here or in the frontend.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
 from reasoning_layer import rejection
@@ -249,20 +250,24 @@ def build_title(rule_id: str, instance: Dict[str, Any]) -> Dict[str, Any]:
 
 # --- rejection -----------------------------------------------------------
 
-_REJECTION_CORE_KEYS = (
-    "rejected_by",
-    "rejected_at",
-    "reason",
-    "reverted_by",
-    "reverted_at",
-    "revert_reason",
-)
-_REJECTION_AUDIT_KEYS = (
+# Two independent "which side won" pairs live inside one `rejection` blob:
+#   1. the human action pair   -> reject (rejected_*) vs revert (reverted_*)
+#   2. the cascade action pair -> auto-invalidate (invalidated_*) vs
+#                                  auto-reinstate (reinstated_*)
+# Each pair is a toggle, not an accumulation: whichever side happened LAST
+# is the side that describes the fact's current state, and is the only
+# side that should reach the frontend. Showing both (the old behaviour)
+# reads as "rejected AND reverted at once", which is never true.
+_REJECT_KEYS = ("rejected_by", "rejected_at", "reason")
+_REVERT_KEYS = ("reverted_by", "reverted_at", "revert_reason")
+_INVALIDATE_KEYS = (
     "auto_invalidated",
     "invalidated_by_rule_id",
     "invalidated_reason",
     "invalidated_by_investigator",
     "invalidated_at",
+)
+_REINSTATE_KEYS = (
     "reinstated_by_rule_id",
     "reinstated_reason",
     "reinstated_by_investigator",
@@ -270,11 +275,54 @@ _REJECTION_AUDIT_KEYS = (
 )
 
 
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Best-effort ISO-8601 parse. Returns None (never raises) for
+    anything missing or malformed, so a bad/absent timestamp just loses
+    that side of the comparison instead of blowing up the response."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _more_recent_key_set(
+    raw: Dict[str, Any],
+    first_at_key: str,
+    first_keys: tuple,
+    second_at_key: str,
+    second_keys: tuple,
+) -> tuple:
+    """Pick whichever side of a reject/revert (or invalidate/reinstate)
+    pair happened most recently, and return only ITS keys. If only one
+    side has ever fired, that side wins by default. If neither has a
+    parseable timestamp, falls back to "whichever side is present"
+    (first, then second) rather than silently dropping real data."""
+    first_at = _parse_ts(raw.get(first_at_key))
+    second_at = _parse_ts(raw.get(second_at_key))
+
+    if first_at and second_at:
+        return first_keys if first_at >= second_at else second_keys
+    if first_at:
+        return first_keys
+    if second_at:
+        return second_keys
+    # No parseable timestamp on either side: fall back to presence so a
+    # legacy/malformed record doesn't lose its only audit fields.
+    if any(raw.get(k) not in (None, "") for k in first_keys):
+        return first_keys
+    return second_keys
+
+
 def build_rejection(instance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The `rejection` audit object an instance carries, whenever it has
-    one — who rejected/reverted it, when, and why (plus the equivalent
-    cascade fields: which rule auto-invalidated or reinstated it, and
-    who/when for that).
+    one — but trimmed to ONLY the most recently-acted-on side of each
+    pair (see the comment above _REJECT_KEYS): reject vs revert for the
+    human action, invalidate vs reinstate for the cascade action. A fact
+    that was reverted and then re-rejected shows the reject fields only;
+    one that was auto-invalidated and later reinstated shows the
+    reinstate fields only — never both sides of the same toggle at once.
 
     Deliberately NOT gated on `instance.get("status") == "rejected"`
     (an earlier version of this function was, and that gate was itself
@@ -288,14 +336,27 @@ def build_rejection(instance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     trail at all). The correct question is "does this instance have ANY
     audit fields at all" — which `out or None` below already answers on
     its own — not "is it currently rejected". Returns None only when
-    every one of _REJECTION_CORE_KEYS/_REJECTION_AUDIT_KEYS is
-    genuinely absent, so the frontend's `if rejection:` still never has
-    to distinguish "never touched" from "touched but empty"."""
+    both pairs are genuinely untouched, so the frontend's
+    `if rejection:` still never has to distinguish "never touched" from
+    "touched but empty"."""
     raw = instance.get("rejection") or {}
-    out = {k: raw[k] for k in _REJECTION_CORE_KEYS if raw.get(k) not in (None, "")}
-    for k in _REJECTION_AUDIT_KEYS:
-        if raw.get(k) not in (None, ""):
-            out[k] = raw[k]
+    if not raw:
+        return None
+
+    out: Dict[str, Any] = {}
+
+    if raw.get("rejected_at") or raw.get("reverted_at"):
+        keys = _more_recent_key_set(raw, "rejected_at", _REJECT_KEYS, "reverted_at", _REVERT_KEYS)
+        for k in keys:
+            if raw.get(k) not in (None, ""):
+                out[k] = raw[k]
+
+    if raw.get("invalidated_at") or raw.get("reinstated_at"):
+        keys = _more_recent_key_set(raw, "invalidated_at", _INVALIDATE_KEYS, "reinstated_at", _REINSTATE_KEYS)
+        for k in keys:
+            if raw.get(k) not in (None, ""):
+                out[k] = raw[k]
+
     return out or None
 
 
@@ -320,20 +381,35 @@ def build_flat_instance_view(rule_id: str, instance: Dict[str, Any]) -> Dict[str
 
 # --- grouped (network) instance -------------------------------------------
 
-_MEMBER_STRUCTURAL_KEYS = {"subject_id", "first_name", "last_name", "match_id", "status"}
+_MEMBER_STRUCTURAL_KEYS = {"subject_id", "first_name", "last_name", "match_id", "status", "rejection"}
 
 
 def build_member_view(member: Dict[str, Any]) -> Dict[str, Any]:
     """One row inside a `grouped` instance's `members` list — the exact
     same single-shaped object a top-level `single` instance is, so the
     frontend's member row and its `single` InstanceRow are ONE
-    component, per the contract."""
+    component, per the contract.
+
+    Carries its OWN `rejection` audit object, built the same way (and
+    trimmed to the same "most recently-acted-on side wins" rule, see
+    build_rejection) as every other instance's — a member rejected by a
+    CASCADE from a different rule (e.g. this network member's row was
+    invalidated because Rule 1 got rejected) still needs its own
+    rejected_by/reverted_by/invalidated_by_rule_id/reinstated_by_rule_id
+    trail, not just the network-level `rejection` one level up. That
+    outer `rejection` reflects only ONE scope subject's own edge into
+    the network — it is not a substitute for a specific member's own
+    audit trail, cascaded or direct, which is why this is read off
+    member["rejection"] (reasoning_layer/rules_fired.py's Cypher now
+    assembles that per-member, off that member's own `mm` edge) rather
+    than inherited from the parent instance."""
     member_detail = {k: v for k, v in member.items() if k not in _MEMBER_STRUCTURAL_KEYS}
     return {
         "match_id": member.get("match_id"),
         "status": member.get("status", "active"),
         "title": {"primary": display_name(member.get("first_name"), member.get("last_name"), member.get("subject_id"))},
         "chips": build_chips(member_detail),
+        "rejection": build_rejection(member),
     }
 
 
