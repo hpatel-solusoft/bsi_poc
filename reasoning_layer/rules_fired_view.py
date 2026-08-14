@@ -324,6 +324,22 @@ def build_rejection(instance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     one that was auto-invalidated and later reinstated shows the
     reinstate fields only — never both sides of the same toggle at once.
 
+    Each pair only "fires" when it has a genuine ACTOR on at least one
+    side — rejected_by/reverted_by for the human pair,
+    invalidated_by_rule_id/reinstated_by_rule_id for the cascade pair —
+    not merely a timestamp. This matters because reasoning_layer/
+    rules_fired.py's Cypher aliases `invalidated_at` to the same
+    underlying `rejected_at` edge property (there is no separate
+    invalidated_at column), so a network edge that was cascade-
+    invalidated (never directly human-rejected) still carries a bare
+    `rejected_at` value with no `rejected_by`/`reason` next to it. Gating
+    the human pair on actor presence keeps that orphaned timestamp from
+    masquerading as a real reject action and showing up alongside the
+    cascade pair's own (correctly-picked) fields — which is exactly the
+    "two timestamps for one event" bug this guards against. A pair with
+    a real actor on either side still picks its most-recent-by-timestamp
+    side exactly as before.
+
     Deliberately NOT gated on `instance.get("status") == "rejected"`
     (an earlier version of this function was, and that gate was itself
     the bug: a revert or a cascade reinstate flips status back to
@@ -336,22 +352,26 @@ def build_rejection(instance: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     trail at all). The correct question is "does this instance have ANY
     audit fields at all" — which `out or None` below already answers on
     its own — not "is it currently rejected". Returns None only when
-    both pairs are genuinely untouched, so the frontend's
-    `if rejection:` still never has to distinguish "never touched" from
-    "touched but empty"."""
+    neither pair has a real actor, so the frontend's `if rejection:`
+    still never has to distinguish "never touched" from "touched but
+    empty"."""
     raw = instance.get("rejection") or {}
     if not raw:
         return None
 
     out: Dict[str, Any] = {}
 
-    if raw.get("rejected_at") or raw.get("reverted_at"):
+    has_reject_actor = raw.get("rejected_by") not in (None, "")
+    has_revert_actor = raw.get("reverted_by") not in (None, "")
+    if has_reject_actor or has_revert_actor:
         keys = _more_recent_key_set(raw, "rejected_at", _REJECT_KEYS, "reverted_at", _REVERT_KEYS)
         for k in keys:
             if raw.get(k) not in (None, ""):
                 out[k] = raw[k]
 
-    if raw.get("invalidated_at") or raw.get("reinstated_at"):
+    has_invalidate_actor = raw.get("invalidated_by_rule_id") not in (None, "")
+    has_reinstate_actor = raw.get("reinstated_by_rule_id") not in (None, "")
+    if has_invalidate_actor or has_reinstate_actor:
         keys = _more_recent_key_set(raw, "invalidated_at", _INVALIDATE_KEYS, "reinstated_at", _REINSTATE_KEYS)
         for k in keys:
             if raw.get(k) not in (None, ""):
