@@ -449,19 +449,54 @@ def build_grouped_instance_view(instance: Dict[str, Any]) -> Dict[str, Any]:
     gated on current status.
     """
     detail = instance.get("detail") or {}
-    members = [build_member_view(m) for m in (detail.get("members") or [])]
+    raw_members = detail.get("members") or []
+    members = [build_member_view(m) for m in raw_members]
+
     network_type = detail.get("network_type")
-    title: Dict[str, Any] = {"primary": f"{network_type} Network" if network_type else "Network"}
+    # Rule 2 (Employer Fraud Network) is the one network type whose
+    # :FraudNetwork node carries a human-readable name (n.employer_name,
+    # read onto `detail` by rules_fired.py's Rule_02 Cypher) alongside its
+    # network_key (the FEIN). Lead the title with that name so an
+    # investigator reads "Acme Staffing LLC Employer Network" rather than
+    # just "Employer Network" with the FEIN sitting alone in the secondary
+    # line below it. Other network types (Address, Identity, ...) have no
+    # employer_name in their `detail`, so they fall back to the plain
+    # "{network_type} Network" title exactly as before.
+    employer_name = detail.get("employer_name")
+    if network_type and employer_name:
+        title_primary = f"{employer_name} {network_type} Network"
+    elif network_type:
+        title_primary = f"{network_type} Network"
+    else:
+        title_primary = "Network"
+    title: Dict[str, Any] = {"primary": title_primary}
     network_key = detail.get("network_key")
     if network_key:
         title["secondary"] = network_key
+
+    # active_count/total_count HERE are scoped to THIS ONE network's own
+    # members -- distinct from build_rule_view's active_count/total_count
+    # one level up, which count NETWORKS (how many of rule 2/4/6/9's
+    # instances are active), not members within any single one of them.
+    # Rolling every network's members into one rule-wide tally hid how
+    # large/active any individual network actually was, which is what an
+    # investigator looking at ONE network card needs, not the total across
+    # every network the rule ever formed. Derived from raw_members (each
+    # carrying its own `status`, coalesced to "active" by the Cypher above)
+    # rather than from `members`, so a future change to build_member_view's
+    # output shape can never silently break this count.
+    active_count = sum(1 for m in raw_members if m.get("status", "active") == "active")
+    total_count = len(raw_members)
+
     return {
         "match_id": None,
         "status": instance.get("status", "active"),
         "confidence": instance.get("confidence", "Unresolved"),
         "corroborated": bool(instance.get("corroborated", False)),
         "title": title,
-        "member_count": len(members),
+        "member_count": total_count,
+        "active_count": active_count,
+        "total_count": total_count,
         "members": members,
         "rejection": build_rejection(instance),
     }

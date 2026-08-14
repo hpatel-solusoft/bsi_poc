@@ -242,6 +242,14 @@ _REL_RULES: Dict[str, str] = {
                status AS status, toString(asserted_at_raw) AS asserted_at, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
+                // Read straight off the :FraudNetwork node -- rule_02's own
+                // Cypher writes this ON CREATE from the :Employer node it
+                // matched (e.employer_name), never hardcoded. Lets the
+                // grouped-instance title (rules_fired_view.py's
+                // build_grouped_instance_view) show the employer's NAME
+                // next to the FEIN that network_key already carries,
+                // instead of the FEIN standing in alone for the employer.
+                employer_name: n.employer_name,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
         ORDER BY related_network_key
 """,
