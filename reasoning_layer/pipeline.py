@@ -450,6 +450,95 @@ def _merge_rules_fired(blocks: List[List[Dict[str, Any]]]) -> List[Dict[str, Any
     return merged
 
 
+def _instance_touches_direct_subject(instance: Dict[str, Any], direct_subject_ids: set) -> bool:
+    """
+    Whether `instance` (one row of a rules_fired entry's `instances` list,
+    shaped by rules_fired._instance) involves at least one subject who is
+    actually ON this case's own Workfolder — as opposed to a subject only
+    present in the merge because _reasoning_population_for_case pulled
+    them in one hop out so a Wave 2 network rule (2/4/6/8/9) had both
+    endpoints reasoned (see that function's own docstring for why that
+    expansion exists).
+
+    Without this check, a symmetric pair rule (1/3/5) that ran once per
+    subject in the EXPANDED population can surface a pair between two
+    people who are BOTH only one-hop-in — e.g. two co-workers of this
+    case's own subject, neither of whom is actually on this case — which
+    reads to an investigator as "this case's data" when it is really a
+    fact about two other subjects' own, different cases that happen to
+    share an employer with someone here. Concretely: reasoning case
+    658407433 (John Smith) pulls in Kevin Nunes and Marcus Alves one hop
+    out via BrightPath Home Health LLC so Rule 2 can fire — but Kevin's
+    and Marcus's own per-subject Rule 1 runs also each report a
+    Kevin<->Marcus pair, which has nothing to do with John Smith's case
+    and must not be shown on it.
+
+    Checks every place a subject id can appear on an instance dict: the
+    flat pair endpoints (subject_id/related_subject_id), the
+    reject/revert targeting endpoints (subject_id_a/subject_id_b — same
+    values, different family, see rejection.instance_endpoints), and a
+    network family's member list (detail.members[*].subject_id) — a
+    network instance is kept whenever ANY of its members is a direct
+    subject, so the OTHER members (the actual network detail) still
+    render, exactly as they do today for Rule 2's John+Kevin network.
+    """
+    if not direct_subject_ids:
+        # No resolved direct subjects should not happen here (an empty
+        # case_id already returns early in run_pipeline_for_case) — but
+        # never suppress everything on an unexpectedly empty set rather
+        # than a deliberate one.
+        return True
+    for key in ("subject_id", "related_subject_id", "subject_id_a", "subject_id_b"):
+        value = instance.get(key)
+        if value and str(value) in direct_subject_ids:
+            return True
+    detail = instance.get("detail") or {}
+    for member in detail.get("members") or []:
+        member_id = member.get("subject_id") if isinstance(member, dict) else None
+        if member_id and str(member_id) in direct_subject_ids:
+            return True
+    return False
+
+
+def _filter_to_direct_subjects(
+    merged: List[Dict[str, Any]], direct_subject_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Drop any instance that involves ONLY subjects pulled in by the
+    one-hop reasoning-population expansion and not this case's own
+    direct subject(s) — see _instance_touches_direct_subject's docstring
+    for exactly why that leak exists and what it looks like.
+
+    Runs AFTER _merge_rules_fired, on the full merged 14-entry block, so
+    every derived rollup (fired/matched/evidence_count/confidence/
+    corroborated) is recomputed from the same instances the trimmed list
+    now holds — an investigator must never see a rule reported as fired
+    (or a confidence level) that came only from an instance just removed
+    for not belonging to this case. `status`/`rejected_count`/
+    `revertable` are left as _merge_rules_fired set them: those already
+    come from this case's own primary-subject block (the first in
+    `blocks`), whose instances — by construction of every _REL_RULES
+    query's own `WHERE subject_id = $subject_id` clause — always involve
+    a direct subject and are therefore never removed here.
+    """
+    ids = {str(s) for s in direct_subject_ids if s}
+    filtered: List[Dict[str, Any]] = []
+    for entry in merged:
+        entry = dict(entry)
+        instances = [i for i in entry.get("instances", []) if _instance_touches_direct_subject(i, ids)]
+        confidences = [i.get("confidence") for i in instances if i.get("confidence")]
+        entry["instances"] = instances
+        entry["evidence_count"] = len(instances)
+        entry["fired"] = len(instances) > 0
+        entry["matched"] = len(instances) > 0
+        entry["confidence"] = (
+            max(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 0)) if confidences else "Unresolved"
+        )
+        entry["corroborated"] = any(i.get("corroborated") for i in instances)
+        filtered.append(entry)
+    return filtered
+
+
 def run_pipeline_for_case(case_id: str, force: bool = False, reason: str = "etl_resync") -> dict:
     """
     Run the pipeline for EVERY subject on the case and return one merged
@@ -507,6 +596,15 @@ def run_pipeline_for_case(case_id: str, force: bool = False, reason: str = "etl_
             ran.append({"subject_id": subject_id, "pipeline_status": "failed", "error": str(exc)})
 
     merged = _merge_rules_fired(blocks)
+
+    # Trim back down to this case's own subject(s): subject_ids above is
+    # deliberately WIDER than direct_subject_ids (one-hop expansion so
+    # Wave 2 network rules can fire — see _reasoning_population_for_case),
+    # but that expansion must never leak a fact purely between two other,
+    # unrelated subjects into this case's rules_fired. See
+    # _filter_to_direct_subjects / _instance_touches_direct_subject.
+    merged = _filter_to_direct_subjects(merged, direct_subject_ids)
+
     fired = sum(1 for e in merged if e.get("fired"))
     logger.info(
         "run_pipeline_for_case: case_id=%s direct_subjects=%d reasoned_subjects=%d " "rules_fired=%d/%d",
