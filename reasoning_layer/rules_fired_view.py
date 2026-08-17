@@ -566,13 +566,17 @@ def build_grouped_instance_view(instance: Dict[str, Any]) -> Dict[str, Any]:
     else:
         title_primary = "Network"
     title: Dict[str, Any] = {"primary": title_primary}
-    network_key = detail.get("network_key")
-    if network_key:
-        # Format address keys from pipe-delimited format into
-        # human-readable address format (Rule 4)
-        if network_type == "Address":
-            network_key = _format_address_network_key(network_key)
-        title["secondary"] = network_key
+    # For Rule 09 (PCA CheckSplit), use complaint_no if available
+    if network_type == "CheckSplit" and detail.get("complaint_no"):
+        title["secondary"] = detail.get("complaint_no")
+    else:
+        network_key = detail.get("network_key")
+        if network_key:
+            # Format address keys from pipe-delimited format into
+            # human-readable address format (Rule 4)
+            if network_type == "Address":
+                network_key = _format_address_network_key(network_key)
+            title["secondary"] = network_key
     return {
         "match_id": None,
         "status": instance.get("status", "active"),

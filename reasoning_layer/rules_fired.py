@@ -85,8 +85,7 @@ _REL_RULES: Dict[str, str] = {
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
-               {street: ad.street, city: ad.city, state: ad.state, zip: ad.zip,
-                address_key: coalesce(ad.address_key, r.address_key)} AS detail
+               {street: ad.street, city: ad.city, state: ad.state, zip: ad.zip, address_key: coalesce(ad.address_key, r.address_key)} AS detail
         ORDER BY subject_id, related_subject_id
 """,
     "Rule_05_Alias_Identity": """
@@ -566,17 +565,9 @@ _REL_RULES: Dict[str, str] = {
         WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, m, mm,
              head(collect({complaint_no: mc.complaint_number,
                            allegation_type: mal.allegation_type})) AS mctx
-        // Each member carries its OWN reject/revert/cascade audit trail off
-        // its own `mm` edge -- this is a per-member fact, distinct from the
-        // network-level `rejection` computed above (which only reflects
-        // whichever scope-subject's `r` edge happened to carry audit data).
-        // Same "any audit field at all, not just current status" test as
-        // the network-level `rejection` above, for the same reason: a
-        // revert/reinstate on THIS member's edge must survive being looked
-        // at again after the member's own status has flipped back to
-        // "active". See build_member_view (reasoning_layer/rules_fired_view.py)
-        // for where this is consumed.
-        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, collect(DISTINCT {
+        // Get the complaint number for the network's primary case
+        OPTIONAL MATCH (nc:Case {case_id: n.network_key})
+        WITH a, n, confidence, corroborated, status, asserted_at_raw, rejection, nc, collect(DISTINCT {
                  subject_id: m.subject_id, first_name: m.first_name, last_name: m.last_name,
                  complaint_no: mctx.complaint_no, allegation_type: mctx.allegation_type,
                  status: coalesce(mm.status, "active"),
@@ -608,6 +599,7 @@ _REL_RULES: Dict[str, str] = {
                status AS status, toString(asserted_at_raw) AS asserted_at, rejection AS rejection,
                {network_type: n.network_type, network_key: n.network_key,
                 formed_by_rule: n.formed_by_rule,
+                complaint_no: nc.complaint_number,
                 members: [x IN members_raw WHERE x.subject_id IS NOT NULL]} AS detail
         ORDER BY related_network_key
 """,
@@ -623,8 +615,8 @@ _REL_RULES: Dict[str, str] = {
                {rejected_by: r.rejected_by, rejected_at: r.rejected_at,
                 reason: r.rejection_reason, reverted_by: r.reverted_by,
                 reverted_at: r.reverted_at, revert_reason: r.revert_reason} AS rejection,
-               {complaint_no: c.complaint_number, outcome: r.outcome,
-                date_closed: r.date_closed} AS detail
+               {complaint_no: c.complaint_number, date_closed: r.date_closed,
+                outcome: r.outcome, disposition: c.disposition} AS detail
         ORDER BY subject_id, related_case_id
 """,
     "Rule_14_Confirmation_Elevation": """
@@ -662,6 +654,20 @@ _PROP_RULES: Dict[str, str] = {
           // the block — and with it the row an investigator would revert
           // from. Both states are matched; the status says which.
           AND (a.is_cross_case = true OR a.cross_case_rejected = true)
+        // For each hub case ID, get complaint numbers and filter out own case
+        // unless subject is a co-subject in that case
+        UNWIND coalesce(a.hub_case_ids, []) AS hub_case_id
+        OPTIONAL MATCH (hc:Case {case_id: hub_case_id})
+        // Determine if this is the subject's own case and if they're a co-subject
+        WITH a, hub_case_id, hc,
+             CASE WHEN hub_case_id = $case_id THEN true ELSE false END AS is_own_case,
+             EXISTS {
+               MATCH (a)-[r:IS_CO_SUBJECT_WITH]-(other:Subject)
+               WHERE r.case_id = hub_case_id
+             } AS is_co_subject_in_case
+        // Include only if: not own case OR (own case AND is co-subject)
+        WHERE NOT is_own_case OR (is_own_case AND is_co_subject_in_case)
+        WITH a, collect(hc.complaint_number) AS complaint_numbers
         RETURN a.subject_id AS subject_id, a.first_name AS first_name, a.last_name AS last_name,
                a.cross_case_confidence AS confidence, false AS corroborated,
                CASE WHEN a.cross_case_rejected = true THEN "rejected" ELSE "active" END AS status,
@@ -670,7 +676,7 @@ _PROP_RULES: Dict[str, str] = {
                 reason: a.cross_case_rejection_reason, reverted_by: a.cross_case_reverted_by,
                 reverted_at: a.cross_case_reverted_at,
                 revert_reason: a.cross_case_revert_reason} AS rejection,
-               {hub_case_ids: coalesce(a.hub_case_ids, [])} AS detail
+               {hub_case_ids: [c IN complaint_numbers WHERE c IS NOT NULL]} AS detail
         ORDER BY subject_id
 """,
     "Rule_08_Recidivist_Escalation": """
