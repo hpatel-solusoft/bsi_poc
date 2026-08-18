@@ -114,7 +114,7 @@ ORDER BY similarity_score DESC, case_id ASC
 """
 
 
-def find_structural_matches(case_id: str, limit: int = 25) -> dict:
+def find_structural_matches(case_id: str, limit: int = 5) -> dict:
     """
     Return structurally similar cases for `case_id`, scored 0.5–1.0.
 
