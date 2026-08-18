@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional
 from core import graph_ingest_repository
 from etl import graph_sync
 from reasoning_layer import pipeline
+from appworks.appworks_auth import AppworksSessionExpiredError, set_request_token
 
 logger = logging.getLogger(__name__)
 
@@ -81,22 +82,41 @@ def _subjects_for_case(case_id: str) -> List[str]:
     return pipeline.subjects_for_case(case_id)
 
 
-def load_case(case_id: str) -> Dict[str, Any]:
+def load_case(case_id: str, username: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     """
     Phase 1 of an ingest: fetch from AppWorks, write to Neo4j. Retried
     with backoff on any exception, because the failure modes here are
-    overwhelmingly transient (auth token expiry, a slow AppWorks
-    relationship traversal, a network blip mid-fetch).
+    overwhelmingly transient (a slow AppWorks relationship traversal, a
+    network blip mid-fetch) — EXCEPT an expired/invalid caller token
+    (AppworksSessionExpiredError), which fails fast instead: retrying
+    with the same rejected token three times wastes 7 seconds
+    (_BACKOFF_SECONDS) to fail identically each time, and hammering
+    AppWorks with a token it has already rejected is not a "transient"
+    situation retry logic should paper over.
+
+    username is the investigator/caller whose request triggered this
+    ingest (threaded from POST /graph/ingest — see api/models.py's
+    AuthFieldsMixin), stored on graph_ingest_state purely for
+    attribution. None for the CLI path (etl/run_sync.py), which has no
+    request-scoped caller.
+
+    token is that same caller's AppWorks SAMLart. Set here (once, before
+    the retry loop) via appworks_auth.set_request_token so every AppWorks
+    call graph_sync.sync_case makes for this case uses the caller's own
+    identity, not the service-account fallback. None for the CLI path,
+    which falls back to the service-account login exactly as before this
+    change — see appworks/appworks_auth.py's module docstring.
 
     Returns {case_id, status, counts, attempts, error}. Never raises —
     a bad case in a backfill of eighteen must not take down the other
     seventeen. The caller decides what a failure means.
     """
+    set_request_token(token)
     last_error: Optional[str] = None
 
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            graph_ingest_repository.mark_started(case_id)
+            graph_ingest_repository.mark_started(case_id, username=username)
             counts = graph_sync.sync_case(case_id)
             graph_ingest_repository.mark_loaded(case_id, counts)
             return {
@@ -106,6 +126,14 @@ def load_case(case_id: str) -> Dict[str, Any]:
                 "attempts": attempt,
                 "error": None,
             }
+        except AppworksSessionExpiredError as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "ingest_service: load FAILED case_id=%s — AppWorks session expired, not retrying: %s",
+                case_id,
+                last_error,
+            )
+            break
         except Exception as exc:  # noqa: BLE001 — see docstring: isolate per-case failure
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
@@ -118,7 +146,7 @@ def load_case(case_id: str) -> Dict[str, Any]:
             if attempt < _MAX_ATTEMPTS:
                 time.sleep(_BACKOFF_SECONDS[attempt - 1])
 
-    logger.error("ingest_service: load GAVE UP case_id=%s after %d attempts", case_id, _MAX_ATTEMPTS)
+    logger.error("ingest_service: load GAVE UP case_id=%s", case_id)
     graph_ingest_repository.mark_failed(case_id, last_error or "unknown error")
     return {
         "case_id": case_id,
@@ -129,7 +157,7 @@ def load_case(case_id: str) -> Dict[str, Any]:
     }
 
 
-def reason_case(case_id: str) -> Dict[str, Any]:
+def reason_case(case_id: str, username: Optional[str] = None) -> Dict[str, Any]:
     """
     Phase 2 of an ingest: run the reasoning pipeline for this case's
     subjects.
@@ -143,13 +171,16 @@ def reason_case(case_id: str) -> Dict[str, Any]:
     inferences over today's data. This is the same "explicitly cleared"
     path Section 9.5 defines for the reload banner, reached from ETL
     rather than from a human clicking reload.
+
+    username is passed straight through to pipeline.run_pipeline for
+    attribution on pipeline_execution_state — see load_case's docstring.
     """
     subject_ids = _subjects_for_case(case_id)
     runs: List[Dict[str, Any]] = []
 
     for subject_id in subject_ids:
         try:
-            envelope = pipeline.run_pipeline(case_id, subject_id, force=True)
+            envelope = pipeline.run_pipeline(case_id, subject_id, force=True, username=username)
             result = envelope["result"]
             fired = [r["rule_id"] for r in result.get("rules_fired", []) if r["fired"]]
             runs.append(
@@ -192,7 +223,12 @@ def reason_case(case_id: str) -> Dict[str, Any]:
     }
 
 
-def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
+def ingest(
+    case_ids: List[str],
+    run_reasoning: bool = True,
+    username: Optional[str] = None,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     The single entry point behind both POST /graph/ingest and the CLI.
 
@@ -205,16 +241,28 @@ def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
     than an obvious failure. It is reported as failed and the rest of the
     batch proceeds.
 
+    username is the investigator/caller whose request triggered this
+    ingest (POST /graph/ingest's request model — see api/models.py's
+    AuthFieldsMixin), threaded through both phases purely for
+    attribution on graph_ingest_state and pipeline_execution_state. None
+    for the CLI path (etl/run_sync.py).
+
+    token is that same caller's AppWorks SAMLart, threaded to load_case
+    for every case in this batch — see load_case's own docstring. None
+    for the CLI path, which uses the service-account fallback login
+    unchanged (see appworks/appworks_auth.py).
+
     Returns a report the caller can log, return over HTTP, or print.
     """
     logger.info(
-        "ingest_service: START cases=%d run_reasoning=%s",
+        "ingest_service: START cases=%d run_reasoning=%s username=%s",
         len(case_ids),
         run_reasoning,
+        username,
     )
 
     # --- Phase 1: load everything ---
-    load_results = [load_case(case_id) for case_id in case_ids]
+    load_results = [load_case(case_id, username=username, token=token) for case_id in case_ids]
     loaded = [r["case_id"] for r in load_results if r["status"] == "loaded"]
     load_failed = [r for r in load_results if r["status"] == "failed"]
 
@@ -223,7 +271,7 @@ def ingest(case_ids: List[str], run_reasoning: bool = True) -> Dict[str, Any]:
     # --- Phase 2: reason over the now-complete graph ---
     pipeline_results: List[Dict[str, Any]] = []
     if run_reasoning:
-        pipeline_results = [reason_case(case_id) for case_id in loaded]
+        pipeline_results = [reason_case(case_id, username=username) for case_id in loaded]
 
     report = {
         "cases_requested": len(case_ids),

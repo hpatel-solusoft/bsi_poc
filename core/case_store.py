@@ -407,11 +407,17 @@ def get_case_ai_summary_cache_updated_at(case_id: str) -> Optional[Any]:
     return cached_session.get("updated_at") if cached_session else None
 
 
-def persist_case_session(case_id: str, ai_summary: Dict[str, Any]) -> None:
+def persist_case_session(case_id: str, ai_summary: Dict[str, Any], username: Optional[str] = None) -> None:
     """
     Write-through the current merged ai_summary to the PostgreSQL fallback
     store. Best-effort — see case_session_repository.upsert_case_session
     for the failure policy (a write failure here never fails the request).
+
+    username is the investigator/caller who triggered this write (every
+    route now carries it on its request model — see api/models.py's
+    AuthFieldsMixin) and is passed straight through to
+    case_session_repository.upsert_case_session for attribution. None is
+    accepted for an internal caller with no request-scoped username.
 
     Every caller (intake, similar_cases, risk_assessment, plan, copilot)
     runs through core.persistence_filters.strip_graph_derived_fields
@@ -431,6 +437,7 @@ def persist_case_session(case_id: str, ai_summary: Dict[str, Any]) -> None:
         ai_summary=ai_summary_to_persist,
         provenance_trail=ai_summary_to_persist.get("provenance_trail", []),
         source="appworks_fetch",
+        username=username,
     )
 
 
@@ -588,6 +595,7 @@ def store_copilot_turn(
     question: str,
     answer: str,
     sources_cited: Optional[List[Dict[str, Any]]] = None,
+    username: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     """
     Append the latest Copilot exchange to the server-owned case history:
@@ -599,9 +607,16 @@ def store_copilot_turn(
     `answer` (e.g. sources_cited_details from api/server.py) and is
     written only against the assistant turn — the user's question never
     has citations of its own.
+
+    username is the investigator who asked the question (POST /copilot's
+    request model — see api/models.py's AuthFieldsMixin) and is written
+    to both the user and assistant turn of this exchange, for
+    attribution.
     """
-    conversation_repository.append_turn(case_id, "user", question)
-    conversation_repository.append_turn(case_id, "assistant", answer, sources_cited=sources_cited)
+    conversation_repository.append_turn(case_id, "user", question, username=username)
+    conversation_repository.append_turn(
+        case_id, "assistant", answer, sources_cited=sources_cited, username=username
+    )
 
     history_entry = COPILOT_HISTORY_STORE.get(case_id) or {"case_id": case_id, "messages": []}
     if history_entry.get("case_id") != case_id:

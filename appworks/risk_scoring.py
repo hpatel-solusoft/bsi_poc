@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from appworks.appworks_auth import fetch
+from appworks.appworks_auth import AppworksSessionExpiredError, fetch
 from appworks.appworks_paths import AppWorksPaths
 
 # ── NEW: Architecture Standard Imports ───────────────────────
@@ -166,6 +166,8 @@ def _fetch_child_rules_breakpoints(
         named = [t for t in thresholds if "condition" in t]
         thresholds = numeric + named
 
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.warning(f"Child Rules fetch failed for item {item_id}: {e}")
 
@@ -213,6 +215,8 @@ def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTr
                     seen.add(wf_id)
                     tracker.add_source("Workfolder", wf_id)  # Track the discovered historical case
                     total += 1
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.warning(f"Similar case volume count failed: {e}")
     return total
@@ -292,6 +296,12 @@ def _build_case_context(
         primary_in_prior_cases = sum(
             1 for r in prior_rows if r.get("Properties", {}).get("Subjects_IsPrimarySubject")
         )
+    except AppworksSessionExpiredError:
+        # Not a "fall back and continue" situation: every other AppWorks
+        # call in this risk assessment carries the same rejected token
+        # and would fail identically. Let it propagate rather than
+        # silently scoring this case on incomplete data.
+        raise
     except Exception as e:
         logger.warning(f"Failed fallback subject history context: {e}")
 
@@ -316,6 +326,8 @@ def _build_case_context(
             _safe_float(i.get("Properties", {}).get("Financial_Calculated")) for i in fin_items
         )
         total_ordered = sum(_safe_float(i.get("Properties", {}).get("Financial_Ordered")) for i in fin_items)
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.warning(f"Failed fallback financial context: {e}")
 
@@ -337,6 +349,8 @@ def _build_case_context(
                 if not date_closed and status in ("open", "active", ""):
                     has_open_allegation = True
                     break
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.warning(f"Failed fallback allegation severity: {e}")
 
@@ -532,6 +546,8 @@ def get_risk_rules(**kwargs) -> Dict:
     try:
         rules_out = _fetch_risk_rules(tracker=tracker)
 
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.error(f"fetch_risk_rules failed: {e}")
 
@@ -640,6 +656,8 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
                         if "Rules" in lk and isinstance(lv, dict) and lv.get("href"):
                             child_href = lv["href"]
                             break
+                except AppworksSessionExpiredError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Row {idx} ({rule_id}): item fetch failed: {e}")
 
@@ -669,6 +687,8 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
                 }
             )
 
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.error(f"FraudRiskRules fetch failed: {e}")
 

@@ -4,6 +4,9 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from appworks import appworks_auth
+from appworks.appworks_auth import AppworksSessionExpiredError
+
 MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "../config/manifest.yaml")
 
 
@@ -123,10 +126,35 @@ class SemanticDispatcher:
         try:
 
             # 1. Safely handle cases where execution_context is None
-            context_kwargs = execution_context or {}
+            context_kwargs = dict(execution_context or {})
 
-            # 2. Unpack BOTH the LLM's params AND the backend context
+            # 2. AppWorks identity is transport plumbing, not tool data:
+            #    consume it here rather than forwarding it. Every
+            #    registered tool function's signature is a data contract
+            #    (case_id, fraud_types, ai_summary, ...) — an unexpected
+            #    `token` kwarg would break any of them that don't happen
+            #    to declare **kwargs (several in appworks_services.py
+            #    don't). set_request_token makes it available to
+            #    appworks_auth.fetch/fetch_list for every AppWorks call
+            #    this tool's execution makes, without it ever appearing
+            #    in `params` — the LLM never sees or controls it.
+            caller_token = context_kwargs.pop("token", None)
+            if caller_token:
+                appworks_auth.set_request_token(caller_token)
+
+            # 3. Unpack BOTH the LLM's params AND the backend context
             envelope = func(**params, **context_kwargs)
+        except AppworksSessionExpiredError:
+            # Never turn this into a generic {"status": "error", ...} tool
+            # envelope: that shape tells agent_runner.py's loop "the LLM
+            # can see this and self-correct" (Gate 2's whole design
+            # philosophy), which is right for a bad parameter but wrong
+            # here — retrying the SAME tool call gets the SAME rejected
+            # token every time. Let it propagate past dispatch() (and
+            # past agent_runner.py's tool loop, which has no try/except
+            # of its own around this call) up to the route/service that
+            # started run_scoped(), which maps it to HTTP 401.
+            raise
         except Exception as exc:
             return {
                 "status": "error",

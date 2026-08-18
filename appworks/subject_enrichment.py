@@ -8,6 +8,7 @@ Manifest tool: fetch_subject_history
 import logging
 from typing import Dict, Optional
 
+from appworks.appworks_auth import AppworksSessionExpiredError
 from appworks.appworks_paths import AppWorksPaths
 from appworks.appworks_utils import (
     embedded,
@@ -95,6 +96,12 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
                     "allegation_description": commentary["allegation_description"],
                 }
             )
+        except AppworksSessionExpiredError:
+            # Same reasoning as appworks_utils.safe_fetch: a caller-token
+            # 401 must not look like "this subject's prior-case row simply
+            # had a processing error" — every other AppWorks call in this
+            # enrichment carries the same rejected token.
+            raise
         except Exception as exc:
             logger.warning(f"⚠️ Failed processing Subjects row: {exc}")
 

@@ -64,12 +64,13 @@ def ensure_table() -> None:
 
 
 _MARK_STARTED = """
-    INSERT INTO graph_ingest_state (case_id, status, started_at, attempts)
-    VALUES (%(case_id)s, 'loading', now(), 1)
+    INSERT INTO graph_ingest_state (case_id, status, started_at, attempts, username)
+    VALUES (%(case_id)s, 'loading', now(), 1, %(username)s)
     ON CONFLICT (case_id) DO UPDATE SET
         status     = 'loading',
         started_at = now(),
         attempts   = graph_ingest_state.attempts + 1,
+        username   = EXCLUDED.username,
         last_error = NULL;
 """
 
@@ -93,13 +94,13 @@ _MARK_FAILED = """
 
 _SELECT_ONE = """
     SELECT case_id, status, attempts, counts, started_at, loaded_at,
-           reasoned_at, failed_at, last_error
+           reasoned_at, failed_at, last_error, username
     FROM graph_ingest_state WHERE case_id = %(case_id)s;
 """
 
 _SELECT_ALL = """
     SELECT case_id, status, attempts, counts, started_at, loaded_at,
-           reasoned_at, failed_at, last_error
+           reasoned_at, failed_at, last_error, username
     FROM graph_ingest_state ORDER BY coalesce(loaded_at, started_at) DESC;
 """
 
@@ -116,9 +117,15 @@ def _write(sql: str, params: Dict[str, Any], label: str) -> None:
         logger.error("graph_ingest_state %s FAILED case_id=%s: %s", label, params.get("case_id"), exc)
 
 
-def mark_started(case_id: str) -> None:
-    """Record that graph ingestion has started for this case."""
-    _write(_MARK_STARTED, {"case_id": case_id}, "mark_started")
+def mark_started(case_id: str, username: Optional[str] = None) -> None:
+    """Record that graph ingestion has started for this case.
+
+    username is the investigator/caller who triggered this ingest
+    (threaded down from POST /graph/ingest — see api/models.py's
+    AuthFieldsMixin), stored purely for attribution. None for a run with
+    no request-scoped caller (e.g. the CLI ETL path).
+    """
+    _write(_MARK_STARTED, {"case_id": case_id, "username": username}, "mark_started")
 
 
 def mark_loaded(case_id: str, counts: Dict[str, Any]) -> None:

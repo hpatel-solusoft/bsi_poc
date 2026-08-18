@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import config.settings as settings
-from appworks.appworks_auth import fetch
+from appworks.appworks_auth import AppworksSessionExpiredError, fetch
 from appworks.appworks_paths import AppWorksPaths
 
 # ── NEW: Architecture Standard Imports ───────────────────────
@@ -99,6 +99,8 @@ def search_similar_cases(case_id: str, fraud_types: list, max_total_results: int
 
             list_res = fetch(list_href)
             rows = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
+        except AppworksSessionExpiredError:
+            raise
         except Exception as e:
             logger.error(f"Failed to fetch allegations list for type {type_id}: {e}")
             rows = []
@@ -186,6 +188,8 @@ def get_allegation_types(**kwargs) -> dict:
             if isinstance(raw, list)
             else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])
         )
+    except AppworksSessionExpiredError:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch allegation types catalog: {e}")
         items = []

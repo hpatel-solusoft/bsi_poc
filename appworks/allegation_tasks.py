@@ -87,10 +87,12 @@ def get_allegation_type_tasks(allegation_types: Optional[List[str]] = None, **kw
     tracker = ProvenanceTracker("Catalog", "AllegationTypeTask")
 
     try:
-        from appworks.appworks_auth import fetch
+        from appworks.appworks_auth import AppworksSessionExpiredError, fetch
 
         raw = fetch(AppWorksPaths.AllegationTypeTask.manage_allegation_type_tasks())
         items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get(_LIST_KEY, [])
+    except AppworksSessionExpiredError:
+        raise
     except Exception as exc:  # noqa: BLE001 — see docstring: degrade, don't fail the plan
         logger.error("get_allegation_type_tasks: catalogue fetch failed: %s", exc)
         items = []

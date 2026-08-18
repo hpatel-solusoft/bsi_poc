@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from appworks.appworks_auth import fetch
+from appworks.appworks_auth import AppworksSessionExpiredError, fetch
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,13 @@ def safe_fetch(href: str, entity_name: str = "Unknown") -> Tuple[Dict, Dict]:
         links = res.get("_links", {})
         return properties, links
 
+    except AppworksSessionExpiredError:
+        # A caller-token 401 is not "this entity has no data" — it is
+        # "we could not check". Letting it propagate (rather than
+        # returning ({}, {}) like every other failure below) is what
+        # stops an expired session from silently looking like an empty
+        # case. See appworks/appworks_auth.py's AppworksSessionExpiredError.
+        raise
     except Exception as e:
         # Logs the specific network/API failure rather than swallowing it.
         # This prevents the system from assuming an entity has no data
@@ -94,6 +101,10 @@ def get_relationship_items(rel_href: str, embedded_key: str) -> List[Dict]:
                     return [val]
 
         return []
+    except AppworksSessionExpiredError:
+        # Same reasoning as safe_fetch above: an expired caller token must
+        # not look like "this relationship has no items".
+        raise
     except Exception as e:
         logger.error(f"❌ API Failure fetching relationship list [{rel_href}]: {str(e)}")
         return []

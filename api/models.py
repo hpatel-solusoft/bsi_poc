@@ -10,7 +10,40 @@ from semantic_layer.entity_contracts import InvestigationStep
 # -----------------------------------------------------------------------
 
 
-class intakeRequest(BaseModel):
+class AuthFieldsMixin(BaseModel):
+    """
+    Shared by every request model in this file. Two fields every
+    endpoint now requires:
+
+    username — the investigator/caller identity. Persisted alongside
+        whatever this call writes (case_ai_summary_store,
+        report_artifacts, conversation_history, agent_audit_log,
+        pipeline_execution_state, graph_ingest_state,
+        investigation_plan_overrides — see migrations/
+        008_add_username_to_response_tables.sql) purely for
+        attribution. Never used to gate or authorize the call itself.
+
+    token — the caller's AppWorks SAML token. Used only to
+        identify/authenticate the caller for the lifetime of this one
+        request. It is NEVER persisted to PostgreSQL or Neo4j, and
+        NEVER written to a log line — every call site in this codebase
+        that logs a request logs case_id/username, not token. Treat any
+        future change that logs or stores this field as a bug.
+    """
+
+    username: str
+    token: str
+
+    @field_validator("username", "token")
+    @classmethod
+    def _auth_fields_must_be_non_blank(cls, value: str) -> str:
+        """Reject empty or whitespace-only username/token on every request."""
+        if not value or not value.strip():
+            raise ValueError("must be a non-empty string.")
+        return value
+
+
+class intakeRequest(AuthFieldsMixin):
     case_id: str
     # Optional. Default False: if intake has already run for this case_id
     # (found warm in CS-4 or in the PostgreSQL case_ai_summary_store
@@ -22,7 +55,7 @@ class intakeRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
-class SimilarCasesRequest(BaseModel):
+class SimilarCasesRequest(AuthFieldsMixin):
     case_id: str
     # ai_summary is now OPTIONAL (Data Persistence Spec v1.0, Section D.1).
     # AppWorks sends case_id only; the server resolves case_data from
@@ -36,7 +69,7 @@ class SimilarCasesRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
-class PlanRequest(BaseModel):
+class PlanRequest(AuthFieldsMixin):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
@@ -46,7 +79,7 @@ class PlanRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
-class ReloadAllRequest(BaseModel):
+class ReloadAllRequest(AuthFieldsMixin):
     """POST /reload_all — force-refresh every ON-DEMAND tab for case_id
     in one call: /graph/ingest (structural AppWorks -> Neo4j re-sync,
     run_rules=True — the graph is both freshly loaded and freshly
@@ -94,7 +127,7 @@ class ReloadAllResponse(BaseModel):
     steps: List[ReloadStepResult]
 
 
-class ModifyInvestigationStepsRequest(BaseModel):
+class ModifyInvestigationStepsRequest(AuthFieldsMixin):
     """
     POST /plan/modify_investigation_steps — the Investigation Plan
     "Modify" popup contract (Data Persistence Spec v1.0, Section D.6;
@@ -142,7 +175,7 @@ class ModifyInvestigationStepsResponse(BaseModel):
     modified_on: datetime
 
 
-class RevertToAiPlanRequest(BaseModel):
+class RevertToAiPlanRequest(AuthFieldsMixin):
     """POST /plan/revert_to_ai — deletes case_id's saved override."""
 
     case_id: str
@@ -176,7 +209,7 @@ class InvestigationStepsResponse(BaseModel):
     is_modify_investigation_steps: bool
 
 
-class RiskAssessmentRequest(BaseModel):
+class RiskAssessmentRequest(AuthFieldsMixin):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
@@ -187,7 +220,7 @@ class RiskAssessmentRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
-class ReportGenerationRequest(BaseModel):
+class ReportGenerationRequest(AuthFieldsMixin):
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
@@ -199,7 +232,7 @@ class ReportGenerationRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
-class CopilotRequest(BaseModel):
+class CopilotRequest(AuthFieldsMixin):
     case_id: str
     question: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
@@ -246,7 +279,7 @@ class ConversationHistoryResponse(BaseModel):
     conversation_history_source: str
 
 
-class GraphIngestRequest(BaseModel):
+class GraphIngestRequest(AuthFieldsMixin):
     """
     POST /graph/ingest — the AppWorks Lifecycle-event contract.
 
@@ -281,7 +314,7 @@ class GraphIngestRequest(BaseModel):
 # -----------------------------------------------------------------------
 
 
-class RevertRejectionRequest(BaseModel):
+class RevertRejectionRequest(AuthFieldsMixin):
     """
     POST /revert_rejection — the Case Summary "Revert" button's HTTP
     contract (Functional Specification D2 Input Contract, v3 — AI-28/
@@ -396,7 +429,7 @@ class RevertRejectionResponse(BaseModel):
     model_config = {"extra": "allow"}
 
 
-class RejectInferenceRequest(BaseModel):
+class RejectInferenceRequest(AuthFieldsMixin):
     """
     POST /reject_inference — the Human-in-the-Loop "Reject" button's
     HTTP contract (Functional Specification D2 Input Contract, v3 —

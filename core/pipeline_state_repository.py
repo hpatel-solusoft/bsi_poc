@@ -23,17 +23,18 @@ _SELECT_SQL = """
     SELECT case_id, subject_id, status, wave1_status, wave1_completed_at,
            extraction_status, extraction_completed_at,
            wave2_status, wave2_completed_at, started_at, completed_at,
-           failed_at, cleared_at, cleared_reason
+           failed_at, cleared_at, cleared_reason, username
     FROM pipeline_execution_state
     WHERE case_id = %(case_id)s AND subject_id = %(subject_id)s;
 """
 
 _START_RUN_SQL = """
-    INSERT INTO pipeline_execution_state (case_id, subject_id, status, started_at)
-    VALUES (%(case_id)s, %(subject_id)s, 'running', now())
+    INSERT INTO pipeline_execution_state (case_id, subject_id, status, started_at, username)
+    VALUES (%(case_id)s, %(subject_id)s, 'running', now(), %(username)s)
     ON CONFLICT (case_id, subject_id) DO UPDATE SET
         status = 'running',
         started_at = now(),
+        username = EXCLUDED.username,
         wave1_status = 'pending',
         wave1_completed_at = NULL,
         extraction_status = 'pending',
@@ -179,16 +180,27 @@ def get_run_state(case_id: str, subject_id: str) -> Optional[Dict[str, Any]]:
     return dict(row)
 
 
-def start_run(case_id: str, subject_id: str) -> None:
+def start_run(case_id: str, subject_id: str, username: Optional[str] = None) -> None:
     """
     Mark a fresh run as started, resetting any prior wave/failure state.
     Called at the top of every pipeline execution — Principle 15 means
     there is no partial-resume path, so a (re-)run always starts clean.
+
+    username is the investigator/caller whose request triggered this run
+    (threaded down from the API layer through
+    reasoning_layer.pipeline.run_pipeline — see api/models.py's
+    AuthFieldsMixin), stored purely for attribution. None for a run
+    triggered with no request-scoped caller (e.g. the CLI ETL path).
     """
     try:
         with get_cursor(dict_cursor=False) as cur:
-            cur.execute(_START_RUN_SQL, {"case_id": case_id, "subject_id": subject_id})
-        logger.info("pipeline run STARTED case_id=%s subject_id=%s", case_id, subject_id)
+            cur.execute(
+                _START_RUN_SQL,
+                {"case_id": case_id, "subject_id": subject_id, "username": username},
+            )
+        logger.info(
+            "pipeline run STARTED case_id=%s subject_id=%s username=%s", case_id, subject_id, username
+        )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error("pipeline start_run FAILED case_id=%s subject_id=%s: %s", case_id, subject_id, exc)
         raise

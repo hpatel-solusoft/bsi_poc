@@ -44,6 +44,11 @@ from typing import Any, Dict
 
 from fastapi import HTTPException
 
+# See api/server.py's import of the same symbol for why this is a
+# deliberate, narrow exception to "no file in api/ imports directly from
+# appworks/" — an exception TYPE only, for HTTP error-boundary translation.
+from appworks.appworks_auth import AppworksSessionExpiredError
+
 from agent_service.prompt_builders import build_plan_prompt
 from agent_service.runner_provider import get_runner
 from api.message_utils import build_ai_summary, extract_tool_results
@@ -105,7 +110,9 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             req.case_id,
             req.ai_summary,
             required_field="risk_assessment",
-            run_prerequisite_route=lambda: risk_assessment(RiskAssessmentRequest(case_id=req.case_id)),
+            run_prerequisite_route=lambda: risk_assessment(
+                RiskAssessmentRequest(case_id=req.case_id, username=req.username, token=req.token)
+            ),
             resolve_case_store=_resolve_case_store,
             route_name="plan",
         )
@@ -201,6 +208,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
                     endpoint="/plan",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
+                    username=req.username,
                 )
                 # rule_aware_tasks / rules_fired are ALWAYS a live Neo4j
                 # read, cache hit or not — cached_plan never carries
@@ -244,7 +252,10 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
                     },
                 }
 
-        execution_context = {"ai_summary": req.ai_summary}
+        # token: caller's AppWorks SAMLart, consumed by
+        # semantic_layer/dispatcher.py before any tool function sees it —
+        # see appworks/appworks_auth.py's set_request_token.
+        execution_context = {"ai_summary": req.ai_summary, "token": req.token}
         runner = get_runner()
         # Scope to plan retrieval only (Step 4)
 
@@ -327,7 +338,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
-        persist_case_session(req.case_id, ai_summary)
+        persist_case_session(req.case_id, ai_summary, username=req.username)
 
         # Response-only override splice — mirrors the /plan CACHE-HIT
         # branch above exactly: the persisted/cached text stays the pure
@@ -347,6 +358,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             endpoint="/plan",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
 
         # rules_fired for the response is a live Neo4j read, same as the
@@ -389,6 +401,17 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
                 },
             },
         }
+    except AppworksSessionExpiredError as exc:
+        logger.warning("plan route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="investigation_plan",
+            endpoint="/plan",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -399,6 +422,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             endpoint="/plan",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Plan generation failed: {exc}") from exc
     finally:

@@ -16,8 +16,8 @@ from core.db import DatabaseUnavailableError, get_cursor
 logger = logging.getLogger(__name__)
 
 _INSERT_LOG_SQL = """
-    INSERT INTO agent_audit_log (case_id, agent_name, endpoint, latency_ms, tokens_used, status)
-    VALUES (%(case_id)s, %(agent_name)s, %(endpoint)s, %(latency_ms)s, %(tokens_used)s, %(status)s);
+    INSERT INTO agent_audit_log (case_id, agent_name, endpoint, latency_ms, tokens_used, status, username)
+    VALUES (%(case_id)s, %(agent_name)s, %(endpoint)s, %(latency_ms)s, %(tokens_used)s, %(status)s, %(username)s);
 """
 
 
@@ -28,11 +28,16 @@ def log_agent_call(
     latency_ms: int,
     status: str,
     tokens_used: Optional[int] = None,
+    username: Optional[str] = None,
 ) -> None:
     """
-    Record one agent invocation. Best-effort and non-blocking: telemetry
-    must never fail the investigator-facing request, so all errors are
-    logged and swallowed here.
+    Record one agent invocation. username is the investigator/caller who
+    made the request (every endpoint now carries it — see
+    api/models.py's AuthFieldsMixin), stored purely for attribution.
+
+    Best-effort and non-blocking: telemetry must never fail the
+    investigator-facing request, so all errors are logged and swallowed
+    here.
     """
     try:
         with get_cursor(dict_cursor=False) as cur:
@@ -45,6 +50,7 @@ def log_agent_call(
                     "latency_ms": latency_ms,
                     "tokens_used": tokens_used,
                     "status": status,
+                    "username": username,
                 },
             )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:

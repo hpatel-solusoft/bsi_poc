@@ -349,12 +349,17 @@ def run_intake_direct_pipeline(
     reload_ai_summary: bool,
     sections: Dict[str, Any],
     provenance_trail: List[dict],
+    username: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[dict]]:
     """
     /intake direct pipeline work (Section 8.1 AI-12, Section 9.1 AI-13).
     subject_primary_id was injected into complaint_intelligence by
     extract_tool_results before this is called.
     Mutates and returns (sections, provenance_trail).
+
+    username is the investigator/caller for this /intake request (see
+    api/models.py's AuthFieldsMixin) and is passed straight through to
+    enrich_graph_context for attribution on pipeline_execution_state.
     """
     subject_id = (sections.get("complaint_intelligence") or {}).get("subject_primary_id")
     if not subject_id:
@@ -409,6 +414,7 @@ def run_intake_direct_pipeline(
             case_id,
             subject_id,
             force=reload_ai_summary,
+            username=username,
         )["result"]
         provenance_trail = merge_direct_result(
             sections,
@@ -452,11 +458,18 @@ def run_similar_cases_pipeline(
     case_data: Dict[str, Any],
     runner,
     build_similar_cases_prompt,
+    token: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any], List[dict]]:
     """
     /similar_cases direct + LLM-explain pipeline work (Section 8.3 AI-14,
     Section 9.2). Returns (agent_summary, similar_cases_data, similar_section,
     merged_provenance).
+
+    token is the caller's AppWorks SAMLart (see api/models.py's
+    AuthFieldsMixin), passed through execution_context to
+    semantic_layer/dispatcher.py — see appworks/appworks_auth.py's
+    set_request_token for how it reaches the actual AppWorks call, if
+    the SIMILAR_CASES scope ever gains one.
     """
     # --- AI-14: deterministic structural matching (Section 8.3, 9.2) ---
     # Replaces the Phase 1 two-step LLM type-selection. The matches are
@@ -484,6 +497,7 @@ def run_similar_cases_pipeline(
             f"add or remove cases; the graph has already decided the matches."
         ),
         scope="SIMILAR_CASES",
+        execution_context={"token": token},
     )
 
     # The authoritative similar_cases section is the DETERMINISTIC

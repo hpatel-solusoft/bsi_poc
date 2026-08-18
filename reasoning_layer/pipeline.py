@@ -33,7 +33,7 @@ zero AppWorks REST calls. Structured data arrives pre-loaded via ETL
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from neo4j.exceptions import Neo4jError
 
@@ -113,7 +113,13 @@ def _run_extraction_stage(case_id: str, subject_id: str) -> Dict[str, Any]:
     }
 
 
-def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str = "etl_resync") -> dict:
+def run_pipeline(
+    case_id: str,
+    subject_id: str,
+    force: bool = False,
+    reason: str = "etl_resync",
+    username: Optional[str] = None,
+) -> dict:
     """
     Entry point for the six-step sequence. Per Section 9.1 this is called
     DIRECTLY — by Context Enrichment's own processing
@@ -138,6 +144,15 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str
     pipeline_execution_state.cleared_reason so the audit trail shows why a
     given run was invalidated.
 
+    `username` is the investigator/caller whose request ultimately
+    triggered this run — threaded down from the API layer (see
+    api/models.py's AuthFieldsMixin) through
+    reasoning_layer/context_enrichment.py's enrich_graph_context or
+    etl/ingest_service.py. It is stored on pipeline_execution_state
+    purely for attribution (core.pipeline_state_repository.start_run)
+    and plays no role in Principle 10's run/skip decision. None for a
+    run with no request-scoped caller (e.g. the CLI ETL path).
+
     CONCURRENCY: the entire check-then-act sequence below (get_run_state,
     then maybe start_run + Wave 1/Extraction/Wave 2) runs under
     core.pipeline_state_repository.pipeline_run_lock, keyed on
@@ -152,10 +167,12 @@ def run_pipeline(case_id: str, subject_id: str, force: bool = False, reason: str
     sees the first one's completed run instead of duplicating it.
     """
     with pipeline_state_repository.pipeline_run_lock(case_id, subject_id):
-        return _run_pipeline_locked(case_id, subject_id, force, reason)
+        return _run_pipeline_locked(case_id, subject_id, force, reason, username)
 
 
-def _run_pipeline_locked(case_id: str, subject_id: str, force: bool, reason: str) -> dict:
+def _run_pipeline_locked(
+    case_id: str, subject_id: str, force: bool, reason: str, username: Optional[str] = None
+) -> dict:
     """
     The six-step sequence itself, run while run_pipeline()'s caller
     already holds pipeline_run_lock for (case_id, subject_id). Split out
@@ -191,7 +208,7 @@ def _run_pipeline_locked(case_id: str, subject_id: str, force: bool, reason: str
     if already_done and force:
         pipeline_state_repository.clear_run(case_id, subject_id, reason=reason)
 
-    pipeline_state_repository.start_run(case_id, subject_id)
+    pipeline_state_repository.start_run(case_id, subject_id, username=username)
 
     try:
         # --- Step 1: scope ---
@@ -539,7 +556,9 @@ def _filter_to_direct_subjects(
     return filtered
 
 
-def run_pipeline_for_case(case_id: str, force: bool = False, reason: str = "etl_resync") -> dict:
+def run_pipeline_for_case(
+    case_id: str, force: bool = False, reason: str = "etl_resync", username: Optional[str] = None
+) -> dict:
     """
     Run the pipeline for EVERY subject on the case and return one merged
     rules_fired block.
@@ -550,6 +569,9 @@ def run_pipeline_for_case(case_id: str, force: bool = False, reason: str = "etl_
     does not replace it. A subject whose run fails does not abort the
     others: a co-subject with bad data must not cost the investigator the
     reasoning on everyone else.
+
+    username is passed straight through to run_pipeline for every subject
+    run — see that function's own docstring.
     """
     if not case_id or not str(case_id).strip():
         raise ValueError("run_pipeline_for_case requires a non-empty case_id")
@@ -580,7 +602,7 @@ def run_pipeline_for_case(case_id: str, force: bool = False, reason: str = "etl_
     ran: List[Dict[str, Any]] = []
     for subject_id in subject_ids:
         try:
-            envelope = run_pipeline(case_id, subject_id, force=force, reason=reason)
+            envelope = run_pipeline(case_id, subject_id, force=force, reason=reason, username=username)
             result = envelope["result"]
             block = result.get("rules_fired") or []
             if block:

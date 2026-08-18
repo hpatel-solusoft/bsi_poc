@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from neo4j.exceptions import Neo4jError
 
@@ -100,6 +100,19 @@ from core.investigation_plan_override_repository import (
 )
 from core.narrative_staleness import StalenessCheck
 from etl.ingest_service import ingest as run_graph_ingest
+
+# NOTE ON LAYERING: this is the one deliberate exception to "no file in
+# api/ imports directly from appworks/" (guideline_.txt Section 5). This
+# imports ONLY the exception TYPE, for HTTP error-boundary translation —
+# no appworks/ function is called from here, no appworks/ business logic
+# lives here. AppworksSessionExpiredError is raised deep inside a tool
+# call (appworks_auth.fetch/fetch_list) and needs a distinct HTTP status
+# (401, not 500) at the one layer that owns HTTP concerns. The
+# alternative — catching the broader `ConnectionError` it subclasses —
+# would also catch unrelated failures (a genuine AppWorks outage, a
+# misconfigured service-account login) and misreport them as "your
+# session expired," which is worse.
+from appworks.appworks_auth import AppworksSessionExpiredError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.fraud_network import get_fraud_network
 from reasoning_layer.neo4j_client import (
@@ -268,6 +281,22 @@ def _close_reasoning_layer() -> None:
 _get_runner = get_runner
 
 
+def _require_auth_query(username: str, token: str) -> None:
+    """
+    Same non-blank rule api.models.AuthFieldsMixin enforces on every
+    POST body, applied to the username/token QUERY parameters the GET
+    routes carry instead (a GET has no JSON body for FastAPI to validate
+    through a Pydantic model). token is validated here and then
+    discarded by the caller exactly like every POST route discards it —
+    see AuthFieldsMixin's own docstring: token is never persisted or
+    logged anywhere in this codebase.
+    """
+    if not username or not username.strip():
+        raise HTTPException(status_code=422, detail="username must be a non-empty string.")
+    if not token or not token.strip():
+        raise HTTPException(status_code=422, detail="token must be a non-empty string.")
+
+
 def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> tuple:
     """
     CS-4 lookup pattern used by all ON-DEMAND handlers.
@@ -323,8 +352,17 @@ def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> t
 
 
 @app.get("/health")
-def health():
-    """Liveness check — returns ok plus the current server timestamp."""
+def health(
+    username: str = Query(..., description="Caller identity, for parity with every other endpoint."),
+    token: str = Query(..., description="AppWorks SAML token — never persisted or logged."),
+):
+    """Liveness check — returns ok plus the current server timestamp.
+
+    username/token are accepted (and validated non-blank) for parity with
+    every other route, but this endpoint performs no persistence and no
+    AppWorks call, so neither value is used for anything beyond that.
+    """
+    _require_auth_query(username, token)
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
@@ -364,6 +402,8 @@ def graph_ingest(req: GraphIngestRequest):
         report = run_graph_ingest(
             req.case_ids,
             run_reasoning=req.run_rules,
+            username=req.username,
+            token=req.token,
         )
     except GraphUnavailableError as exc:
         # No fallback graph exists — unlike a Postgres outage, this cannot
@@ -389,11 +429,19 @@ def graph_ingest(req: GraphIngestRequest):
 
 
 @app.get("/graph/ingest/status")
-def graph_ingest_status():
+def graph_ingest_status(
+    username: str = Query(..., description="Caller identity, for parity with every other endpoint."),
+    token: str = Query(..., description="AppWorks SAML token — never persisted or logged."),
+):
     """What is actually in the graph right now, and did the last sync of
     each case succeed. Reads graph_ingest_state (PostgreSQL) — no Neo4j
     call, no LLM. This is the endpoint that answers "why does this case
-    show an empty network" without anyone reading server logs."""
+    show an empty network" without anyone reading server logs.
+
+    username/token are accepted for parity with every other route; this
+    is a read-only endpoint, so neither is persisted here.
+    """
+    _require_auth_query(username, token)
     return {"cases": graph_ingest_repository.list_states()}
 
 
@@ -435,7 +483,9 @@ def similar_cases(req: SimilarCasesRequest):
             req.case_id,
             req.ai_summary,
             required_field="complaint_intelligence",
-            run_prerequisite_route=lambda: intake(intakeRequest(case_id=req.case_id)),
+            run_prerequisite_route=lambda: intake(
+                intakeRequest(case_id=req.case_id, username=req.username, token=req.token)
+            ),
             resolve_case_store=_resolve_case_store,
             route_name="similar_cases",
         )
@@ -485,6 +535,7 @@ def similar_cases(req: SimilarCasesRequest):
                     endpoint="/similar_cases",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
+                    username=req.username,
                 )
                 return {
                     "case_id": req.case_id,
@@ -514,6 +565,7 @@ def similar_cases(req: SimilarCasesRequest):
             case_data,
             runner,
             build_similar_cases_prompt,
+            token=req.token,
         )
 
         # Update CS-4 warm store but return only the route-specific section.
@@ -541,13 +593,14 @@ def similar_cases(req: SimilarCasesRequest):
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
-        persist_case_session(req.case_id, ai_summary)
+        persist_case_session(req.case_id, ai_summary, username=req.username)
         log_agent_call(
             case_id=req.case_id,
             agent_name="similar_cases",
             endpoint="/similar_cases",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
 
         logger.info(f"SIMILAR CASES NARRATIVE TOTAL KEYs: {len(similar_cases_data)}")
@@ -575,6 +628,17 @@ def similar_cases(req: SimilarCasesRequest):
                 },
             },
         }
+    except AppworksSessionExpiredError as exc:
+        logger.warning("similar_cases route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="similar_cases",
+            endpoint="/similar_cases",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -585,6 +649,7 @@ def similar_cases(req: SimilarCasesRequest):
             endpoint="/similar_cases",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Similar cases analysis failed: {exc}") from exc
     finally:
@@ -616,7 +681,9 @@ def risk_assessment(req: RiskAssessmentRequest):
             req.case_id,
             req.ai_summary,
             required_field="similar_cases",
-            run_prerequisite_route=lambda: similar_cases(SimilarCasesRequest(case_id=req.case_id)),
+            run_prerequisite_route=lambda: similar_cases(
+                SimilarCasesRequest(case_id=req.case_id, username=req.username, token=req.token)
+            ),
             resolve_case_store=_resolve_case_store,
             route_name="risk_assessment",
         )
@@ -686,6 +753,7 @@ def risk_assessment(req: RiskAssessmentRequest):
                     endpoint="/risk_assessment",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
+                    username=req.username,
                 )
                 return {
                     "case_id": req.case_id,
@@ -712,8 +780,13 @@ def risk_assessment(req: RiskAssessmentRequest):
         runner = _get_runner()
 
         # --- EXPLICIT DEPENDENCY INJECTION ---
-        # We package the backend state into a generic execution_context
-        execution_context = {"ai_summary": req.ai_summary}
+        # We package the backend state into a generic execution_context.
+        # token is the caller's AppWorks SAMLart (AuthFieldsMixin.token) —
+        # semantic_layer/dispatcher.py consumes and removes it before any
+        # tool function sees **context_kwargs; it is never forwarded to a
+        # tool as a parameter. See appworks/appworks_auth.py's
+        # set_request_token for how it reaches the actual AppWorks call.
+        execution_context = {"ai_summary": req.ai_summary, "token": req.token}
         # -------------------------------------
 
         messages, new_provenance, tool_call_log = runner.run_scoped(
@@ -764,13 +837,14 @@ def risk_assessment(req: RiskAssessmentRequest):
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
-        persist_case_session(req.case_id, ai_summary)
+        persist_case_session(req.case_id, ai_summary, username=req.username)
         log_agent_call(
             case_id=req.case_id,
             agent_name="risk_assessment",
             endpoint="/risk_assessment",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
 
         return {
@@ -802,6 +876,17 @@ def risk_assessment(req: RiskAssessmentRequest):
                 },
             },
         }
+    except AppworksSessionExpiredError as exc:
+        logger.warning("risk_assessment route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="risk_assessment",
+            endpoint="/risk_assessment",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -812,6 +897,7 @@ def risk_assessment(req: RiskAssessmentRequest):
             endpoint="/risk_assessment",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Risk assessment failed: {exc}") from exc
     finally:
@@ -921,18 +1007,44 @@ def reload_all(req: ReloadAllRequest) -> ReloadAllResponse:
     step_calls = [
         (
             "graph_ingest",
-            lambda: graph_ingest(GraphIngestRequest(case_ids=[req.case_id], run_rules=True)),
+            lambda: graph_ingest(
+                GraphIngestRequest(
+                    case_ids=[req.case_id], run_rules=True, username=req.username, token=req.token
+                )
+            ),
         ),
-        ("intake", lambda: intake(intakeRequest(case_id=req.case_id, reload_ai_summary=True))),
+        (
+            "intake",
+            lambda: intake(
+                intakeRequest(
+                    case_id=req.case_id, reload_ai_summary=True, username=req.username, token=req.token
+                )
+            ),
+        ),
         (
             "similar_cases",
-            lambda: similar_cases(SimilarCasesRequest(case_id=req.case_id, reload_ai_summary=True)),
+            lambda: similar_cases(
+                SimilarCasesRequest(
+                    case_id=req.case_id, reload_ai_summary=True, username=req.username, token=req.token
+                )
+            ),
         ),
         (
             "risk_assessment",
-            lambda: risk_assessment(RiskAssessmentRequest(case_id=req.case_id, reload_ai_summary=True)),
+            lambda: risk_assessment(
+                RiskAssessmentRequest(
+                    case_id=req.case_id, reload_ai_summary=True, username=req.username, token=req.token
+                )
+            ),
         ),
-        ("plan", lambda: plan(PlanRequest(case_id=req.case_id, reload_ai_summary=True))),
+        (
+            "plan",
+            lambda: plan(
+                PlanRequest(
+                    case_id=req.case_id, reload_ai_summary=True, username=req.username, token=req.token
+                )
+            ),
+        ),
     ]
 
     for step_name, call_step in step_calls:
@@ -1014,6 +1126,7 @@ def reload_all(req: ReloadAllRequest) -> ReloadAllResponse:
         endpoint="/reload_all",
         latency_ms=int(overall_duration * 1000),
         status=overall_status,
+        username=req.username,
     )
 
     return ReloadAllResponse(
@@ -1045,6 +1158,7 @@ def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyIn
             modified_steps=[step.model_dump(exclude_none=True) for step in req.steps],
             modified_by=req.investigator_id,
             comment=req.comment,
+            username=req.username,
         )
         log_agent_call(
             case_id=req.case_id,
@@ -1052,6 +1166,7 @@ def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyIn
             endpoint="/plan/modify_investigation_steps",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
         return ModifyInvestigationStepsResponse(
             case_id=req.case_id,
@@ -1071,6 +1186,7 @@ def modify_investigation_steps(req: ModifyInvestigationStepsRequest) -> ModifyIn
             endpoint="/plan/modify_investigation_steps",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(
             status_code=502,
@@ -1100,6 +1216,7 @@ def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
             endpoint="/plan/revert_to_ai",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
         return RevertToAiPlanResponse(
             case_id=req.case_id,
@@ -1117,6 +1234,7 @@ def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
             endpoint="/plan/revert_to_ai",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(
             status_code=502,
@@ -1131,10 +1249,17 @@ def revert_to_ai_plan(req: RevertToAiPlanRequest) -> RevertToAiPlanResponse:
     response_model=InvestigationStepsResponse,
     response_model_exclude_none=True,
 )
-def get_investigation_steps(case_id: str) -> InvestigationStepsResponse:
+def get_investigation_steps(
+    case_id: str,
+    username: str = Query(..., description="Caller identity, for parity with every other endpoint."),
+    token: str = Query(..., description="AppWorks SAML token — never persisted or logged."),
+) -> InvestigationStepsResponse:
     """
     ON-DEMAND — read-only fetch of the current investigation_steps for
     case_id.
+
+    username/token are accepted for parity with every other route; this
+    is a read-only endpoint, so neither is persisted here.
 
     Same base path as POST /plan/modify_investigation_steps since these
     are matched as (method, path) pairs, not by path alone — the POST
@@ -1155,6 +1280,7 @@ def get_investigation_steps(case_id: str) -> InvestigationStepsResponse:
     Read-only: no LLM, no dispatcher, no CASE_STORE write — the same
     class of endpoint as GET /copilot/{case_id}.
     """
+    _require_auth_query(username, token)
     override = get_override(case_id)
     if override is not None:
         investigation_steps = override["modified_steps"]
@@ -1256,6 +1382,7 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
             endpoint="/reject_inference",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
         return RejectInferenceResponse(**envelope["result"])
     except InferenceNotFoundError as exc:
@@ -1270,6 +1397,7 @@ def reject_inference_route(req: RejectInferenceRequest) -> RejectInferenceRespon
             endpoint="/reject_inference",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=502, detail=f"Could not reach the graph: {exc}") from exc
     finally:
@@ -1311,6 +1439,7 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
             endpoint="/revert_rejection",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
         return RevertRejectionResponse(**envelope["result"])
     except InferenceNotFoundError as exc:
@@ -1326,6 +1455,7 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
             endpoint="/revert_rejection",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=502, detail=f"Could not reach the graph: {exc}") from exc
     finally:
@@ -1333,7 +1463,11 @@ def revert_rejection_route(req: RevertRejectionRequest) -> RevertRejectionRespon
 
 
 @app.get("/fraud_network/{case_id}", response_model=FraudNetworkResponse)
-def fraud_network_route(case_id: str) -> FraudNetworkResponse:
+def fraud_network_route(
+    case_id: str,
+    username: str = Query(..., description="Caller identity, for parity with every other endpoint."),
+    token: str = Query(..., description="AppWorks SAML token — never persisted or logged."),
+) -> FraudNetworkResponse:
     """
     D3 — Fraud Network Graph API. Read-only, no LLM, no writes (Key
     Design Rules). Powers the frontend's D3.js/Cytoscape.js network
@@ -1347,7 +1481,11 @@ def fraud_network_route(case_id: str) -> FraudNetworkResponse:
                      and every relationship between them.
       * `networks` — the original FraudNetwork-only groupings, shape
                      unchanged, so existing consumers keep working.
+
+    username/token are accepted for parity with every other route; this
+    is a read-only endpoint, so neither is persisted here.
     """
+    _require_auth_query(username, token)
     try:
         envelope = get_fraud_network(case_id)
         return FraudNetworkResponse(**envelope["result"])
@@ -1361,12 +1499,20 @@ def fraud_network_route(case_id: str) -> FraudNetworkResponse:
 
 
 @app.get("/rule_audit/{case_id}", response_model=RuleAuditResponse)
-def rule_audit_route(case_id: str) -> RuleAuditResponse:
+def rule_audit_route(
+    case_id: str,
+    username: str = Query(..., description="Caller identity, for parity with every other endpoint."),
+    token: str = Query(..., description="AppWorks SAML token — never persisted or logged."),
+) -> RuleAuditResponse:
     """
     D4 — Rule Audit / Inference Explainability. Read-only, no LLM. The
     prerequisite view for D2: an investigator reviews everything a case
     inferred, with full provenance, before deciding what to reject.
+
+    username/token are accepted for parity with every other route; this
+    is a read-only endpoint, so neither is persisted here.
     """
+    _require_auth_query(username, token)
     try:
         envelope = get_rule_audit(case_id)
         return RuleAuditResponse(**envelope["result"])
@@ -1489,6 +1635,12 @@ def copilot(req: CopilotRequest):
             system_prompt=build_copilot_prompt(req.case_id, case_data),
             user_message=req.question,
             conversation_history=conversation_history,
+            # token: caller's AppWorks SAMLart, consumed by
+            # semantic_layer/dispatcher.py — see the risk_assessment
+            # route above for the full explanation. Copilot runs with
+            # scope="ALL" (default), so any AppWorks-touching tool is
+            # reachable here too.
+            execution_context={"token": req.token},
         )
 
         answer = extract_agent_summary(messages)
@@ -1524,6 +1676,7 @@ def copilot(req: CopilotRequest):
             req.question,
             answer,
             sources_cited=sources_cited_details,
+            username=req.username,
         )
 
         # CS-4: Update the warm store only if the case entry still exists (it may
@@ -1536,7 +1689,7 @@ def copilot(req: CopilotRequest):
             CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
 
             ai_summary = build_ai_summary(case_data, new_sections, combined_provenance)
-            persist_case_session(req.case_id, ai_summary)
+            persist_case_session(req.case_id, ai_summary, username=req.username)
 
         log_agent_call(
             case_id=req.case_id,
@@ -1544,6 +1697,7 @@ def copilot(req: CopilotRequest):
             endpoint="/copilot",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
 
         return {
@@ -1558,6 +1712,17 @@ def copilot(req: CopilotRequest):
             "plan_source": "User Modified" if override is not None else "AI Summerized",
             "plan_stale": plan_stale,
         }
+    except AppworksSessionExpiredError as exc:
+        logger.warning("copilot route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="copilot",
+            endpoint="/copilot",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -1568,6 +1733,7 @@ def copilot(req: CopilotRequest):
             endpoint="/copilot",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Copilot failed: {exc}") from exc
     finally:
@@ -1575,7 +1741,11 @@ def copilot(req: CopilotRequest):
 
 
 @app.get("/copilot/{case_id}", response_model=ConversationHistoryResponse)
-def get_conversation_history(case_id: str):
+def get_conversation_history(
+    case_id: str,
+    username: str = Query(..., description="Caller identity, for parity with every other endpoint."),
+    token: str = Query(..., description="AppWorks SAML token — never persisted or logged."),
+):
     """
     ON-DEMAND — fetch the server-owned Copilot transcript for a case.
 
@@ -1592,7 +1762,11 @@ def get_conversation_history(case_id: str):
     endpoint as /graph/ingest/status. A transcript-store outage surfaces
     as 503 (see core.case_store.fetch_copilot_history) rather than an
     empty list, so a caller can tell "no history yet" from "store down".
+
+    username/token are accepted for parity with every other route; this
+    is a read-only endpoint, so neither is persisted here.
     """
+    _require_auth_query(username, token)
     try:
         conversation_history, history_source = fetch_copilot_history(case_id)
         logger.info(

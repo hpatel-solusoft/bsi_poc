@@ -30,13 +30,14 @@ logger = logging.getLogger(__name__)
 
 _UPSERT_SQL = """
     INSERT INTO investigation_plan_overrides
-        (case_id, modified_steps, modified_by, comment, modified_on)
+        (case_id, modified_steps, modified_by, comment, username, modified_on)
     VALUES
-        (%(case_id)s, %(modified_steps)s, %(modified_by)s, %(comment)s, now())
+        (%(case_id)s, %(modified_steps)s, %(modified_by)s, %(comment)s, %(username)s, now())
     ON CONFLICT (case_id) DO UPDATE SET
         modified_steps = EXCLUDED.modified_steps,
         modified_by    = EXCLUDED.modified_by,
         comment        = EXCLUDED.comment,
+        username       = EXCLUDED.username,
         modified_on    = now()
     RETURNING modified_on;
 """
@@ -58,12 +59,20 @@ def upsert_override(
     modified_steps: list,
     modified_by: str,
     comment: Optional[str],
+    username: Optional[str] = None,
 ) -> datetime:
     """
     Save (or replace) the investigator's current investigation_steps
     override for case_id. One row per case — a new save overwrites the
     prior one, per the "current state only, no version history"
     retention rule in Section D.6.
+
+    modified_by remains this endpoint's own business field (the
+    investigator_id already required on ModifyInvestigationStepsRequest).
+    username is the new, generic caller identity every endpoint now
+    carries (see api/models.py's AuthFieldsMixin) and is stored
+    alongside it — the two are not assumed to be the same value and
+    neither replaces the other.
 
     Returns the modified_on timestamp the database assigned, so the
     caller can echo it back in the response for the AppWorks badge.
@@ -82,14 +91,16 @@ def upsert_override(
                     "modified_steps": json.dumps(modified_steps),
                     "modified_by": modified_by,
                     "comment": comment,
+                    "username": username,
                 },
             )
             row = cur.fetchone()
         modified_on = row["modified_on"]
         logger.info(
-            "investigation_plan_overrides SAVED case_id=%s modified_by=%s steps=%d",
+            "investigation_plan_overrides SAVED case_id=%s modified_by=%s username=%s steps=%d",
             case_id,
             modified_by,
+            username,
             len(modified_steps),
         )
         return modified_on

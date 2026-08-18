@@ -52,6 +52,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import HTTPException
+
+# See api/server.py's import of the same symbol for why this is a
+# deliberate, narrow exception to "no file in api/ imports directly from
+# appworks/" — an exception TYPE only, for HTTP error-boundary translation.
+from appworks.appworks_auth import AppworksSessionExpiredError
 from fastapi.responses import Response
 from neo4j.exceptions import Neo4jError
 
@@ -330,6 +335,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
                     endpoint="/generate_report",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
+                    username=req.username,
                 )
                 return {
                     "case_id": req.case_id,
@@ -459,6 +465,10 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
                 "adding, removing, or reordering any of them."
             ),
             scope="REPORT_GENERATION",
+            # token: caller's AppWorks SAMLart, consumed by
+            # semantic_layer/dispatcher.py before any tool function sees
+            # it — see appworks/appworks_auth.py's set_request_token.
+            execution_context={"token": req.token},
         )
 
         # The authoritative related_network section is the DETERMINISTIC
@@ -549,7 +559,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
         # authoritative one (the AppWorks-saved report is). A write
         # failure here must not fail this investigator-facing response;
         # Neo4j + CS-4 already produced the authoritative content above.
-        persisted = save_report(req.case_id, report_content, status="draft")
+        persisted = save_report(req.case_id, report_content, status="draft", username=req.username)
 
         log_agent_call(
             case_id=req.case_id,
@@ -557,6 +567,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             endpoint="/generate_report",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
 
         return {
@@ -580,6 +591,17 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
                 },
             },
         }
+    except AppworksSessionExpiredError as exc:
+        logger.warning("generate_report route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="report_generation",
+            endpoint="/generate_report",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -590,6 +612,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             endpoint="/generate_report",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
     finally:
@@ -744,6 +767,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
                         endpoint="/generate_report/pdf",
                         latency_ms=int(duration_seconds * 1000),
                         status="success",
+                        username=req.username,
                     )
 
                     cached_report_id = cached_content.get("report_id", "")
@@ -824,6 +848,10 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
                 "adding, removing, or reordering any of them."
             ),
             scope="REPORT_GENERATION",
+            # token: caller's AppWorks SAMLart, consumed by
+            # semantic_layer/dispatcher.py before any tool function sees
+            # it — see appworks/appworks_auth.py's set_request_token.
+            execution_context={"token": req.token},
         )
 
         # The authoritative related_network section is the DETERMINISTIC
@@ -895,7 +923,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
         # has no JSON body to surface persisted-state metadata in (unlike
         # /generate_report's "persisted_to_postgres"), so the return
         # value is intentionally not captured here.
-        save_report(req.case_id, report_content, status="draft")
+        save_report(req.case_id, report_content, status="draft", username=req.username)
 
         log_agent_call(
             case_id=req.case_id,
@@ -903,6 +931,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             endpoint="/generate_report/pdf",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
+            username=req.username,
         )
 
         pdf_bytes = render_report_pdf(
@@ -917,6 +946,17 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+    except AppworksSessionExpiredError as exc:
+        logger.warning("generate_report/pdf route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="report_generation",
+            endpoint="/generate_report/pdf",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -927,6 +967,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             endpoint="/generate_report/pdf",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Report PDF generation failed: {exc}") from exc
     finally:

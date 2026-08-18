@@ -31,8 +31,8 @@ _MAX_TURN_INDEX_SQL = """
 """
 
 _INSERT_TURN_SQL = """
-    INSERT INTO conversation_history (case_id, turn_index, role, content, sources_cited)
-    VALUES (%(case_id)s, %(turn_index)s, %(role)s, %(content)s, %(sources_cited)s);
+    INSERT INTO conversation_history (case_id, turn_index, role, content, sources_cited, username)
+    VALUES (%(case_id)s, %(turn_index)s, %(role)s, %(content)s, %(sources_cited)s, %(username)s);
 """
 
 _TRIM_OLD_TURNS_SQL = """
@@ -73,10 +73,16 @@ def append_turn(
     role: str,
     content: str,
     sources_cited: Optional[List[dict]] = None,
+    username: Optional[str] = None,
 ) -> None:
     """
     Append one turn to case_id's transcript and trim anything older than
     the rolling window (CONVERSATION_HISTORY_MAX_TURNS).
+
+    username is the investigator/caller who asked the Copilot question
+    this turn belongs to (every endpoint now carries it — see
+    api/models.py's AuthFieldsMixin), stored purely for attribution and
+    written on both the user and assistant turn of the same exchange.
 
     Best-effort: a write failure here is logged, not raised, since
     conversation_history is operational data (D.2) and losing one turn of
@@ -96,6 +102,7 @@ def append_turn(
                     "role": role,
                     "content": content,
                     "sources_cited": json.dumps(sources_cited or []),
+                    "username": username,
                 },
             )
 

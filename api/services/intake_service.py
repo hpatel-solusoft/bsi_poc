@@ -29,6 +29,11 @@ from typing import Any, Dict
 
 from fastapi import HTTPException
 
+# See api/server.py's import of the same symbol for why this is a
+# deliberate, narrow exception to "no file in api/ imports directly from
+# appworks/" — an exception TYPE only, for HTTP error-boundary translation.
+from appworks.appworks_auth import AppworksSessionExpiredError
+
 from agent_service.prompt_builders import build_intake_system_prompt
 from agent_service.runner_provider import get_runner
 from api.message_utils import extract_agent_summary, extract_tool_results
@@ -122,6 +127,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
                     endpoint="/intake",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
+                    username=req.username,
                 )
                 return {
                     "case_id": req.case_id,
@@ -168,6 +174,12 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             system_prompt=build_intake_system_prompt(),
             user_message=(f"intake case {req.case_id}."),
             scope="CASE_SUMMARY",  # ← this scope includes intake + enrichment tools only;
+            # token: caller's AppWorks SAMLart, consumed by
+            # semantic_layer/dispatcher.py before any tool function sees
+            # it — see appworks/appworks_auth.py's set_request_token.
+            # CASE_SUMMARY is where the case's AppWorks fetch actually
+            # happens, so this is the route that needs it most.
+            execution_context={"token": req.token},
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
@@ -193,6 +205,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             staleness.should_rerun_full_pipeline,
             sections,
             provenance_trail,
+            username=req.username,
         )
 
         # Cache this run's agent_summary markdown (carrying forward any
@@ -220,7 +233,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             "investigation": sections,
             "provenance_trail": provenance_trail,
         }
-        persist_case_session(req.case_id, ai_summary)
+        persist_case_session(req.case_id, ai_summary, username=req.username)
 
         duration_seconds = round(time.time() - start, 1)
         log_agent_call(
@@ -229,6 +242,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             endpoint="/intake",
             latency_ms=int(duration_seconds * 1000),
             status="success",
+            username=req.username,
         )
 
         return {
@@ -275,6 +289,17 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
                 },
             },
         }
+    except AppworksSessionExpiredError as exc:
+        logger.warning("intake route: AppWorks session expired for case_id=%s", req.case_id)
+        log_agent_call(
+            case_id=req.case_id,
+            agent_name="intake",
+            endpoint="/intake",
+            latency_ms=int((time.time() - start) * 1000),
+            status="auth_error",
+            username=req.username,
+        )
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -285,6 +310,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             endpoint="/intake",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
+            username=req.username,
         )
         raise HTTPException(status_code=500, detail=f"Investigation failed: {exc}") from exc
     finally:

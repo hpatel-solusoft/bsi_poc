@@ -25,8 +25,8 @@ from core.db import DatabaseUnavailableError, get_cursor
 logger = logging.getLogger(__name__)
 
 _INSERT_SQL = """
-    INSERT INTO report_artifacts (case_id, content, status)
-    VALUES (%(case_id)s, %(content)s, %(status)s)
+    INSERT INTO report_artifacts (case_id, content, status, username)
+    VALUES (%(case_id)s, %(content)s, %(status)s, %(username)s)
     RETURNING id, generated_at;
 """
 
@@ -51,11 +51,16 @@ def save_report(
     case_id: str,
     content: Dict[str, Any],
     status: str = "draft",
+    username: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Persist one generated report as a new row (Section D.5 — every
     /generate_report call writes a fresh draft; it never overwrites a
     prior one, which is what makes drafts comparable and recoverable).
+
+    username is the investigator/caller who generated this draft — every
+    endpoint now carries it (see api/models.py's AuthFieldsMixin) —
+    stored alongside the draft purely for attribution.
 
     Best-effort by design, matching every other Postgres write in this
     codebase (core/case_session_repository.py, core/pipeline_state_repository.py):
@@ -75,14 +80,16 @@ def save_report(
                     "case_id": case_id,
                     "content": json.dumps(content),
                     "status": status,
+                    "username": username,
                 },
             )
             row = cur.fetchone()
         logger.info(
-            "report_artifacts insert OK for case_id=%s id=%s status=%s",
+            "report_artifacts insert OK for case_id=%s id=%s status=%s username=%s",
             case_id,
             row["id"] if row else None,
             status,
+            username,
         )
         return dict(row) if row else None
     except (psycopg2.Error, DatabaseUnavailableError) as exc:

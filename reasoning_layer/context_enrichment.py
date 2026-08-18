@@ -228,7 +228,11 @@ def _compute_signals(session, subject_id: str) -> Dict[str, Any]:
 
 
 def enrich_graph_context(
-    case_id: str, subject_id: str, force: bool = False, reason: str = "api_reload_ai_summary"
+    case_id: str,
+    subject_id: str,
+    force: bool = False,
+    reason: str = "api_reload_ai_summary",
+    username: Optional[str] = None,
 ) -> dict:
     """
     Context Enrichment processing (AI-13 / Section 9.1). For the given
@@ -256,6 +260,13 @@ def enrich_graph_context(
     that is the only way a route can make this re-infer rather than
     return the cached rules_fired.
 
+    username is the investigator/caller whose request reached this
+    function (threaded from the API layer — see api/models.py's
+    AuthFieldsMixin) and is passed straight through to
+    pipeline.run_pipeline_for_case for attribution on
+    pipeline_execution_state. None for a caller with no request-scoped
+    username (e.g. the ETL CLI path).
+
     Raises:
         ValueError: on a missing case_id or subject_id.
         GraphUnavailableError / Neo4jError / ValueError from the pipeline:
@@ -276,7 +287,7 @@ def enrich_graph_context(
     # reasoned before they can form a network, so reasoning the primary
     # alone silently suppressed them. The returned rules_fired is the
     # merged case-level block, with per-instance detail.
-    pipeline_envelope = pipeline.run_pipeline_for_case(case_id, force=force, reason=reason)
+    pipeline_envelope = pipeline.run_pipeline_for_case(case_id, force=force, reason=reason, username=username)
     rules_fired = pipeline_envelope["result"].get("rules_fired", [])
 
     # --- Steps 3 & 4: read graph_context and compute signals ---
