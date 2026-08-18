@@ -8,6 +8,29 @@ PostgreSQL fallback (that lives in core/case_store.py and its repositories).
 """
 
 import logging
+
+# THE ONE place this application configures logging. Every other module
+# (appworks/appworks_auth.py included) only ever calls
+# logging.getLogger(__name__) — never logging.basicConfig() — because
+# basicConfig() configures the ROOT logger for the whole process, and
+# only ever takes effect on its FIRST call; every later call is a silent
+# no-op. A library/leaf module calling it (appworks_auth.py used to,
+# unguarded, at import time) means whichever module happens to be
+# imported first wins that race and silently decides the format for
+# EVERY log line the entire application ever emits — which is exactly
+# what was happening here: appworks_auth's bare
+# logging.basicConfig(level=logging.INFO) (no format string) was
+# executing before this call ever got a chance to, locking in Python's
+# bare default format (just "LEVEL:logger.name:message", no timestamp)
+# for the whole app. This call is placed here, as the very first thing
+# this module — the actual application entry point — does, specifically
+# so it always wins that race regardless of import order elsewhere.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 import os
 import time
 from datetime import datetime, timezone
@@ -621,7 +644,7 @@ def similar_cases(
             username=username,
         )
 
-        logger.info(f"SIMILAR CASES NARRATIVE TOTAL KEYs: {len(similar_cases_data)}")
+        logger.info("SIMILAR CASES NARRATIVE TOTAL KEYs: %d", len(similar_cases_data))
         return {
             "complaint_number": get_complaint_number(case_data) or req.case_id,
             "status": "completed",

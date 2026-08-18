@@ -114,7 +114,7 @@ def _parse_condition_to_threshold(condition_str: str, pts: float, dimension_key:
     if m:
         return {"min_value": float(m.group(1)), "points": pts}
 
-    logger.debug(f"_parse_condition_to_threshold: could not parse {condition_str!r} as numeric threshold.")
+    logger.debug("_parse_condition_to_threshold: could not parse %r as numeric threshold.", condition_str)
     return {}
 
 
@@ -169,7 +169,7 @@ def _fetch_child_rules_breakpoints(
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.warning(f"Child Rules fetch failed for item {item_id}: {e}")
+        logger.warning("Child Rules fetch failed for item %s: %s", item_id, e)
 
     return thresholds
 
@@ -218,7 +218,7 @@ def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTr
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.warning(f"Similar case volume count failed: {e}")
+        logger.warning("Similar case volume count failed: %s", e)
     return total
 
 
@@ -230,7 +230,7 @@ def _build_case_context(
     ai_summary: Optional[Dict] = None,
 ) -> Dict:
     """Builds universal case context. Prefers ai_summary, falls back to dynamic AppWorks fetching."""
-    logger.info(f"Building universal case context for Case {case_id}, Subject {subject_id}")
+    logger.info("Building universal case context for Case %s, Subject %s", case_id, subject_id)
     context: Dict[str, Any] = {
         "case_id": case_id,
         "subject_id": subject_id,
@@ -303,7 +303,7 @@ def _build_case_context(
         # silently scoring this case on incomplete data.
         raise
     except Exception as e:
-        logger.warning(f"Failed fallback subject history context: {e}")
+        logger.warning("Failed fallback subject history context: %s", e)
 
     context["subject_history"] = prior_case_count
     context["primary_in_prior_cases"] = primary_in_prior_cases
@@ -329,7 +329,7 @@ def _build_case_context(
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.warning(f"Failed fallback financial context: {e}")
+        logger.warning("Failed fallback financial context: %s", e)
 
     context["financial_exposure"] = total_calculated
     context["total_ordered"] = total_ordered
@@ -352,7 +352,7 @@ def _build_case_context(
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.warning(f"Failed fallback allegation severity: {e}")
+        logger.warning("Failed fallback allegation severity: %s", e)
 
     context["has_open_allegation"] = has_open_allegation
 
@@ -383,7 +383,7 @@ def _build_case_context(
 
 def _evaluate_numeric(rule: RiskRuleDef, context: Dict) -> TriggeredRule:
     """Scores a single numeric value dynamically and applies business bonuses."""
-    logger.debug(f"Executing [NUMERIC] strategy for rule '{rule.rule_id}' (dimension: {rule.dimension_key})")
+    logger.debug("Executing [NUMERIC] strategy for rule %r (dimension: %s)", rule.rule_id, rule.dimension_key)
     value = float(context.get(rule.dimension_key, 0.0))
     weight, bonus_applied = 0.0, 0.0
     finding_msg = f"Value {value} did not meet any thresholds."
@@ -424,7 +424,7 @@ def _evaluate_numeric(rule: RiskRuleDef, context: Dict) -> TriggeredRule:
 
 def _evaluate_additive(rule: RiskRuleDef, context: Dict) -> TriggeredRule:
     """100% Dynamic Additive Evaluator."""
-    logger.debug(f"Executing [ADDITIVE] strategy for rule '{rule.rule_id}'")
+    logger.debug("Executing [ADDITIVE] strategy for rule %r", rule.rule_id)
     weight = 0.0
     met_conditions = []
     wf_props = context.get("workfolder_properties", {})
@@ -489,7 +489,7 @@ def _evaluate_additive(rule: RiskRuleDef, context: Dict) -> TriggeredRule:
 
 def _evaluate_fraud_type(rule: RiskRuleDef, context: Dict) -> TriggeredRule:
     """Awards max points if case fraud types intersect with rule targets or description."""
-    logger.debug(f"Executing [FRAUD_TYPE_MATCH] strategy for rule '{rule.rule_id}'")
+    logger.debug("Executing [FRAUD_TYPE_MATCH] strategy for rule %r", rule.rule_id)
     case_types = context.get("fraud_types", [])
 
     target_labels = [t.lower().strip() for t in (rule.target_fraud_types or [])]
@@ -549,16 +549,16 @@ def get_risk_rules(**kwargs) -> Dict:
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.error(f"fetch_risk_rules failed: {e}")
+        logger.error("fetch_risk_rules failed: %s", e)
 
-    logger.info(f"TOOL CALL: get_risk_rules -> Returning {len(rules_out)} active rules to LLM.")
+    logger.info("TOOL CALL: get_risk_rules -> Returning %d active rules to LLM.", len(rules_out))
     return {"result": {"active_rules": rules_out}, "provenance": tracker.get_provenance_block()}
 
 
 def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]:
     """TOOL 1: Fetches ALL active BSI fraud detection rules from AppWorks."""
     _RULES_LIST_ENDPOINT = AppWorksPaths.FraudRules.risk_rules_all()
-    logger.info(f"_fetch_risk_rules -> Fetching from {_RULES_LIST_ENDPOINT}")
+    logger.info("_fetch_risk_rules -> Fetching from %s", _RULES_LIST_ENDPOINT)
 
     if tracker is None:
         tracker = ProvenanceTracker("Catalog", "FraudRiskRules")
@@ -659,7 +659,7 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
                 except AppworksSessionExpiredError:
                     raise
                 except Exception as e:
-                    logger.warning(f"Row {idx} ({rule_id}): item fetch failed: {e}")
+                    logger.warning("Row %s (%s): item fetch failed: %s", idx, rule_id, e)
 
             if item_id or child_href:
                 parsed_thresholds = _fetch_child_rules_breakpoints(
@@ -690,23 +690,23 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.error(f"FraudRiskRules fetch failed: {e}")
+        logger.error("FraudRiskRules fetch failed: %s", e)
 
-    logger.info(f"_fetch_risk_rules: Returning {len(rules_out)} active rules to LLM.")
+    logger.info("_fetch_risk_rules: Returning %d active rules to LLM.", len(rules_out))
     tracker.add_source("FraudRiskRulesCatalog", f"{len(rules_out)} active rules loaded")
     return rules_out
 
 
 def calculate_risk_metrics(case_id: str, subject_id: str, fraud_types: List, **kwargs) -> Dict:
     """TOOL 1: Deterministic BSI risk scoring."""
-    logger.info(f"TOOL CALL: calculate_risk_metrics — Case: {case_id} Subject: {subject_id}")
+    logger.info("TOOL CALL: calculate_risk_metrics — Case: %s Subject: %s", case_id, subject_id)
     ai_summary = kwargs.get("ai_summary")
 
     tracker = ProvenanceTracker("RiskCalculation", case_id)
     logger.info("Fetching ground-truth active rules directly from AppWorks/Cache...")
     rule_payload = _fetch_risk_rules(tracker=tracker)
 
-    logger.info(f"Loaded {len(rule_payload)} active rules. Starting risk calculation...")
+    logger.info("Loaded %d active rules. Starting risk calculation...", len(rule_payload))
 
     # Extract the full list of rules from the payload
     active_rules = rule_payload

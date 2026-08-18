@@ -3,6 +3,8 @@
 # BSI POC - Centralized Service Configuration
 # ----------------------------------------------------------------
 
+import os
+
 SIMILAR_CASES_MAX_PER_TYPE = 5
 SIMILAR_CASES_MAX_TOTAL = 5
 SIMILAR_CASES_REQUIRED_STATUS = "Closed"
@@ -90,3 +92,18 @@ DB_POOL_MAX_CONN = 10
 # turns per case. A "turn" is one message (user or assistant), so 20
 # turns is 10 question/answer exchanges.
 CONVERSATION_HISTORY_MAX_TURNS = 20
+
+# ----------------------------------------------------------------
+# Diagnostic-only, PII-bearing logging — OFF unless explicitly enabled.
+# ----------------------------------------------------------------
+# reasoning_layer/report_llm_context.py can dump the exact, complete
+# JSON payload sent to the report-generation LLM prompt — genuinely
+# useful when QA-ing what the model actually saw, but that payload
+# contains unredacted case PII (subject DOB, phone, address, allegation
+# narratives naming real people). It must never be on by default: a
+# standard log-level bump (e.g. flipping to DEBUG to chase an unrelated
+# issue) must not be what turns this on as a side effect. An engineer
+# who genuinely needs it sets BSI_LOG_LLM_PROMPTS=1 for that specific
+# debugging session, understanding that PII will reach whatever captures
+# this process's logs.
+LOG_LLM_PROMPTS = os.getenv("BSI_LOG_LLM_PROMPTS", "").strip().lower() in ("1", "true", "yes")

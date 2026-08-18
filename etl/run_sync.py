@@ -40,7 +40,6 @@ from core.db import init_pool
 from etl.ingest_service import ingest
 from reasoning_layer.neo4j_client import init_driver
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -144,4 +143,11 @@ def main(argv: List[str]) -> int:
 
 
 if __name__ == "__main__":
+    # Guarded here, not at module level — see
+    # scripts/dedupe_symmetric_edges.py's identical comment and
+    # api/server.py's own logging.basicConfig() call for the full
+    # explanation. This module IS confirmed never imported elsewhere
+    # today, but guarding it costs nothing and prevents that from ever
+    # becoming a silent bug if that changes.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     sys.exit(main(sys.argv[1:]))

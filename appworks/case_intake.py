@@ -57,25 +57,25 @@ def build_case_header_data(case_id: str) -> Dict[str, Any]:
     retrieval to the shared entity_mappers (single-call /lists/ endpoints).
     Returns the strict architecture-compliant {result, provenance} envelope.
     """
-    logger.info(f"🚀 [LIVE] Initiating deep fetch for Case ID: {case_id}")
+    logger.info("🚀 [LIVE] Initiating deep fetch for Case ID: %s", case_id)
 
     # 1. Initialize System-Wide Provenance Tracker (Principle 8)
     tracker = ProvenanceTracker("Workfolder", case_id)
 
     # 2. Fetch Root Workfolder
     endpoint = AppWorksPaths.Workfolder.item(case_id)
-    logger.info(f"📡 Requesting Workfolder from: {endpoint}")
+    logger.info("📡 Requesting Workfolder from: %s", endpoint)
     props, links = safe_fetch(endpoint, "Workfolder")
 
     # Guard clause: If the core case doesn't exist or API is down, fail safely
     if not props:
-        logger.error(f"❌ Critical Error: Could not fetch root Workfolder for {case_id}")
+        logger.error("❌ Critical Error: Could not fetch root Workfolder for %s", case_id)
         return {
             "result": {"case_id": case_id, "error": "Case record not found or API unavailable"},
             "provenance": tracker.get_provenance_block(computed_by="Failed REST retrieval"),
         }
 
-    logger.info(f"✅ Successfully retrieved Workfolder for {case_id}")
+    logger.info("✅ Successfully retrieved Workfolder for %s", case_id)
 
     # 3. Delegate to shared mappers — each is a single /lists/ call now
     # (see entity_mappers.py docstring), keyed off the workfolder id itself

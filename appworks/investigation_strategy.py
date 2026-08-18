@@ -38,7 +38,7 @@ def get_investigation_plan(fraud_types: List[str], risk_tier: str, **kwargs) -> 
     ai_summary = kwargs.get("ai_summary")
     # 🐛 BUG FIX: Python dicts use len(), not .length()
     ai_summary_len = len(ai_summary) if ai_summary else "None"
-    logger.info(f"AI summary in investigation_strategy context length: {ai_summary_len}")
+    logger.info("AI summary in investigation_strategy context length: %s", ai_summary_len)
 
     type_slug = "-".join(str(item).replace(" ", "_") for item in fraud_types[:2]) or "UNSPECIFIED"
 
@@ -48,7 +48,7 @@ def get_investigation_plan(fraud_types: List[str], risk_tier: str, **kwargs) -> 
         "risk_tier": risk_tier,
     }
 
-    logger.info(f"investigation_strategy plan context returned: {result_data}")
+    logger.info("investigation_strategy plan context returned: %s", result_data)
     validated = InvestigationPlan(**result_data)
 
     # ── NEW: Standardized Provenance Envelope ───────────────────────

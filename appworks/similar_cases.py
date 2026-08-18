@@ -66,7 +66,7 @@ def search_similar_cases(case_id: str, fraud_types: list, max_total_results: int
     max_per_type = settings.SIMILAR_CASES_MAX_PER_TYPE
     required_status = settings.SIMILAR_CASES_REQUIRED_STATUS.lower()
 
-    logger.info(f"Starting similar case search | active_case: {case_id} | max_total: {max_total_results}")
+    logger.info("Starting similar case search | active_case: %s | max_total: %s", case_id, max_total_results)
 
     # Initialize the standardized ProvenanceTracker
     tracker = ProvenanceTracker("Workfolder", case_id)
@@ -102,7 +102,7 @@ def search_similar_cases(case_id: str, fraud_types: list, max_total_results: int
         except AppworksSessionExpiredError:
             raise
         except Exception as e:
-            logger.error(f"Failed to fetch allegations list for type {type_id}: {e}")
+            logger.error("Failed to fetch allegations list for type %s: %s", type_id, e)
             rows = []
 
         type_candidates = []
@@ -191,7 +191,7 @@ def get_allegation_types(**kwargs) -> dict:
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.error(f"Failed to fetch allegation types catalog: {e}")
+        logger.error("Failed to fetch allegation types catalog: %s", e)
         items = []
 
     seen_type_ids = set()

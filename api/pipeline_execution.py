@@ -742,7 +742,7 @@ def run_plan_pipeline(
         validated_plan = InvestigationPlanContract(**investigation_plan)
         investigation_plan = validated_plan.model_dump(exclude_none=True)
     except Exception as e:
-        logger.warning(f"Investigation plan schema validation failed — storing unvalidated: {e}")
+        logger.warning("Investigation plan schema validation failed — storing unvalidated: %s", e)
 
     # Modify Investigation Steps flow (Section D.6): a saved override
     # replaces investigation_steps in the DISPLAYED plan only —

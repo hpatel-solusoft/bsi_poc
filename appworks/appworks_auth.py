@@ -15,7 +15,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+# NOTE: no logging.basicConfig() here. This is a leaf/library module
+# (imported transitively by dispatcher.py, appworks_utils.py, every
+# appworks/*.py feature module) — it only ever gets a logger, never
+# configures one. logging.basicConfig() configures the process-wide
+# ROOT logger and only takes effect on its first call; a library module
+# calling it means whichever module happens to import first silently
+# decides the log format for the entire application. That's exactly
+# what a bare, unguarded call here used to do — see api/server.py's own
+# logging.basicConfig() call (the application's actual entry point,
+# and the only place in this codebase that should ever call it for a
+# running service) for the real configuration and the full explanation.
 logger = logging.getLogger(__name__)
 
 OTDS_URL = os.getenv("OTDS_URL")
@@ -135,7 +145,7 @@ def perform_login() -> bool:
         return False
 
     try:
-        logger.info(f"[Auth] Requesting OTDS Ticket: {OTDS_URL}")
+        logger.info("[Auth] Requesting OTDS Ticket: %s", OTDS_URL)
         otds_resp = requests.post(OTDS_URL, json={"userName": USER, "password": PASS}, timeout=15)
         otds_resp.raise_for_status()
         ticket = otds_resp.json().get("ticket")
@@ -180,7 +190,7 @@ def perform_login() -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Authentication Failure: {str(e)}")
+        logger.error("Authentication Failure: %s", e)
         return False
 
 
@@ -338,7 +348,7 @@ def fetch_list(endpoint: str, params: Optional[dict] = None, _retry: bool = True
     headers = {"SAMLart": token, "Accept": "application/json"}
 
     try:
-        logger.info(f"[REST-LIST] GET {url}")
+        logger.info("[REST-LIST] GET %s", url)
         resp = requests.get(url, params=q_params, headers=headers, timeout=20)
 
         if resp.status_code == 401:
@@ -375,7 +385,7 @@ def fetch_list(endpoint: str, params: Optional[dict] = None, _retry: bool = True
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.error(f"REST-LIST Request Failed [{endpoint}]: {str(e)}")
+        logger.error("REST-LIST Request Failed [%s]: %s", endpoint, e)
         raise ConnectionError(f"AppWorks List API Error: {str(e)}")
 
 
@@ -412,7 +422,7 @@ def fetch(
 
     # Guard: prevent list-based IDs
     if "items/[" in endpoint or "items/%5B" in endpoint:
-        logger.error(f"Invalid API call detected: {endpoint}")
+        logger.error("Invalid API call detected: %s", endpoint)
         raise ValueError(
             "AppWorks REST API /items/{id} does not support list-based IDs. "
             "Use /lists/ endpoints for filtering and searching."
@@ -439,7 +449,7 @@ def fetch(
     headers = {"SAMLart": token, "Content-Type": "application/json", "Accept": "application/json"}
 
     try:
-        logger.info(f"[REST] {method} {url}")
+        logger.info("[REST] %s %s", method, url)
         resp = requests.request(method, url, params=q_params, headers=headers, json=payload, timeout=20)
 
         if resp.status_code == 401:
@@ -485,5 +495,5 @@ def fetch(
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
-        logger.error(f"REST Request Failed [{endpoint}]: {str(e)}")
+        logger.error("REST Request Failed [%s]: %s", endpoint, e)
         raise ConnectionError(f"AppWorks API Error: {str(e)}")

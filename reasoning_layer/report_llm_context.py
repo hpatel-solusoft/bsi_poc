@@ -99,6 +99,8 @@ import json
 import logging
 from typing import Any, Dict, List, Tuple
 
+from config.settings import LOG_LLM_PROMPTS
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
@@ -463,20 +465,34 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
         reduction_pct,
     )
 
-    # Explicit debug print of the exact JSON that will be serialised into
-    # the LLM prompt, plus the full before/after diagnostics — requested
-    # so the report-generation input is always visible/inspectable, not
-    # just logged at DEBUG level (which is off by default in most deploys).
-    print("=" * 100)
-    print(f"[report_llm_context] case_id={case_id or 'unknown'}")
-    print(f"[report_llm_context] BEFORE keys ({len(before_keys)}): {before_keys}")
-    print(f"[report_llm_context] AFTER  keys ({len(after_keys)}): {after_keys}")
-    print(
-        f"[report_llm_context] BEFORE size: {before_bytes} bytes | AFTER size: {after_bytes} bytes "
-        f"| reduction: {reduction_pct:.1f}%"
-    )
-    print("[report_llm_context] FINAL JSON going to the LLM prompt:")
-    print(json.dumps(context, indent=2, default=str))
-    print("=" * 100)
+    # The exact JSON sent to the report-generation LLM prompt — genuinely
+    # useful for QA-ing what the model actually saw, but it contains
+    # unredacted case PII (subject DOB, phone, address, allegation
+    # narratives naming real people), so it is NEVER emitted unless
+    # explicitly opted into via BSI_LOG_LLM_PROMPTS=1 (see
+    # config/settings.py's LOG_LLM_PROMPTS for the full reasoning) — a
+    # standard log-level bump to DEBUG for an unrelated issue must not
+    # be what turns this on as a side effect. logger.debug(), not
+    # print(): even opted in, this stays inside the normal logging
+    # framework (respects handlers/formatters/filters/routing) rather
+    # than writing straight to stdout, which several deployment setups
+    # (container log aggregators especially) capture more broadly, with
+    # less access control, than an application's own configured log
+    # sinks.
+    if LOG_LLM_PROMPTS:
+        logger.debug(
+            "[report_llm_context] case_id=%s | BEFORE keys (%d): %s | AFTER keys (%d): %s | "
+            "BEFORE size: %d bytes | AFTER size: %d bytes | reduction: %.1f%% | "
+            "FINAL JSON going to the LLM prompt:\n%s",
+            case_id or "unknown",
+            len(before_keys),
+            before_keys,
+            len(after_keys),
+            after_keys,
+            before_bytes,
+            after_bytes,
+            reduction_pct,
+            json.dumps(context, indent=2, default=str),
+        )
 
     return context

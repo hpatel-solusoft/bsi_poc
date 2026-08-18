@@ -36,14 +36,14 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
     3-call chase (the last of which existed only because childEntities list
     rows carry a bare 'self' href, not the parent Workfolder relationship).
     """
-    logger.info(f"🚀 [LIVE] Context Enrichment for Subject ID: {subject_id}")
+    logger.info("🚀 [LIVE] Context Enrichment for Subject ID: %s", subject_id)
 
     tracker = ProvenanceTracker("Subject", subject_id)
 
     href = AppWorksPaths.Subjects.by_subject(subject_id)
     rows = get_relationship_items(href, "All_Subjects")
 
-    logger.info(f"📋 Found {len(rows)} case row(s) for Subject {subject_id}")
+    logger.info("📋 Found %d case row(s) for Subject %s", len(rows), subject_id)
 
     first_name = ""
     last_name = ""
@@ -72,13 +72,13 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
 
             # Exclude current case
             if case_id and str(wf_id) == str(case_id):
-                logger.info(f"  Skipping current case {wf_id} from prior case history")
+                logger.info("  Skipping current case %s from prior case history", wf_id)
                 continue
 
             tracker.add_source("Workfolder", wf_id)
 
             # Fetch linked Workfolder summary
-            logger.info(f"📂 Fetching linked Workfolder: {wf_id}")
+            logger.info("📂 Fetching linked Workfolder: %s", wf_id)
             wf_props, _ = safe_fetch(AppWorksPaths.Workfolder.item(wf_id), "Workfolder")
 
             core_props = map_workfolder_core(wf_props)
@@ -103,9 +103,9 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
             # enrichment carries the same rejected token.
             raise
         except Exception as exc:
-            logger.warning(f"⚠️ Failed processing Subjects row: {exc}")
+            logger.warning("⚠️ Failed processing Subjects row: %s", exc)
 
-    logger.info(f"✅ {len(prior_cases)} prior case(s) found for Subject {subject_id}")
+    logger.info("✅ %d prior case(s) found for Subject %s", len(prior_cases), subject_id)
 
     return {
         "result": {

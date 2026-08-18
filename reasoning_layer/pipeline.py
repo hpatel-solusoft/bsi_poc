@@ -183,7 +183,13 @@ def _run_pipeline_locked(
     existing = pipeline_state_repository.get_run_state(case_id, subject_id)
     already_done = existing and existing.get("status") == "completed" and existing.get("cleared_at") is None
     if already_done and not force:
-        logger.info(
+        # DEBUG, not INFO — same reasoning as reasoning_layer/scope.py's
+        # identical downgrade: fires once per subject in the reasoning
+        # population (a 13-subject case produces 13 of these per page
+        # load), and reasoning_layer.pipeline's own case-level
+        # "run_pipeline_for_case: ... direct_subjects=X reasoned_subjects=Y"
+        # already reports this at the right INFO granularity.
+        logger.debug(
             "run_pipeline SKIPPED case_id=%s subject_id=%s — already completed at %s " "(Principle 10)",
             case_id,
             subject_id,

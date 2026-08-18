@@ -76,8 +76,8 @@ class BSIAgentRunner:
         interface and needs access to the full on_demand catalogue.
         Manifest is the single source of truth for all other scopes.
         """
-        logger.info(f"Scoping tools for scope={scope!r}")
-        logger.debug(f"scope_index: {self.dispatcher.scope_index}")
+        logger.info("Scoping tools for scope=%r", scope)
+        logger.debug("scope_index: %s", self.dispatcher.scope_index)
         if scope == "ALL":
             return self.all_tools
         names = set(self.dispatcher.scope_index.get(scope, []))
@@ -150,7 +150,7 @@ class BSIAgentRunner:
 
             # Loop exit: LLM finished or produced no tool calls
             if choice.finish_reason == "stop" or not msg.tool_calls:
-                logger.info(f"[AGENT] Turn {turn}: finish_reason={choice.finish_reason!r} — loop complete")
+                logger.info("[AGENT] Turn %s: finish_reason=%r — loop complete", turn, choice.finish_reason)
                 break
 
             # ── Process all tool calls in this turn ───────────────────
@@ -207,7 +207,7 @@ class BSIAgentRunner:
                         "computed_by": prov.get("computed_by", ""),
                     }
                     tool_call_log.append(log_entry)
-                    logger.info(f"[TOOL OK]  tool={tool_name!r} elapsed={elapsed_ms}ms")
+                    logger.info("[TOOL OK]  tool=%r elapsed=%sms", tool_name, elapsed_ms)
 
                 else:
                     # Gate or execution error — LLM sees it and can self-correct
@@ -237,7 +237,7 @@ class BSIAgentRunner:
 
             # Safety: prevent runaway loops
             if turn >= self.max_turns:
-                logger.warning(f"[AGENT] Turn limit reached ({turn}) — forcing exit")
+                logger.warning("[AGENT] Turn limit reached (%s) — forcing exit", turn)
                 break
 
         return messages, provenance_trail, tool_call_log

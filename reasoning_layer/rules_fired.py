@@ -1173,7 +1173,12 @@ def build_rules_fired(scope: Dict[str, Any], execution_records: List[Dict[str, A
 
     fired_count = sum(1 for entry in block if entry["fired"])
     rejected_count = sum(entry["rejected_count"] for entry in block)
-    logger.info(
+    # DEBUG, not INFO — same reasoning as reasoning_layer/scope.py's
+    # identical downgrade: fires once per subject in the reasoning
+    # population, and reasoning_layer.pipeline's case-level
+    # "run_pipeline_for_case: ... rules_fired=X/14" is the right INFO
+    # granularity for routine operation.
+    logger.debug(
         "rules_fired: case_id=%s subject_id=%s %d/%d rules fired, "
         "%d rejected instance(s) retained for revert",
         scope["case_id"],

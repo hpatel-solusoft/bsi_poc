@@ -163,12 +163,17 @@ def get_run_state(case_id: str, subject_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     if row is None:
-        logger.info("pipeline_execution_state MISS case_id=%s subject_id=%s (never run)", case_id, subject_id)
+        # DEBUG, not INFO — same reasoning as reasoning_layer/pipeline.py's
+        # matching downgrade just above this table's actual caller: fires
+        # once per subject per call, and is a raw cache-lookup result, not
+        # a business-level event. reasoning_layer.pipeline's case-level
+        # "run_pipeline_for_case: ..." summary is the right INFO signal.
+        logger.debug("pipeline_execution_state MISS case_id=%s subject_id=%s (never run)", case_id, subject_id)
         return None
 
     # A cleared run is treated as "never run" by the caller (Section 9.5) —
     # surface cleared_at so pipeline.py can log why it's re-running.
-    logger.info(
+    logger.debug(
         "pipeline_execution_state HIT case_id=%s subject_id=%s status=%s " "wave1=%s wave2=%s cleared_at=%s",
         case_id,
         subject_id,

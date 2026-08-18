@@ -28,7 +28,7 @@ def safe_fetch(href: str, entity_name: str = "Unknown") -> Tuple[Dict, Dict]:
     try:
         res = fetch(href)
         if not res:
-            logger.debug(f"Empty response for {entity_name} at {href}")
+            logger.debug("Empty response for %s at %s", entity_name, href)
             return {}, {}
 
         properties = res.get("Properties", {})
@@ -46,7 +46,7 @@ def safe_fetch(href: str, entity_name: str = "Unknown") -> Tuple[Dict, Dict]:
         # Logs the specific network/API failure rather than swallowing it.
         # This prevents the system from assuming an entity has no data
         # when the API is actually unreachable.
-        logger.error(f"❌ API Failure fetching {entity_name} [{href}]: {str(e)}")
+        logger.error("❌ API Failure fetching %s [%s]: %s", entity_name, href, e)
         return {}, {}
 
 
@@ -106,7 +106,7 @@ def get_relationship_items(rel_href: str, embedded_key: str) -> List[Dict]:
         # not look like "this relationship has no items".
         raise
     except Exception as e:
-        logger.error(f"❌ API Failure fetching relationship list [{rel_href}]: {str(e)}")
+        logger.error("❌ API Failure fetching relationship list [%s]: %s", rel_href, e)
         return []
 
 

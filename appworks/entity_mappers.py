@@ -138,7 +138,7 @@ def map_commentary(workfolder_id: str, tracker: ProvenanceTracker) -> Dict[str, 
                 if desc:
                     allegation_description = desc
         except Exception as exc:
-            logger.warning(f"⚠️ Failed processing commentary item: {exc}")
+            logger.warning("⚠️ Failed processing commentary item: %s", exc)
 
     return {
         "items": items,
@@ -257,7 +257,7 @@ def map_allegations(workfolder_id: str, tracker: ProvenanceTracker) -> List[Dict
                 }
             )
         except Exception as exc:
-            logger.error(f"⚠️ Error mapping individual allegation: {exc}")
+            logger.error("⚠️ Error mapping individual allegation: %s", exc)
 
     return allegations_list
 
@@ -282,7 +282,7 @@ def map_financials(workfolder_id: str, tracker: ProvenanceTracker) -> Dict[str, 
 
     href = AW.FinancialList.by_workfolder(workfolder_id)
     items = get_relationship_items(href, "Financial_All")
-    logger.info(f"🔍 Found {len(items)} financial record(s)")
+    logger.info("🔍 Found %d financial record(s)", len(items))
 
     for item in items:
         try:
@@ -314,7 +314,7 @@ def map_financials(workfolder_id: str, tracker: ProvenanceTracker) -> Dict[str, 
                 }
             )
         except Exception as e:
-            logger.error(f"⚠️ Error mapping individual financial record: {str(e)}")
+            logger.error("⚠️ Error mapping individual financial record: %s", e)
 
     return {
         "records": records,
@@ -421,7 +421,7 @@ def map_subject_addresses(subject_id: str, tracker: ProvenanceTracker) -> List[D
                 }
             )
         except Exception as e:
-            logger.error(f"⚠️ Error mapping individual address: {str(e)}")
+            logger.error("⚠️ Error mapping individual address: %s", e)
 
     return addresses_list
 
@@ -461,7 +461,7 @@ def map_subjects(workfolder_id: str, tracker: ProvenanceTracker) -> List[Dict[st
         return subjects_list
 
     rows = fetch_subject_rows(workfolder_id, tracker)
-    logger.info(f"🔍 Found {len(rows)} subject(s)")
+    logger.info("🔍 Found %d subject(s)", len(rows))
 
     for row in rows:
         try:
@@ -504,6 +504,6 @@ def map_subjects(workfolder_id: str, tracker: ProvenanceTracker) -> List[Dict[st
                 }
             )
         except Exception as e:
-            logger.error(f"⚠️ Error mapping individual subject: {str(e)}")
+            logger.error("⚠️ Error mapping individual subject: %s", e)
 
     return subjects_list

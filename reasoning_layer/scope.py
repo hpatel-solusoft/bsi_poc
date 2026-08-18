@@ -123,7 +123,16 @@ def resolve_scope(case_id: str, subject_id: str) -> Dict[str, Any]:
         },
         "subject_in_graph": True,
     }
-    logger.info(
+    # DEBUG, not INFO: this fires once PER SUBJECT in a case's reasoning
+    # population, on every route call that resolves scope — a 13-subject
+    # case produces 13 of these per page load. It's internal detail about
+    # how the scope-expansion algorithm reached its result; the
+    # case-level roll-up (reasoning_layer.pipeline's
+    # "run_pipeline_for_case: ... direct_subjects=X reasoned_subjects=Y")
+    # is the right INFO-level granularity for routine operation. Full
+    # per-subject detail is still one log-level flip away when actually
+    # debugging the scope algorithm itself.
+    logger.debug(
         "scope: case_id=%s subject_id=%s subjects_in_scope=%d cases_in_scope=%d expansion=%s",
         case_id,
         subject_id,

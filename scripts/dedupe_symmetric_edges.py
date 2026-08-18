@@ -58,7 +58,6 @@ from dataclasses import dataclass
 
 from reasoning_layer.neo4j_client import get_session
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("dedupe_duplicate_relationships")
 
 
@@ -214,4 +213,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Guarded here, not at module level: this module only self-configures
+    # logging when run directly as a script. If it's ever imported by
+    # something else in the future, it must not silently win the
+    # process-wide logging.basicConfig() race the way appworks_auth.py
+    # used to — see api/server.py's own basicConfig call for the full
+    # explanation of why that's a real bug, not just a style nitpick.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     sys.exit(main())
