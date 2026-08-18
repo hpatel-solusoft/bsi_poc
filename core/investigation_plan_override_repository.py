@@ -30,20 +30,20 @@ logger = logging.getLogger(__name__)
 
 _UPSERT_SQL = """
     INSERT INTO investigation_plan_overrides
-        (case_id, modified_steps, modified_by, comment, username, modified_on)
+        (case_id, modified_steps, modified_by, comment, modified_on, username)
     VALUES
-        (%(case_id)s, %(modified_steps)s, %(modified_by)s, %(comment)s, %(username)s, now())
+        (%(case_id)s, %(modified_steps)s, %(modified_by)s, %(comment)s, now(), %(username)s)
     ON CONFLICT (case_id) DO UPDATE SET
         modified_steps = EXCLUDED.modified_steps,
         modified_by    = EXCLUDED.modified_by,
         comment        = EXCLUDED.comment,
-        username       = EXCLUDED.username,
-        modified_on    = now()
+        modified_on    = now(),
+        username       = EXCLUDED.username
     RETURNING modified_on;
 """
 
 _SELECT_SQL = """
-    SELECT case_id, modified_steps, modified_by, comment, modified_on
+    SELECT case_id, modified_steps, modified_by, comment, modified_on, username
     FROM investigation_plan_overrides
     WHERE case_id = %(case_id)s;
 """

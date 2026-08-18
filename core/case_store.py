@@ -248,12 +248,34 @@ def get_route_generated_at(case_data: Dict[str, Any], route: str) -> Optional[st
 
     Reading one route's saved time never depends on, and never mutates,
     any other route's entry — each is an independent lookup into its
-    own {route: {summary, generated_at}} pair.
+    own {route: {summary, generated_at, username}} pair.
     """
     entry = (case_data.get(AGENT_SUMMARY_CACHE_KEY) or {}).get(route)
     if not isinstance(entry, dict):
         return None
     return entry.get("generated_at")
+
+
+def get_route_username(case_data: Dict[str, Any], route: str) -> Optional[str]:
+    """
+    The investigator who generated `route`'s currently-cached
+    agent_summary entry — same lookup shape as get_route_generated_at,
+    reading the sibling "username" key merge_agent_summary_cache writes
+    alongside "generated_at". This is deliberately the SAME source of
+    truth as generated_at: on a cache hit, the response shows who
+    actually generated the cached text, not whoever is asking right
+    now; on a fresh generation, the caller reads this right back after
+    merge_agent_summary_cache writes it, rather than trusting its own
+    separate copy of the current caller's identity.
+
+    Returns None on every case get_route_generated_at does (no cache
+    yet, route never cached, or a legacy entry with no username
+    attached — including every entry written before this field existed).
+    """
+    entry = (case_data.get(AGENT_SUMMARY_CACHE_KEY) or {}).get(route)
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("username")
 
 
 def get_route_generated_at_datetime(case_data: Dict[str, Any], route: str) -> Optional[datetime]:
@@ -328,24 +350,39 @@ def merge_agent_summary_cache(
     route: str,
     markdown_text: str,
     generated_at: Optional[str] = None,
+    username: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Fold this route's freshly generated agent_summary markdown — and the
-    time it was generated — into the case's agent_summary_cache dict,
-    carrying forward every OTHER route's already-cached {summary,
-    generated_at} entry from `case_data` (the pre-call resolution for
-    this request) UNTOUCHED, so persisting this route's result never
-    erases, or even changes the generated_at of, what another route
-    already cached for this case_id.
+    Fold this route's freshly generated agent_summary markdown — the
+    time it was generated, and who generated it — into the case's
+    agent_summary_cache dict, carrying forward every OTHER route's
+    already-cached {summary, generated_at, username} entry from
+    `case_data` (the pre-call resolution for this request) UNTOUCHED, so
+    persisting this route's result never erases, or even changes the
+    generated_at/username of, what another route already cached for
+    this case_id.
 
     generated_at defaults to now (UTC, ISO-8601) — the only caller that
     ever passes it explicitly is a test asserting an exact value; every
     route handler calls this with the default.
+
+    username is the investigator/caller who triggered this route's run
+    (every route now carries it via api/auth_headers.py's
+    get_username, threaded down from api/server.py or an
+    api/services/*.py caller). It is stored HERE — inside the JSON
+    ai_summary blob, alongside generated_at — rather than as a separate
+    case_ai_summary_store column: this cache is per-route (intake,
+    similar_cases, risk_assessment, plan each have their own entry), and
+    a single case-wide DB column cannot represent "who generated the
+    similar_cases tab" separately from "who generated the plan tab" the
+    way this per-route dict already does for generated_at. None is
+    accepted for a caller with no request-scoped username.
     """
     cache = dict(case_data.get(AGENT_SUMMARY_CACHE_KEY) or {})
     cache[route] = {
         "summary": markdown_text,
         "generated_at": generated_at or _utc_now_iso(),
+        "username": username,
     }
     return cache
 
@@ -407,17 +444,21 @@ def get_case_ai_summary_cache_updated_at(case_id: str) -> Optional[Any]:
     return cached_session.get("updated_at") if cached_session else None
 
 
-def persist_case_session(case_id: str, ai_summary: Dict[str, Any], username: Optional[str] = None) -> None:
+def persist_case_session(case_id: str, ai_summary: Dict[str, Any]) -> None:
     """
     Write-through the current merged ai_summary to the PostgreSQL fallback
     store. Best-effort — see case_session_repository.upsert_case_session
     for the failure policy (a write failure here never fails the request).
 
-    username is the investigator/caller who triggered this write (every
-    route now carries it on its request model — see api/models.py's
-    AuthFieldsMixin) and is passed straight through to
-    case_session_repository.upsert_case_session for attribution. None is
-    accepted for an internal caller with no request-scoped username.
+    No username parameter: case_ai_summary_store holds one row per
+    case_id, but a case can have up to four independently-attributed
+    entries (one per agent_summary_cache route — intake, similar_cases,
+    risk_assessment, plan), so a single case-wide "who wrote this"
+    column cannot represent that. Attribution instead lives INSIDE
+    ai_summary itself — merge_agent_summary_cache writes
+    {route: {summary, generated_at, username}} before this function is
+    ever called, so it round-trips through the same JSON blob this
+    function persists, with no separate column needed.
 
     Every caller (intake, similar_cases, risk_assessment, plan, copilot)
     runs through core.persistence_filters.strip_graph_derived_fields
@@ -437,7 +478,6 @@ def persist_case_session(case_id: str, ai_summary: Dict[str, Any], username: Opt
         ai_summary=ai_summary_to_persist,
         provenance_trail=ai_summary_to_persist.get("provenance_trail", []),
         source="appworks_fetch",
-        username=username,
     )
 
 

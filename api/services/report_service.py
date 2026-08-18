@@ -84,7 +84,7 @@ from utils.report_pdf_renderer import render_report_pdf, report_pdf_filename
 logger = logging.getLogger(__name__)
 
 
-def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
+def run_generate_report(req: ReportGenerationRequest, username: str, token: str) -> Dict[str, Any]:
     """
     ON-DEMAND — Report Generation Route (AI-18, Functional Spec Section
     8.7, Developer Spec Section 7.5). Built last — depends on /intake,
@@ -335,7 +335,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
                     endpoint="/generate_report",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
-                    username=req.username,
+                    username=username,
                 )
                 return {
                     "case_id": req.case_id,
@@ -468,7 +468,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             # token: caller's AppWorks SAMLart, consumed by
             # semantic_layer/dispatcher.py before any tool function sees
             # it — see appworks/appworks_auth.py's set_request_token.
-            execution_context={"token": req.token},
+            execution_context={"token": token},
         )
 
         # The authoritative related_network section is the DETERMINISTIC
@@ -559,7 +559,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
         # authoritative one (the AppWorks-saved report is). A write
         # failure here must not fail this investigator-facing response;
         # Neo4j + CS-4 already produced the authoritative content above.
-        persisted = save_report(req.case_id, report_content, status="draft", username=req.username)
+        persisted = save_report(req.case_id, report_content, status="draft", username=username)
 
         log_agent_call(
             case_id=req.case_id,
@@ -567,7 +567,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             endpoint="/generate_report",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
-            username=req.username,
+            username=username,
         )
 
         return {
@@ -599,7 +599,7 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             endpoint="/generate_report",
             latency_ms=int((time.time() - start) * 1000),
             status="auth_error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
@@ -612,14 +612,14 @@ def run_generate_report(req: ReportGenerationRequest) -> Dict[str, Any]:
             endpoint="/generate_report",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
     finally:
         logger.info("POST /generate_report completed for case_id=%s", req.case_id)
 
 
-def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
+def run_generate_report_pdf(req: ReportGenerationRequest, username: str, token: str) -> Response:
     """
     ON-DEMAND — Report PDF Export Route (New_REPORT_Design_1.md,
     ACTIONS #6-#7 / TASKS #5-#6). Same request contract as POST
@@ -767,7 +767,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
                         endpoint="/generate_report/pdf",
                         latency_ms=int(duration_seconds * 1000),
                         status="success",
-                        username=req.username,
+                        username=username,
                     )
 
                     cached_report_id = cached_content.get("report_id", "")
@@ -851,7 +851,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             # token: caller's AppWorks SAMLart, consumed by
             # semantic_layer/dispatcher.py before any tool function sees
             # it — see appworks/appworks_auth.py's set_request_token.
-            execution_context={"token": req.token},
+            execution_context={"token": token},
         )
 
         # The authoritative related_network section is the DETERMINISTIC
@@ -923,7 +923,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
         # has no JSON body to surface persisted-state metadata in (unlike
         # /generate_report's "persisted_to_postgres"), so the return
         # value is intentionally not captured here.
-        save_report(req.case_id, report_content, status="draft", username=req.username)
+        save_report(req.case_id, report_content, status="draft", username=username)
 
         log_agent_call(
             case_id=req.case_id,
@@ -931,7 +931,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             endpoint="/generate_report/pdf",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
-            username=req.username,
+            username=username,
         )
 
         pdf_bytes = render_report_pdf(
@@ -954,7 +954,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             endpoint="/generate_report/pdf",
             latency_ms=int((time.time() - start) * 1000),
             status="auth_error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
@@ -967,7 +967,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest) -> Response:
             endpoint="/generate_report/pdf",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=500, detail=f"Report PDF generation failed: {exc}") from exc
     finally:

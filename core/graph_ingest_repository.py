@@ -70,8 +70,8 @@ _MARK_STARTED = """
         status     = 'loading',
         started_at = now(),
         attempts   = graph_ingest_state.attempts + 1,
-        username   = EXCLUDED.username,
-        last_error = NULL;
+        last_error = NULL,
+        username   = EXCLUDED.username;
 """
 
 _MARK_LOADED = """

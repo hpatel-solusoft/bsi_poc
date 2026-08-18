@@ -73,6 +73,7 @@ from core.case_store import (
     get_route_generated_at,
     get_route_generated_at_datetime,
     get_route_summary_text,
+    get_route_username,
     merge_agent_summary_cache,
     persist_case_session,
 )
@@ -82,7 +83,7 @@ from reasoning_layer.investigation_tasks import build_rule_aware_tasks
 logger = logging.getLogger(__name__)
 
 
-def run_plan(req: PlanRequest) -> Dict[str, Any]:
+def run_plan(req: PlanRequest, username: str, token: str) -> Dict[str, Any]:
     """
     ON-DEMAND — Plan Route (Step 4 in flow).
     Calls get_investigation_plan only.
@@ -111,7 +112,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             req.ai_summary,
             required_field="risk_assessment",
             run_prerequisite_route=lambda: risk_assessment(
-                RiskAssessmentRequest(case_id=req.case_id, username=req.username, token=req.token)
+                RiskAssessmentRequest(case_id=req.case_id), username=username, token=token
             ),
             resolve_case_store=_resolve_case_store,
             route_name="plan",
@@ -208,7 +209,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
                     endpoint="/plan",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
-                    username=req.username,
+                    username=username,
                 )
                 # rule_aware_tasks / rules_fired are ALWAYS a live Neo4j
                 # read, cache hit or not — cached_plan never carries
@@ -248,6 +249,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
                             # different things.
                             "stale": staleness.stale,
                             "generated_at": get_route_generated_at(case_data, "plan"),
+                            "username": get_route_username(case_data, "plan"),
                         },
                     },
                 }
@@ -255,7 +257,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
         # token: caller's AppWorks SAMLart, consumed by
         # semantic_layer/dispatcher.py before any tool function sees it —
         # see appworks/appworks_auth.py's set_request_token.
-        execution_context = {"ai_summary": req.ai_summary, "token": req.token}
+        execution_context = {"ai_summary": req.ai_summary, "token": token}
         runner = get_runner()
         # Scope to plan retrieval only (Step 4)
 
@@ -333,12 +335,14 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             case_data,
             "plan",
             resolved_agent_summary,
+            username=username,
         )
         plan_generated_at = get_route_generated_at(ai_summary["investigation"], "plan")
+        plan_username = get_route_username(ai_summary["investigation"], "plan")
         CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
             AGENT_SUMMARY_CACHE_KEY
         ]
-        persist_case_session(req.case_id, ai_summary, username=req.username)
+        persist_case_session(req.case_id, ai_summary)
 
         # Response-only override splice — mirrors the /plan CACHE-HIT
         # branch above exactly: the persisted/cached text stays the pure
@@ -358,7 +362,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             endpoint="/plan",
             latency_ms=int((time.time() - start) * 1000),
             status="success",
-            username=req.username,
+            username=username,
         )
 
         # rules_fired for the response is a live Neo4j read, same as the
@@ -398,6 +402,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
                     "generated_at": plan_generated_at,
+                    "username": plan_username,
                 },
             },
         }
@@ -409,7 +414,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             endpoint="/plan",
             latency_ms=int((time.time() - start) * 1000),
             status="auth_error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
@@ -422,7 +427,7 @@ def run_plan(req: PlanRequest) -> Dict[str, Any]:
             endpoint="/plan",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=500, detail=f"Plan generation failed: {exc}") from exc
     finally:

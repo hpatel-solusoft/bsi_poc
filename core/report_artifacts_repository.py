@@ -31,7 +31,7 @@ _INSERT_SQL = """
 """
 
 _SELECT_LATEST_SQL = """
-    SELECT id, case_id, generated_at, content, status
+    SELECT id, case_id, generated_at, content, status, username
     FROM report_artifacts
     WHERE case_id = %(case_id)s
     ORDER BY generated_at DESC
@@ -39,7 +39,7 @@ _SELECT_LATEST_SQL = """
 """
 
 _SELECT_HISTORY_SQL = """
-    SELECT id, case_id, generated_at, content, status
+    SELECT id, case_id, generated_at, content, status, username
     FROM report_artifacts
     WHERE case_id = %(case_id)s
     ORDER BY generated_at DESC

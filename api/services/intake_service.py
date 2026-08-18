@@ -46,6 +46,7 @@ from core.case_store import (
     CASE_STORE,
     get_cached_route_summary,
     get_route_generated_at,
+    get_route_username,
     merge_agent_summary_cache,
     persist_case_session,
     try_resolve_case_data,
@@ -54,7 +55,7 @@ from core.case_store import (
 logger = logging.getLogger(__name__)
 
 
-def run_intake(req: intakeRequest) -> Dict[str, Any]:
+def run_intake(req: intakeRequest, username: str, token: str) -> Dict[str, Any]:
     """
     AUTO flow — Section 3.1.
     Runs AUTO tools 1-2 (intake, enrichment) in dependency order
@@ -127,7 +128,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
                     endpoint="/intake",
                     latency_ms=int(duration_seconds * 1000),
                     status="success",
-                    username=req.username,
+                    username=username,
                 )
                 return {
                     "case_id": req.case_id,
@@ -160,6 +161,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
                             # by requesting an explicit reload.
                             "stale": staleness.stale,
                             "generated_at": get_route_generated_at(cached_case_data, "intake"),
+                            "username": get_route_username(cached_case_data, "intake"),
                         },
                     },
                 }
@@ -179,7 +181,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             # it — see appworks/appworks_auth.py's set_request_token.
             # CASE_SUMMARY is where the case's AppWorks fetch actually
             # happens, so this is the route that needs it most.
-            execution_context={"token": req.token},
+            execution_context={"token": token},
         )
         sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
 
@@ -205,7 +207,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             staleness.should_rerun_full_pipeline,
             sections,
             provenance_trail,
-            username=req.username,
+            username=username,
         )
 
         # Cache this run's agent_summary markdown (carrying forward any
@@ -217,8 +219,10 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             existing_case_data,
             "intake",
             assistant_text,
+            username=username,
         )
         intake_generated_at = get_route_generated_at(sections, "intake")
+        intake_username = get_route_username(sections, "intake")
 
         # CS-4: populate warm in-memory store with all sections + provenance.
         CASE_STORE[req.case_id] = {**sections, "provenance_trail": provenance_trail}
@@ -233,7 +237,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             "investigation": sections,
             "provenance_trail": provenance_trail,
         }
-        persist_case_session(req.case_id, ai_summary, username=req.username)
+        persist_case_session(req.case_id, ai_summary)
 
         duration_seconds = round(time.time() - start, 1)
         log_agent_call(
@@ -242,7 +246,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             endpoint="/intake",
             latency_ms=int(duration_seconds * 1000),
             status="success",
-            username=req.username,
+            username=username,
         )
 
         return {
@@ -286,6 +290,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
                     "agent_summary_source": "llm",
                     "stale": staleness.stale,
                     "generated_at": intake_generated_at,
+                    "username": intake_username,
                 },
             },
         }
@@ -297,7 +302,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             endpoint="/intake",
             latency_ms=int((time.time() - start) * 1000),
             status="auth_error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except HTTPException:
@@ -310,7 +315,7 @@ def run_intake(req: intakeRequest) -> Dict[str, Any]:
             endpoint="/intake",
             latency_ms=int((time.time() - start) * 1000),
             status="error",
-            username=req.username,
+            username=username,
         )
         raise HTTPException(status_code=500, detail=f"Investigation failed: {exc}") from exc
     finally:

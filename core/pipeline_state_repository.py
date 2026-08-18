@@ -34,7 +34,6 @@ _START_RUN_SQL = """
     ON CONFLICT (case_id, subject_id) DO UPDATE SET
         status = 'running',
         started_at = now(),
-        username = EXCLUDED.username,
         wave1_status = 'pending',
         wave1_completed_at = NULL,
         extraction_status = 'pending',
@@ -44,7 +43,8 @@ _START_RUN_SQL = """
         completed_at = NULL,
         failed_at = NULL,
         cleared_at = NULL,
-        cleared_reason = NULL;
+        cleared_reason = NULL,
+        username = EXCLUDED.username;
 """
 
 _MARK_WAVE1_COMPLETE_SQL = """

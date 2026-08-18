@@ -18,18 +18,17 @@ from core.db import DatabaseUnavailableError, get_cursor
 logger = logging.getLogger(__name__)
 
 _UPSERT_SQL = """
-    INSERT INTO case_ai_summary_store (case_id, ai_summary, provenance_trail, source, username, updated_at)
-    VALUES (%(case_id)s, %(ai_summary)s, %(provenance_trail)s, %(source)s, %(username)s, now())
+    INSERT INTO case_ai_summary_store (case_id, ai_summary, provenance_trail, source, updated_at)
+    VALUES (%(case_id)s, %(ai_summary)s, %(provenance_trail)s, %(source)s, now())
     ON CONFLICT (case_id) DO UPDATE SET
         ai_summary       = EXCLUDED.ai_summary,
         provenance_trail = EXCLUDED.provenance_trail,
         source           = EXCLUDED.source,
-        username         = EXCLUDED.username,
         updated_at       = now();
 """
 
 _SELECT_SQL = """
-    SELECT case_id, ai_summary, provenance_trail, source, username, updated_at
+    SELECT case_id, ai_summary, provenance_trail, source, updated_at
     FROM case_ai_summary_store
     WHERE case_id = %(case_id)s;
 """
@@ -40,16 +39,22 @@ def upsert_case_session(
     ai_summary: Dict[str, Any],
     provenance_trail: List[dict],
     source: str = "appworks_fetch",
-    username: Optional[str] = None,
 ) -> None:
     """
     Persist the current merged case snapshot for case_id.
 
-    username is the investigator/caller who triggered this write (every
-    endpoint now carries it — see api/models.py's AuthFieldsMixin). It is
-    stored alongside the response purely for attribution; it never gates
-    or filters a read. None is accepted for a caller with no
-    request-scoped username (e.g. an internal/background caller).
+    No username column: this table holds one row per case_id, but a
+    case's ai_summary blob has up to four independently-attributed
+    entries (agent_summary_cache[route], one per route — intake,
+    similar_cases, risk_assessment, plan), so a single case-wide "who
+    wrote this" column would collapse four different answers into one
+    and be wrong for at least three of them on any case with more than
+    one tab generated. That attribution instead lives INSIDE ai_summary
+    itself (core.case_store.merge_agent_summary_cache writes
+    {route: {summary, generated_at, username}} before this function is
+    called), so it round-trips through the same JSON blob this function
+    persists — see migrations/008_add_username_to_response_tables.sql,
+    which no longer touches this table for exactly this reason.
 
     Best-effort by design: a Postgres write failure here must never fail
     the investigator-facing request, since case_ai_summary_store is a
@@ -65,14 +70,12 @@ def upsert_case_session(
                     "ai_summary": json.dumps(ai_summary),
                     "provenance_trail": json.dumps(provenance_trail or []),
                     "source": source,
-                    "username": username,
                 },
             )
         logger.info(
-            "case_ai_summary_store upsert OK for case_id=%s (source=%s, username=%s)",
+            "case_ai_summary_store upsert OK for case_id=%s (source=%s)",
             case_id,
             source,
-            username,
         )
     except (psycopg2.Error, DatabaseUnavailableError) as exc:
         logger.error(
@@ -115,6 +118,5 @@ def get_case_session(case_id: str) -> Optional[Dict[str, Any]]:
         "ai_summary": row["ai_summary"],
         "provenance_trail": row["provenance_trail"],
         "source": row["source"],
-        "username": row.get("username"),
         "updated_at": row["updated_at"],
     }
