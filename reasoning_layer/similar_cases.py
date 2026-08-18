@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
+from config.settings import SIMILAR_CASES_MAX_TOTAL
 from reasoning_layer.neo4j_client import get_session
 from utils.provenance import graph_provenance
 
@@ -114,13 +115,24 @@ ORDER BY similarity_score DESC, case_id ASC
 """
 
 
-def find_structural_matches(case_id: str, limit: int = 5) -> dict:
+def find_structural_matches(case_id: str, limit: int = SIMILAR_CASES_MAX_TOTAL) -> dict:
     """
     Return structurally similar cases for `case_id`, scored 0.5–1.0.
 
     Args:
         case_id: the active case to find matches for. Required, non-empty.
         limit:   maximum matches to return (already ordered strongest-first).
+            Defaults to config.settings.SIMILAR_CASES_MAX_TOTAL (5) — not a
+            bare literal here, so the display cap for the /similar_cases
+            tab (api/pipeline_execution.py's caller relies on this
+            default) lives in exactly one place, alongside
+            SIMILAR_CASES_MAX_PER_TYPE/REQUIRED_STATUS/LOOKBACK_YEARS —
+            the rest of this feature's tunable constants. A caller that
+            genuinely wants a different cap (e.g.
+            reasoning_layer/copilot_templates.py's
+            get_structural_similar_cases, deliberately a higher, separate
+            default for the Copilot tool) still passes limit= explicitly;
+            this default only governs callers that don't.
 
     Returns (inside the standard {result, provenance} envelope):
         {
