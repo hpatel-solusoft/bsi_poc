@@ -146,7 +146,6 @@ _PRIOR_GUILTY_RELATIONSHIP_TYPES: Tuple[str, ...] = ("HAS_PRIOR_GUILTY_CASE",)
 # not all the risk rules". risk_indicators / active_rules (the per-rule
 # breakdown) are dropped by omission.
 _RISK_ASSESSMENT_SCORE_FIELDS: Tuple[str, ...] = (
-    "case_id",
     "subject_id",
     "risk_score",
     "risk_tier",
@@ -195,14 +194,30 @@ def _trim_rules_fired(rules_fired: Any) -> Any:
 
 
 def _trim_subjects_to_primary(complaint_intelligence: Any) -> Any:
-    """Keep only the Primary Subject in complaint_intelligence.subjects."""
+    """
+    Keep only the Primary Subject in complaint_intelligence.subjects, and
+    drop complaint_intelligence.case_id entirely.
+
+    case_id has no meaning to an investigator (see
+    core.case_store.get_complaint_number's docstring for the same
+    reasoning stated once, in Python) — complaint_intelligence.summary.
+    complaint_no is already present and IS the identifier a human
+    recognises, so leaving the raw case_id in the LLM's context serves
+    no purpose beyond risking it ending up quoted verbatim in the
+    narrative prose (confirmed happening in production: the LLM wrote
+    "Case Number 658407434" into the Case Summary section because that
+    was the only case-identifying number sitting in its context).
+    """
     if not isinstance(complaint_intelligence, dict):
         return complaint_intelligence
+
+    complaint_intelligence = dict(complaint_intelligence)
+    complaint_intelligence.pop("case_id", None)
+
     subjects = complaint_intelligence.get("subjects")
     if not isinstance(subjects, list) or not subjects:
         return complaint_intelligence
 
-    complaint_intelligence = dict(complaint_intelligence)
     primary = [s for s in subjects if isinstance(s, dict) and s.get("is_primary_subject")]
     # Defensive fallback: if nothing is flagged primary (data gap), keep the
     # first subject rather than silently emptying the list — an unflagged
@@ -340,7 +355,10 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     Trims applied (see module docstring for the full reasoning):
       1. Drops agent_summary_cache, provenance_trail, network_match_flag,
          decision_log.
-      2. complaint_intelligence.subjects -> Primary Subject only.
+      2. complaint_intelligence.subjects -> Primary Subject only, and
+         complaint_intelligence.case_id is dropped entirely (the LLM never
+         sees the raw case_id — only complaint_no, via complaint_intelligence.
+         summary.complaint_no, which is already present).
       3. related_network[*] -> drops the "rejection" block
          (investigator_id / rejected_at / reason / rule_id) entirely.
       4. rules_fired entries, for ALL 14 rules -> collapsed to rule-level
@@ -384,7 +402,7 @@ def build_report_llm_context(case_data: Dict[str, Any], *, case_id: str = "") ->
     for key in _TOP_LEVEL_KEYS_TO_DROP:
         context.pop(key, None)
 
-    # 2. complaint_intelligence.subjects -> Primary Subject only.
+    # 2. complaint_intelligence.subjects -> Primary Subject only; case_id dropped.
     if "complaint_intelligence" in context:
         context["complaint_intelligence"] = _trim_subjects_to_primary(context["complaint_intelligence"])
 

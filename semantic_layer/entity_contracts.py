@@ -535,6 +535,16 @@ class DecisionLogEntry(BaseModel):
 class GeneratedReport(BaseModel):
     report_id: str
     case_id: str
+    # Investigator-facing identifier (AppWorks WorkfolderComplaintNumber
+    # — see core.case_store.get_complaint_number). Optional + defaulted:
+    # older persisted report_artifacts rows (saved before this field
+    # existed) still deserialise cleanly with it absent, falling back to
+    # case_id for display exactly as every other route does. case_id
+    # itself is NOT removed from this contract — it remains the
+    # internal, persisted identifier report_artifacts is keyed by; this
+    # field is purely an additional display value, same relationship as
+    # username sitting alongside generated_at in agent_summary_cache.
+    complaint_number: Optional[str] = None
     generated_at: str
     status: str  # "draft" | "saved_to_appworks"
     standard_sections: dict  # unchanged Phase 1 sections (narrative)

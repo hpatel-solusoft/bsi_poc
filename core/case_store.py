@@ -278,6 +278,45 @@ def get_route_username(case_data: Dict[str, Any], route: str) -> Optional[str]:
     return entry.get("username")
 
 
+def get_complaint_number(case_data: Dict[str, Any]) -> Optional[str]:
+    """
+    THE investigator-facing case identifier — AppWorks' own
+    WorkfolderComplaintNumber, sourced by appworks/case_intake.py into
+    complaint_intelligence.summary.complaint_no (the same value also
+    lives on the Neo4j :Case node as complaint_number — see
+    etl/graph_sync.py — which is why reasoning_layer/rule_inference.py
+    already prefers it over case_id for anything a human reads: "case_id
+    has no meaning to an investigator, whereas the complaint number is
+    the same [identifier they already use in AppWorks]").
+
+    Every response returned to an investigator surfaces THIS — see
+    api/models.py's response models and
+    utils/report_pdf_renderer.py's report title/filename — never the
+    internal case_id. case_id remains the key EVERYWHERE ELSE (Neo4j,
+    Postgres, CASE_STORE, AppWorks item URLs, every request payload);
+    this function only changes what a human SEES, never how anything is
+    looked up or persisted.
+
+    Returns None if complaint_intelligence hasn't been populated yet —
+    e.g. intake has never actually run for this case_id (shouldn't
+    normally happen, since every other route requires intake to have
+    run first, but a fresh/partial case_data is not impossible). Every
+    caller falls back to case_id in that case: showing the internal ID
+    is still better than showing nothing.
+
+    Coerced to str before returning: AppWorks' WorkfolderComplaintNumber
+    comes back as a JSON NUMBER, not a string (confirmed in production —
+    complaint_no=101686, an int, not "101686") — every response model
+    in api/models.py declares this field as Optional[str], and every
+    filename/HTML-title builder downstream (utils/report_pdf_renderer.py)
+    assumes a string too. Coercing here, once, at the single source
+    every caller reads through, is what keeps that assumption valid
+    everywhere else instead of needing a str() guard at every call site.
+    """
+    value = ((case_data or {}).get("complaint_intelligence") or {}).get("summary", {}).get("complaint_no")
+    return None if value is None else str(value)
+
+
 def get_route_generated_at_datetime(case_data: Dict[str, Any], route: str) -> Optional[datetime]:
     """
     AI-35: same value as get_route_generated_at, parsed into a

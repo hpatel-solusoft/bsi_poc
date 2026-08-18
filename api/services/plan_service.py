@@ -70,6 +70,7 @@ from core.agent_audit_repository import log_agent_call
 from core.case_store import (
     AGENT_SUMMARY_CACHE_KEY,
     CASE_STORE,
+    get_complaint_number,
     get_route_generated_at,
     get_route_generated_at_datetime,
     get_route_summary_text,
@@ -224,7 +225,7 @@ def run_plan(req: PlanRequest, username: str, token: str) -> Dict[str, Any]:
                     live_findings.get("graph_context") or {},
                 )
                 return {
-                    "case_id": req.case_id,
+                    "complaint_number": get_complaint_number(case_data) or req.case_id,
                     "status": "completed",
                     "details": {
                         "agent_summary": cached_summary,
@@ -375,7 +376,7 @@ def run_plan(req: PlanRequest, username: str, token: str) -> Dict[str, Any]:
         )
 
         return {
-            "case_id": req.case_id,
+            "complaint_number": get_complaint_number(case_data) or req.case_id,
             "status": "completed",
             "details": {
                 "agent_summary": response_agent_summary,

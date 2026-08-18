@@ -45,6 +45,7 @@ from core.case_store import (
     AGENT_SUMMARY_CACHE_KEY,
     CASE_STORE,
     get_cached_route_summary,
+    get_complaint_number,
     get_route_generated_at,
     get_route_username,
     merge_agent_summary_cache,
@@ -131,7 +132,7 @@ def run_intake(req: intakeRequest, username: str, token: str) -> Dict[str, Any]:
                     username=username,
                 )
                 return {
-                    "case_id": req.case_id,
+                    "complaint_number": get_complaint_number(cached_case_data) or req.case_id,
                     "status": "completed",
                     "details": {
                         "agent_summary": cached_summary,
@@ -250,7 +251,7 @@ def run_intake(req: intakeRequest, username: str, token: str) -> Dict[str, Any]:
         )
 
         return {
-            "case_id": req.case_id,
+            "complaint_number": get_complaint_number(sections) or req.case_id,
             "status": "completed",
             "details": {
                 "agent_summary": assistant_text,

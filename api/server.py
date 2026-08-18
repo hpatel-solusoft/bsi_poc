@@ -82,6 +82,7 @@ from core.case_store import (
     fetch_copilot_history,
     get_cached_investigation_steps,
     get_case_ai_summary_cache_updated_at,
+    get_complaint_number,
     get_route_generated_at,
     get_route_summary_text,
     get_route_username,
@@ -90,6 +91,7 @@ from core.case_store import (
     resolve_case_data,
     resolve_copilot_history,
     store_copilot_turn,
+    try_resolve_case_data,
 )
 from core.db import DatabaseUnavailableError
 from core.db import close_pool as close_db_pool
@@ -281,6 +283,23 @@ def _close_reasoning_layer() -> None:
 # via get_runner() directly; kept here for routes not yet migrated to
 # api/services/*.py (similar_cases, risk_assessment, plan, copilot).
 _get_runner = get_runner
+
+
+def _envelope_complaint_number(case_id: str) -> Optional[str]:
+    """
+    Resolve the investigator-facing complaint number for a route whose
+    response envelope comes straight from a reasoning_layer function
+    (reject_inference, revert_rejection, fraud_network, rule_audit) —
+    all four deal only in case_id, never case_data, so there is nothing
+    to read complaint_number off of without a small lookup here.
+
+    A cheap warm-store-first read (CASE_STORE, then a single Postgres
+    SELECT — see core.case_store.try_resolve_case_data), purely for
+    display; never touches Neo4j or AppWorks. Returns None on a genuine
+    miss (case_id not found anywhere) — callers fall back to case_id in
+    that case, same as every other route.
+    """
+    return get_complaint_number(try_resolve_case_data(case_id) or {})
 
 
 def _resolve_case_store(case_id: str, ai_summary: Optional[Dict[str, Any]]) -> tuple:
@@ -534,7 +553,7 @@ def similar_cases(
                     username=username,
                 )
                 return {
-                    "case_id": req.case_id,
+                    "complaint_number": get_complaint_number(case_data) or req.case_id,
                     "status": "completed",
                     "details": {
                         "agent_summary": cached_summary,
@@ -604,7 +623,7 @@ def similar_cases(
 
         logger.info(f"SIMILAR CASES NARRATIVE TOTAL KEYs: {len(similar_cases_data)}")
         return {
-            "case_id": req.case_id,
+            "complaint_number": get_complaint_number(case_data) or req.case_id,
             "status": "completed",
             "details": {
                 "agent_summary": agent_summary,
@@ -760,7 +779,7 @@ def risk_assessment(
                     username=username,
                 )
                 return {
-                    "case_id": req.case_id,
+                    "complaint_number": get_complaint_number(case_data) or req.case_id,
                     "status": "completed",
                     "details": {
                         "agent_summary": cached_summary,
@@ -855,7 +874,7 @@ def risk_assessment(
         )
 
         return {
-            "case_id": req.case_id,
+            "complaint_number": get_complaint_number(case_data) or req.case_id,
             "status": "completed",
             "details": {
                 "agent_summary": assistant_text,
@@ -1146,7 +1165,7 @@ def reload_all(
     )
 
     return ReloadAllResponse(
-        case_id=req.case_id,
+        complaint_number=_envelope_complaint_number(req.case_id) or req.case_id,
         status=overall_status,
         duration_seconds=overall_duration,
         steps=steps,
@@ -1189,7 +1208,7 @@ def modify_investigation_steps(
             username=username,
         )
         return ModifyInvestigationStepsResponse(
-            case_id=req.case_id,
+            complaint_number=_envelope_complaint_number(req.case_id) or req.case_id,
             status="saved",
             plan_source="User Modified",
             modified_by=req.investigator_id,
@@ -1243,7 +1262,7 @@ def revert_to_ai_plan(
             username=username,
         )
         return RevertToAiPlanResponse(
-            case_id=req.case_id,
+            complaint_number=_envelope_complaint_number(req.case_id) or req.case_id,
             status="reverted" if existed else "no_override_existed",
             plan_source="AI Summerized",
         )
@@ -1313,7 +1332,7 @@ def get_investigation_steps(
             len(investigation_steps),
         )
         return InvestigationStepsResponse(
-            case_id=case_id,
+            complaint_number=_envelope_complaint_number(case_id) or case_id,
             investigation_steps=investigation_steps,
             is_modify_investigation_steps=True,
         )
@@ -1339,7 +1358,7 @@ def get_investigation_steps(
         len(investigation_steps),
     )
     return InvestigationStepsResponse(
-        case_id=case_id,
+        complaint_number=_envelope_complaint_number(case_id) or case_id,
         investigation_steps=investigation_steps,
         is_modify_investigation_steps=False,
     )
@@ -1419,7 +1438,10 @@ def reject_inference_route(
             status="success",
             username=username,
         )
-        return RejectInferenceResponse(**envelope["result"])
+        result = envelope["result"]
+        result["complaint_number"] = _envelope_complaint_number(req.case_id) or req.case_id
+        result.pop("case_id", None)
+        return RejectInferenceResponse(**result)
     except InferenceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1480,7 +1502,10 @@ def revert_rejection_route(
             status="success",
             username=username,
         )
-        return RevertRejectionResponse(**envelope["result"])
+        result = envelope["result"]
+        result["complaint_number"] = _envelope_complaint_number(req.case_id) or req.case_id
+        result.pop("case_id", None)
+        return RevertRejectionResponse(**result)
     except InferenceNotFoundError as exc:
         # Nothing rejected matches — already reverted, or never rejected.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1526,7 +1551,10 @@ def fraud_network_route(
     """
     try:
         envelope = get_fraud_network(case_id)
-        return FraudNetworkResponse(**envelope["result"])
+        result = envelope["result"]
+        result["complaint_number"] = _envelope_complaint_number(case_id) or case_id
+        result.pop("case_id", None)
+        return FraudNetworkResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (GraphUnavailableError, Neo4jError) as exc:
@@ -1552,7 +1580,10 @@ def rule_audit_route(
     """
     try:
         envelope = get_rule_audit(case_id)
-        return RuleAuditResponse(**envelope["result"])
+        result = envelope["result"]
+        result["complaint_number"] = _envelope_complaint_number(case_id) or case_id
+        result.pop("case_id", None)
+        return RuleAuditResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (GraphUnavailableError, Neo4jError) as exc:
@@ -1815,8 +1846,13 @@ def get_conversation_history(
             history_source,
             len(conversation_history),
         )
+        # Cheap warm-store-first lookup (CASE_STORE, then a single
+        # Postgres SELECT) purely to resolve the investigator-facing
+        # identifier — see core.case_store.get_complaint_number. No
+        # AppWorks/LLM call here; this route stays read-only.
+        case_data_for_display = try_resolve_case_data(case_id) or {}
         return {
-            "case_id": case_id,
+            "complaint_number": get_complaint_number(case_data_for_display) or case_id,
             "conversation_history": conversation_history,
             "conversation_history_source": history_source,
         }

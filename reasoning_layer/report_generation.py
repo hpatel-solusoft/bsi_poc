@@ -103,7 +103,19 @@ MATCH (s:Subject {subject_id: $subject_id})-[r:SHARES_EMPLOYER_WITH]-(o:Subject)
 WHERE r.status IN ["active", "rejected"]
 RETURN "SHARES_EMPLOYER_WITH" AS relationship_type,
        o.subject_id AS counterpart_id, "Subject" AS counterpart_type,
-       coalesce(o.full_name, o.name, o.subject_id) AS counterpart_label,
+       // Subject nodes carry first_name/last_name (individuals) or
+       // company_name (organizations) — never a combined full_name/name
+       // property (see etl/graph_sync.py's _Q_SUBJECTS). The old
+       // coalesce(o.full_name, o.name, o.subject_id) referenced
+       // properties that never existed on any Subject node, so it
+       // ALWAYS fell through to the raw subject_id — confirmed in
+       // production PDFs showing bare numbers for every counterpart.
+       CASE
+           WHEN o.first_name IS NOT NULL OR o.last_name IS NOT NULL
+               THEN trim(coalesce(o.first_name, "") + " " + coalesce(o.last_name, ""))
+           WHEN o.company_name IS NOT NULL THEN o.company_name
+           ELSE o.subject_id
+       END AS counterpart_label,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
@@ -115,7 +127,19 @@ MATCH (s:Subject {subject_id: $subject_id})-[r:SHARES_ADDRESS_WITH]-(o:Subject)
 WHERE r.status IN ["active", "rejected"]
 RETURN "SHARES_ADDRESS_WITH" AS relationship_type,
        o.subject_id AS counterpart_id, "Subject" AS counterpart_type,
-       coalesce(o.full_name, o.name, o.subject_id) AS counterpart_label,
+       // Subject nodes carry first_name/last_name (individuals) or
+       // company_name (organizations) — never a combined full_name/name
+       // property (see etl/graph_sync.py's _Q_SUBJECTS). The old
+       // coalesce(o.full_name, o.name, o.subject_id) referenced
+       // properties that never existed on any Subject node, so it
+       // ALWAYS fell through to the raw subject_id — confirmed in
+       // production PDFs showing bare numbers for every counterpart.
+       CASE
+           WHEN o.first_name IS NOT NULL OR o.last_name IS NOT NULL
+               THEN trim(coalesce(o.first_name, "") + " " + coalesce(o.last_name, ""))
+           WHEN o.company_name IS NOT NULL THEN o.company_name
+           ELSE o.subject_id
+       END AS counterpart_label,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
@@ -127,7 +151,19 @@ MATCH (s:Subject {subject_id: $subject_id})-[r:SHARES_ALIAS_PATTERN_WITH]-(o:Sub
 WHERE r.status IN ["active", "rejected"]
 RETURN "SHARES_ALIAS_PATTERN_WITH" AS relationship_type,
        o.subject_id AS counterpart_id, "Subject" AS counterpart_type,
-       coalesce(o.full_name, o.name, o.subject_id) AS counterpart_label,
+       // Subject nodes carry first_name/last_name (individuals) or
+       // company_name (organizations) — never a combined full_name/name
+       // property (see etl/graph_sync.py's _Q_SUBJECTS). The old
+       // coalesce(o.full_name, o.name, o.subject_id) referenced
+       // properties that never existed on any Subject node, so it
+       // ALWAYS fell through to the raw subject_id — confirmed in
+       // production PDFs showing bare numbers for every counterpart.
+       CASE
+           WHEN o.first_name IS NOT NULL OR o.last_name IS NOT NULL
+               THEN trim(coalesce(o.first_name, "") + " " + coalesce(o.last_name, ""))
+           WHEN o.company_name IS NOT NULL THEN o.company_name
+           ELSE o.subject_id
+       END AS counterpart_label,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
@@ -166,7 +202,14 @@ MATCH (s:Subject {subject_id: $subject_id})-[r:HAS_PRIOR_GUILTY_CASE]->(c:Case)
 WHERE r.status IN ["active", "rejected"]
 RETURN "HAS_PRIOR_GUILTY_CASE" AS relationship_type,
        c.case_id AS counterpart_id, "Case" AS counterpart_type,
-       c.case_id AS counterpart_label,
+       // counterpart_label uses the investigator-facing complaint
+       // number, not the raw case_id — see core.case_store.
+       // get_complaint_number's Python-side equivalent for the same
+       // reasoning. Falls back to case_id only if a Case node somehow
+       // has no complaint_number (shouldn't happen post-etl/graph_sync.py,
+       // but this is read by report generation, so degrade rather than
+       // null out the label).
+       coalesce(c.complaint_number, c.case_id) AS counterpart_label,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
@@ -179,7 +222,14 @@ WHERE r.source_rule = "Rule_10_Merged_Case_Propagation"
   AND r.status IN ["active", "rejected"]
 RETURN "APPEARS_IN_CASE" AS relationship_type,
        c.case_id AS counterpart_id, "Case" AS counterpart_type,
-       c.case_id AS counterpart_label,
+       // counterpart_label uses the investigator-facing complaint
+       // number, not the raw case_id — see core.case_store.
+       // get_complaint_number's Python-side equivalent for the same
+       // reasoning. Falls back to case_id only if a Case node somehow
+       // has no complaint_number (shouldn't happen post-etl/graph_sync.py,
+       // but this is read by report generation, so degrade rather than
+       // null out the label).
+       coalesce(c.complaint_number, c.case_id) AS counterpart_label,
        r.source_rule AS source_rule, r.confidence AS confidence,
        coalesce(r.corroborated, false) AS corroborated, r.status AS status,
        toString(r.asserted_at) AS asserted_at,
@@ -206,7 +256,14 @@ WHERE c.risk_escalation_source_rule = "Rule_08_Recidivist_Escalation"
   AND coalesce(c.risk_escalation_status, "active") IN ["active", "rejected"]
 RETURN "CASE_RISK_ESCALATION" AS relationship_type,
        c.case_id AS counterpart_id, "Case" AS counterpart_type,
-       c.case_id AS counterpart_label,
+       // counterpart_label uses the investigator-facing complaint
+       // number, not the raw case_id — see core.case_store.
+       // get_complaint_number's Python-side equivalent for the same
+       // reasoning. Falls back to case_id only if a Case node somehow
+       // has no complaint_number (shouldn't happen post-etl/graph_sync.py,
+       // but this is read by report generation, so degrade rather than
+       // null out the label).
+       coalesce(c.complaint_number, c.case_id) AS counterpart_label,
        c.risk_escalation_source_rule AS source_rule, c.risk_escalation_confidence AS confidence,
        false AS corroborated, coalesce(c.risk_escalation_status, "active") AS status,
        toString(c.risk_escalation_asserted_at) AS asserted_at,
@@ -238,7 +295,14 @@ WHERE c.fasttrack_recommendation_rule = "Rule_13_FastTrack_Escalation"
   AND coalesce(c.fasttrack_recommendation_status, "active") IN ["active", "rejected"]
 RETURN "FASTTRACK_RECOMMENDATION" AS relationship_type,
        c.case_id AS counterpart_id, "Case" AS counterpart_type,
-       c.case_id AS counterpart_label,
+       // counterpart_label uses the investigator-facing complaint
+       // number, not the raw case_id — see core.case_store.
+       // get_complaint_number's Python-side equivalent for the same
+       // reasoning. Falls back to case_id only if a Case node somehow
+       // has no complaint_number (shouldn't happen post-etl/graph_sync.py,
+       // but this is read by report generation, so degrade rather than
+       // null out the label).
+       coalesce(c.complaint_number, c.case_id) AS counterpart_label,
        c.fasttrack_recommendation_rule AS source_rule, c.fasttrack_recommendation_confidence AS confidence,
        false AS corroborated, coalesce(c.fasttrack_recommendation_status, "active") AS status,
        toString(c.fasttrack_recommendation_asserted_at) AS asserted_at,

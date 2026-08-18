@@ -71,6 +71,7 @@ from api.pipeline_execution import (
 )
 from api.response_builders import fired_rules_only, format_provenance_lines, replace_markdown_section
 from core.agent_audit_repository import log_agent_call
+from core.case_store import get_complaint_number
 from core.investigation_plan_override_repository import get_override
 from core.narrative_staleness import StalenessCheck
 from core.report_artifacts_repository import get_latest_report, save_report
@@ -338,7 +339,7 @@ def run_generate_report(req: ReportGenerationRequest, username: str, token: str)
                     username=username,
                 )
                 return {
-                    "case_id": req.case_id,
+                    "complaint_number": get_complaint_number(case_data) or req.case_id,
                     "status": "completed",
                     "report_id": cached_content.get("report_id"),
                     "generated_at": cached_content.get("generated_at"),
@@ -532,12 +533,19 @@ def run_generate_report(req: ReportGenerationRequest, username: str, token: str)
             new_provenance,
         )
 
-        report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        # report_id and everything shown to the caller uses the
+        # investigator-facing complaint number, never the internal
+        # case_id — see core.case_store.get_complaint_number. case_id
+        # remains report_content's own persisted key (below) and
+        # save_report's DB key; only DISPLAY values change here.
+        complaint_number = get_complaint_number(case_data) or req.case_id
+        report_id = f"RPT-{complaint_number}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         generated_at = datetime.now(timezone.utc).isoformat()
         confidence_summary = related.get("confidence_summary", {"high": 0, "medium": 0, "unresolved": 0})
         report_content = {
             "report_id": report_id,
             "case_id": req.case_id,
+            "complaint_number": complaint_number,
             "generated_at": generated_at,
             "status": "draft",
             "standard_sections": {"report_markdown": assistant_text},
@@ -571,7 +579,7 @@ def run_generate_report(req: ReportGenerationRequest, username: str, token: str)
         )
 
         return {
-            "case_id": req.case_id,
+            "complaint_number": get_complaint_number(case_data) or req.case_id,
             "status": "completed",
             "report_id": report_id,
             "generated_at": generated_at,
@@ -772,13 +780,17 @@ def run_generate_report_pdf(req: ReportGenerationRequest, username: str, token: 
 
                     cached_report_id = cached_content.get("report_id", "")
                     cached_generated_at = cached_content.get("generated_at", "")
+                    cached_complaint_number = cached_content.get("complaint_number") or get_complaint_number(
+                        case_data
+                    )
                     pdf_bytes = render_report_pdf(
                         resolved_report_markdown,
                         case_id=req.case_id,
                         report_id=cached_report_id,
                         generated_at=cached_generated_at,
+                        complaint_number=cached_complaint_number,
                     )
-                    filename = report_pdf_filename(req.case_id, cached_report_id)
+                    filename = report_pdf_filename(cached_complaint_number or req.case_id, cached_report_id)
                     return Response(
                         content=pdf_bytes,
                         media_type="application/pdf",
@@ -893,12 +905,19 @@ def run_generate_report_pdf(req: ReportGenerationRequest, username: str, token: 
             render_reviewed_and_excluded_markdown(related.get("related_network", [])),
         )
 
-        report_id = f"RPT-{req.case_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        # report_id and everything shown to the caller uses the
+        # investigator-facing complaint number, never the internal
+        # case_id — see core.case_store.get_complaint_number. case_id
+        # remains report_content's own persisted key (below) and
+        # save_report's DB key; only DISPLAY values change here.
+        complaint_number = get_complaint_number(case_data) or req.case_id
+        report_id = f"RPT-{complaint_number}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
         generated_at = datetime.now(timezone.utc).isoformat()
         confidence_summary = related.get("confidence_summary", {"high": 0, "medium": 0, "unresolved": 0})
         report_content = {
             "report_id": report_id,
             "case_id": req.case_id,
+            "complaint_number": complaint_number,
             "generated_at": generated_at,
             "status": "draft",
             "standard_sections": {"report_markdown": assistant_text},
@@ -939,8 +958,9 @@ def run_generate_report_pdf(req: ReportGenerationRequest, username: str, token: 
             case_id=req.case_id,
             report_id=report_id,
             generated_at=generated_at,
+            complaint_number=complaint_number,
         )
-        filename = report_pdf_filename(req.case_id, report_id)
+        filename = report_pdf_filename(complaint_number or req.case_id, report_id)
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",

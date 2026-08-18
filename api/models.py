@@ -92,7 +92,7 @@ class ReloadStepResult(BaseModel):
 class ReloadAllResponse(BaseModel):
     """Response for POST /reload_all."""
 
-    case_id: str
+    complaint_number: Optional[str] = None
     # "success"  — every step succeeded.
     # "partial"  — at least one step succeeded before the first failure.
     # "failed"   — the first step (intake) itself failed.
@@ -142,7 +142,7 @@ class ModifyInvestigationStepsRequest(BaseModel):
 class ModifyInvestigationStepsResponse(BaseModel):
     """Response for POST /plan/modify_investigation_steps."""
 
-    case_id: str
+    complaint_number: Optional[str] = None
     status: str
     plan_source: str
     modified_by: str
@@ -158,7 +158,7 @@ class RevertToAiPlanRequest(BaseModel):
 class RevertToAiPlanResponse(BaseModel):
     """Response for POST /plan/revert_to_ai."""
 
-    case_id: str
+    complaint_number: Optional[str] = None
     status: str
     plan_source: str
 
@@ -174,7 +174,7 @@ class InvestigationStepsResponse(BaseModel):
     than inspecting which of two fields is populated.
     """
 
-    case_id: str
+    complaint_number: Optional[str] = None
     investigation_steps: List[InvestigationStep]
     # True  -> investigation_steps came from investigation_plan_overrides
     #          (the investigator's saved edit).
@@ -248,7 +248,7 @@ class ConversationHistoryResponse(BaseModel):
     conversation_history_source field on the /copilot response.
     """
 
-    case_id: str
+    complaint_number: Optional[str] = None
     conversation_history: List[ConversationTurn]
     conversation_history_source: str
 
@@ -386,7 +386,7 @@ class RevertRejectionResponse(BaseModel):
     """What the UI needs to flip the reverted row back to un-rejected."""
 
     reverted: bool
-    case_id: str
+    complaint_number: Optional[str] = None
     rule_id: str
     relationship_type: str
     investigator_id: str
@@ -481,7 +481,7 @@ class RejectInferenceResponse(BaseModel):
     """Response for POST /reject_inference (D2 Output Contract, v3)."""
 
     accepted: bool
-    case_id: str
+    complaint_number: Optional[str] = None
     rule_id: str
     relationship_type: str
     reason: str
@@ -608,7 +608,7 @@ class FraudNetworkResponse(BaseModel):
     tests/test_fraud_network_case_staleness.py.
     """
 
-    case_id: str
+    complaint_number: Optional[str] = None
     case_found: bool = True
     graph: CaseGraph = CaseGraph()
     networks: List[FraudNetworkBlock]
@@ -666,7 +666,7 @@ class RuleAuditEntry(BaseModel):
 class RuleAuditResponse(BaseModel):
     """Response for GET /rule_audit/{case_id} (D4 Output Contract)."""
 
-    case_id: str
+    complaint_number: Optional[str] = None
     primary_subject_id: Optional[str] = None
     rules: List[RuleAuditEntry]
     # AI-31: case-wide graph-change staleness signal — see

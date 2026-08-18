@@ -233,6 +233,7 @@ def render_report_markdown_to_html(
     case_id: str,
     report_id: str,
     generated_at: str,
+    complaint_number: Optional[str] = None,
 ) -> str:
     """
     Convert the finalized report markdown body into a SELF-CONTAINED,
@@ -241,13 +242,22 @@ def render_report_markdown_to_html(
     Every section that render_agent_summary() (html_converter.py) would
     render as an on-screen collapsible <details> block is rendered flat
     and always-visible here instead — see module docstring for why.
+
+    The VISIBLE report title shows complaint_number (AppWorks'
+    WorkfolderComplaintNumber — see core.case_store.get_complaint_number),
+    falling back to case_id only if complaint_number is unavailable
+    (e.g. a very old cached report predating this field). case_id
+    itself never appears anywhere in the rendered document — an
+    investigator has no way to recognise it; the complaint number is
+    the same identifier they already work with in AppWorks.
     """
+    display_id = complaint_number or case_id
     body_html = markdown2.markdown(markdown_text or "", extras=_MARKDOWN_EXTRAS)
     body_html = _zebra_stripe_tables(body_html)
 
     header_html = (
         '<div class="bsi-report-header">'
-        f'<div class="bsi-report-title">Investigation Report — {_escape(case_id)}</div>'
+        f'<div class="bsi-report-title">Investigation Report — {_escape(display_id)}</div>'
         f'<div class="bsi-report-meta">Report ID: {_escape(report_id)}'
         f" &nbsp;|&nbsp; Generated: {_escape(generated_at)}</div>"
         "</div>"
@@ -273,6 +283,7 @@ def render_report_pdf(
     case_id: str,
     report_id: str,
     generated_at: str,
+    complaint_number: Optional[str] = None,
 ) -> bytes:
     """
     Full markdown -> PDF pipeline for the report export capability
@@ -280,6 +291,12 @@ def render_report_pdf(
     xhtml2pdf, entirely in-process — pure Python (reportlab-backed), no
     browser or OS-level native library to install or manage in
     production (see module docstring for why this isn't WeasyPrint).
+
+    case_id is kept as a required parameter purely for LOGGING (the
+    three log lines below) — real operational traceability is worth
+    keeping even though nothing user-facing shows it anymore.
+    complaint_number is what actually renders in the document; see
+    render_report_markdown_to_html's docstring.
 
     Raises ReportPdfRenderError on a failed render (pisa reports a
     non-zero err count) and re-raises any exception xhtml2pdf itself
@@ -292,6 +309,7 @@ def render_report_pdf(
         case_id=case_id,
         report_id=report_id,
         generated_at=generated_at,
+        complaint_number=complaint_number,
     )
     output = io.BytesIO()
     try:
@@ -316,16 +334,27 @@ def render_report_pdf(
     return output.getvalue()
 
 
-def report_pdf_filename(case_id: str, report_id: str) -> str:
+def report_pdf_filename(display_id: str, report_id: str) -> str:
     """
-    Derive a safe download filename from case_id/report_id — strips
-    anything that isn't alphanumeric/dash/underscore so neither value
-    (both server-generated, but defensively sanitised here) can break
-    the Content-Disposition header.
+    Derive a safe download filename. display_id should be the
+    investigator-facing complaint number (falls back to case_id only if
+    unavailable — see render_report_markdown_to_html's docstring); the
+    downloaded filename is exactly as user-visible as the PDF's own
+    title, so it gets the same treatment. Strips anything that isn't
+    alphanumeric/dash/underscore so neither value (both server-generated,
+    but defensively sanitised here) can break the Content-Disposition
+    header.
     """
 
-    def _clean(value: str) -> str:
-        value = _STRIP_RE.sub("", value or "")
-        return re.sub(r"[^A-Za-z0-9_\-]", "_", value) or "unknown"
+    def _clean(value: object) -> str:
+        # str() defensively, not just an `or ""` fallback: this is the
+        # last line of defense before building a filename, and a
+        # non-string value (e.g. AppWorks returning a field as a JSON
+        # number rather than a string — confirmed happening for
+        # complaint_no in production) must degrade to "stringify it",
+        # not crash the whole PDF response with a raw TypeError.
+        text = "" if value is None else str(value)
+        text = _STRIP_RE.sub("", text)
+        return re.sub(r"[^A-Za-z0-9_\-]", "_", text) or "unknown"
 
-    return f"Investigation_Report_{_clean(case_id)}_{_clean(report_id)}.pdf"
+    return f"Investigation_Report_{_clean(display_id)}_{_clean(report_id)}.pdf"
