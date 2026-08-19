@@ -127,8 +127,8 @@ def format_plan_markdown_item(item, index: int = 1) -> str:
             if item.get("priority"):
                 meta.append(f"Priority: {item['priority']}")
             if meta:
-                return f"- **Step {step_no}:** {label} ({', '.join(meta)})"
-            return f"- **Step {step_no}:** {label}"
+                return f"- **{step_no}:** {label} ({', '.join(meta)})"
+            return f"- **{step_no}:** {label}"
         else:
             # Evidence checklist item or other dict — no step number.
             mandatory = item.get("mandatory")
