@@ -31,15 +31,17 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+import json
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import psycopg2
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from neo4j.exceptions import Neo4jError
 
 from agent_service.runner_provider import get_runner
@@ -1055,14 +1057,68 @@ def reload_all(
     outcome, so a caller can render "3 of 5 tabs refreshed, Plan
     failed: <reason>" instead of a single opaque error.
     """
-    start = time.time()
-    steps: List[ReloadStepResult] = []
-    stopped = False
+    steps, overall_status, overall_duration = _run_reload_all_to_completion(req, username, token)
+    return ReloadAllResponse(
+        complaint_number=_envelope_complaint_number(req.case_id) or req.case_id,
+        status=overall_status,
+        duration_seconds=overall_duration,
+        steps=steps,
+    )
 
-    # Order matters: each callable is only invoked once its turn comes,
-    # so a request object for step N is never built (and never touches
-    # case_data) before step N-1 has actually completed.
-    step_calls = [
+
+# Present-continuous "in progress" copy paired with its past-tense "done"
+# counterpart, per step — used only by /reload_all/stream's SSE framing
+# below. /reload_all itself (JSON) has no use for human-readable prose;
+# its ReloadStepResult.status ("success"/"failed"/"skipped") is already
+# the machine-readable signal a caller renders its own copy from.
+_RELOAD_STEP_MESSAGES: Dict[str, Dict[str, str]] = {
+    "graph_ingest": {
+        "running": "Syncing case data from AppWorks…",
+        "success": "Case data synced.",
+        "failed": "AppWorks sync failed.",
+    },
+    "intake": {
+        "running": "Running intake agent…",
+        "success": "Case intake complete.",
+        "failed": "Intake failed.",
+    },
+    "similar_cases": {
+        "running": "Searching for similar cases…",
+        "success": "Similar cases identified.",
+        "failed": "Similar case search failed.",
+    },
+    "risk_assessment": {
+        "running": "Calculating risk assessment…",
+        "success": "Risk assessment complete.",
+        "failed": "Risk assessment failed.",
+    },
+    "plan": {
+        "running": "Generating investigation plan…",
+        "success": "Investigation plan ready.",
+        "failed": "Plan generation failed.",
+    },
+}
+_RELOAD_STEP_SKIPPED_MESSAGE = "Skipped — an earlier step failed."
+_RELOAD_ALL_COMPLETE_MESSAGE = "Reload complete."
+
+
+def _reload_all_step_calls(
+    req: "ReloadAllRequest", username: str, token: str
+) -> List[tuple]:
+    """
+    THE five-step call list /reload_all runs, in dependency order — the
+    single source of truth both the JSON route (_run_reload_all_to_completion)
+    and the SSE route (_run_reload_all_streaming) iterate over, so the two
+    can never drift apart on which steps run, in what order, or with what
+    parameters. See POST /reload_all's own docstring for why this exact
+    order (graph_ingest -> intake -> similar_cases -> risk_assessment ->
+    plan) and why a failure stops the rest rather than pushing on.
+
+    Order matters: each callable is only invoked once its turn comes, so
+    a request object for step N is never built (and never touches
+    case_data) before step N-1 has actually completed.
+    """
+    return [
         (
             "graph_ingest",
             lambda: graph_ingest(
@@ -1105,10 +1161,59 @@ def reload_all(
         ),
     ]
 
-    for step_name, call_step in step_calls:
+
+def _run_reload_all_steps(
+    req: "ReloadAllRequest", username: str, token: str
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    THE step-execution engine behind both POST /reload_all (JSON,
+    collects every event below into one response) and POST
+    /reload_all/stream (SSE, formats and forwards each event to the
+    client as it happens). This function contains the actual business
+    logic — call order, the stop-on-first-failure rule, what counts as
+    success/failure/skip, and every persistence side effect (which all
+    happen inside the called route functions, not here) — exactly once,
+    so the two routes cannot silently diverge in behaviour the way two
+    independently-maintained copies of the same 40-line loop eventually
+    would. See POST /reload_all's own docstring for the full rationale
+    (why graph_ingest runs first, why a failure stops the rest, why this
+    always returns 200-shaped data rather than raising).
+
+    Yields one dict per step-lifecycle transition, in order:
+      {"type": "running", "step": str, "step_index": int, "total_steps": int}
+          — about to call this step. NEVER yielded for a step that gets
+          skipped (skipped steps were never started).
+      {"type": "done", "step": str, "step_index": int, "total_steps": int,
+       "result": ReloadStepResult}
+          — this step finished, one way or another; result.status is
+          "success", "failed", or "skipped".
+    ...then exactly one final event once every step has been accounted for:
+      {"type": "summary", "steps": List[ReloadStepResult],
+       "overall_status": str, "overall_duration": float}
+
+    Every consumer MUST exhaust this generator (a plain `for` loop with
+    no early `break`) — the audit log_agent_call row for the bulk action
+    itself is written as a side effect of producing the "summary" event,
+    so an early-abandoned iteration (e.g. a client disconnecting mid-SSE-
+    stream) means that row silently never gets written. This mirrors the
+    existing per-step log_agent_call calls already made by each step's
+    own route function, which have the same property.
+    """
+    start = time.time()
+    steps: List[ReloadStepResult] = []
+    stopped = False
+
+    step_calls = _reload_all_step_calls(req, username, token)
+    total_steps = len(step_calls)
+
+    for step_index, (step_name, call_step) in enumerate(step_calls, start=1):
         if stopped:
-            steps.append(ReloadStepResult(step=step_name, status="skipped", duration_seconds=0.0))
+            result = ReloadStepResult(step=step_name, status="skipped", duration_seconds=0.0)
+            steps.append(result)
+            yield {"type": "done", "step": step_name, "step_index": step_index, "total_steps": total_steps, "result": result}
             continue
+
+        yield {"type": "running", "step": step_name, "step_index": step_index, "total_steps": total_steps}
 
         step_start = time.time()
         try:
@@ -1122,41 +1227,31 @@ def reload_all(
                 exc.status_code,
                 exc.detail,
             )
-            steps.append(
-                ReloadStepResult(
-                    step=step_name,
-                    status="failed",
-                    duration_seconds=duration,
-                    error=str(exc.detail),
-                )
-            )
+            result = ReloadStepResult(step=step_name, status="failed", duration_seconds=duration, error=str(exc.detail))
+            steps.append(result)
             stopped = True
+            yield {"type": "done", "step": step_name, "step_index": step_index, "total_steps": total_steps, "result": result}
             continue
         except Exception as exc:  # noqa: BLE001 — isolate one step's failure from the rest
             duration = round(time.time() - step_start, 1)
             logger.exception("reload_all STEP FAILED case_id=%s step=%s", req.case_id, step_name)
-            steps.append(
-                ReloadStepResult(
-                    step=step_name,
-                    status="failed",
-                    duration_seconds=duration,
-                    error=str(exc),
-                )
-            )
+            result = ReloadStepResult(step=step_name, status="failed", duration_seconds=duration, error=str(exc))
+            steps.append(result)
             stopped = True
+            yield {"type": "done", "step": step_name, "step_index": step_index, "total_steps": total_steps, "result": result}
             continue
 
         duration = round(time.time() - step_start, 1)
         step_meta = (step_response.get("details") or {}).get("meta") or {}
-        steps.append(
-            ReloadStepResult(
-                step=step_name,
-                status="success",
-                duration_seconds=duration,
-                agent_summary_source=step_meta.get("agent_summary_source"),
-                stale=step_meta.get("stale"),
-            )
+        result = ReloadStepResult(
+            step=step_name,
+            status="success",
+            duration_seconds=duration,
+            agent_summary_source=step_meta.get("agent_summary_source"),
+            stale=step_meta.get("stale"),
         )
+        steps.append(result)
+        yield {"type": "done", "step": step_name, "step_index": step_index, "total_steps": total_steps, "result": result}
 
     overall_duration = round(time.time() - start, 1)
     succeeded_count = sum(1 for s in steps if s.status == "success")
@@ -1186,12 +1281,152 @@ def reload_all(
         status=overall_status,
         username=username,
     )
+    yield {"type": "summary", "steps": steps, "overall_status": overall_status, "overall_duration": overall_duration}
 
-    return ReloadAllResponse(
-        complaint_number=_envelope_complaint_number(req.case_id) or req.case_id,
-        status=overall_status,
-        duration_seconds=overall_duration,
-        steps=steps,
+
+def _run_reload_all_to_completion(
+    req: "ReloadAllRequest", username: str, token: str
+) -> tuple:
+    """
+    Drive _run_reload_all_steps to its "summary" event and return
+    (steps, overall_status, overall_duration) — what POST /reload_all's
+    JSON response is built from. The "running"/"done" events along the
+    way carry nothing this caller needs (it already gets the accumulated
+    `steps` list from "summary"); only /reload_all/stream's SSE framing
+    cares about them individually.
+    """
+    for event in _run_reload_all_steps(req, username, token):
+        if event["type"] == "summary":
+            return event["steps"], event["overall_status"], event["overall_duration"]
+    # Unreachable: _run_reload_all_steps always yields exactly one
+    # "summary" event as its last item. Guarded anyway rather than
+    # letting a caller silently receive None — a generator whose
+    # contract was violated should fail loudly, not produce a
+    # confusing downstream AttributeError.
+    raise RuntimeError("_run_reload_all_steps ended without yielding a summary event — this is a bug.")
+
+
+def _sse_event(event: str, data: Dict[str, Any]) -> str:
+    """
+    Format one Server-Sent Event: an `event:` line naming this event's
+    type, a `data:` line carrying its JSON payload, and the blank line
+    that terminates it per the SSE wire format. json.dumps with no
+    `indent` is required here, not just tidier — SSE frames on newlines,
+    so a multi-line payload would be parsed as multiple, broken events.
+    """
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def _run_reload_all_streaming(req: "ReloadAllRequest", username: str, token: str) -> Generator[str, None, None]:
+    """
+    SSE framing layer for POST /reload_all/stream: consumes
+    _run_reload_all_steps' event stream and formats each one as a
+    Server-Sent Event, using _RELOAD_STEP_MESSAGES for the human-readable
+    `message` field. Carries no business logic of its own — every
+    call-order/failure/skip decision already happened in
+    _run_reload_all_steps, exactly once, shared with POST /reload_all.
+
+    Event types written to the client, one SSE `event:` per line below:
+      progress — a step started, or a step finished (successfully or
+                 skipped). data: {step, step_index, total_steps, status,
+                 message[, duration_seconds]}
+      error    — a step finished by failing. Same shape as progress,
+                 plus `error` (the failure detail) — a distinct SSE event
+                 name so a client can wire a single `.addEventListener`
+                 for failures without inspecting `status` on every
+                 progress event.
+      complete — exactly one, always last: the identical JSON body POST
+                 /reload_all itself would have returned, so a client
+                 that only cares about the final result (not live
+                 progress) can ignore every progress/error event and
+                 just read this one.
+    """
+    for event in _run_reload_all_steps(req, username, token):
+        if event["type"] == "running":
+            step = event["step"]
+            message = _RELOAD_STEP_MESSAGES.get(step, {}).get("running", f"Running {step}…")
+            yield _sse_event(
+                "progress",
+                {
+                    "step": step,
+                    "step_index": event["step_index"],
+                    "total_steps": event["total_steps"],
+                    "status": "running",
+                    "message": message,
+                },
+            )
+
+        elif event["type"] == "done":
+            step = event["step"]
+            result: ReloadStepResult = event["result"]
+            data = {
+                "step": step,
+                "step_index": event["step_index"],
+                "total_steps": event["total_steps"],
+                "status": result.status,
+                "duration_seconds": result.duration_seconds,
+            }
+            if result.status == "skipped":
+                data["message"] = _RELOAD_STEP_SKIPPED_MESSAGE
+                yield _sse_event("progress", data)
+            elif result.status == "failed":
+                data["message"] = _RELOAD_STEP_MESSAGES.get(step, {}).get("failed", f"{step} failed.")
+                data["error"] = result.error
+                yield _sse_event("error", data)
+            else:  # "success"
+                data["message"] = _RELOAD_STEP_MESSAGES.get(step, {}).get("success", f"{step} complete.")
+                yield _sse_event("progress", data)
+
+        elif event["type"] == "summary":
+            response = ReloadAllResponse(
+                complaint_number=_envelope_complaint_number(req.case_id) or req.case_id,
+                status=event["overall_status"],
+                duration_seconds=event["overall_duration"],
+                steps=event["steps"],
+            )
+            payload = json.loads(response.model_dump_json())
+            payload["message"] = _RELOAD_ALL_COMPLETE_MESSAGE
+            yield _sse_event("complete", payload)
+
+
+@app.post("/reload_all/stream")
+def reload_all_stream(
+    req: ReloadAllRequest,
+    username: str = Depends(get_username),
+    token: str = Depends(get_token),
+) -> StreamingResponse:
+    """
+    Streaming counterpart to POST /reload_all: identical request
+    contract (same ReloadAllRequest body, same headers), and the exact
+    same five-step engine (_run_reload_all_steps) — the only difference
+    is that this route reports each step's progress live, via
+    Server-Sent Events, instead of making the caller wait for one JSON
+    response at the end. POST /reload_all itself is untouched and keeps
+    working exactly as it did before this route existed; a frontend
+    that doesn't need live progress has no reason to switch.
+
+    Response is `text/event-stream` — see _run_reload_all_streaming's
+    docstring for the three event types written (progress / error /
+    complete) and their JSON shapes.
+
+    Cache-Control: no-cache and X-Accel-Buffering: no are both here for
+    the same reason: several layers between this process and the
+    browser default to BUFFERING a response before forwarding it (some
+    HTTP caches; nginx specifically, if this ever sits behind one, which
+    is a common enterprise deployment shape) — which would silently
+    defeat the entire point of streaming, delivering everything at once
+    right before the connection closes instead of live. Both headers
+    tell every such layer this response must be forwarded as it's
+    written, not buffered.
+    """
+    return StreamingResponse(
+        _run_reload_all_streaming(req, username, token),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
