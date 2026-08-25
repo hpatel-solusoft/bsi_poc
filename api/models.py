@@ -18,6 +18,8 @@ from semantic_layer.entity_contracts import InvestigationStep
 
 
 class intakeRequest(BaseModel):
+    """Request body for POST /intake — AUTO flow, Section 3.1."""
+
     case_id: str
     # Optional. Default False: if intake has already run for this case_id
     # (found warm in CS-4 or in the PostgreSQL case_ai_summary_store
@@ -30,6 +32,8 @@ class intakeRequest(BaseModel):
 
 
 class SimilarCasesRequest(BaseModel):
+    """Request body for POST /similar_cases — ON-DEMAND flow, Step 2."""
+
     case_id: str
     # ai_summary is now OPTIONAL (Data Persistence Spec v1.0, Section D.1).
     # AppWorks sends case_id only; the server resolves case_data from
@@ -44,6 +48,8 @@ class SimilarCasesRequest(BaseModel):
 
 
 class PlanRequest(BaseModel):
+    """Request body for POST /plan — ON-DEMAND flow, Step 4."""
+
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
@@ -184,6 +190,8 @@ class InvestigationStepsResponse(BaseModel):
 
 
 class RiskAssessmentRequest(BaseModel):
+    """Request body for POST /risk_assessment — ON-DEMAND flow, Step 3."""
+
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
@@ -195,6 +203,8 @@ class RiskAssessmentRequest(BaseModel):
 
 
 class ReportGenerationRequest(BaseModel):
+    """Request body for POST /generate_report and /generate_report/pdf."""
+
     case_id: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
     ai_summary: Optional[Dict[str, Any]] = None
@@ -207,6 +217,8 @@ class ReportGenerationRequest(BaseModel):
 
 
 class CopilotRequest(BaseModel):
+    """Request body for POST /copilot — ON-DEMAND flow, Step 5."""
+
     case_id: str
     question: str
     # ai_summary is optional — see SimilarCasesRequest for the resolution order.
@@ -504,12 +516,16 @@ class RejectInferenceResponse(BaseModel):
 
 
 class FraudNetworkNode(BaseModel):
+    """One subject/entity node in a GET /fraud_network/{case_id} graph."""
+
     id: str
     display_name: Optional[str] = None
     is_primary: bool = False
 
 
 class FraudNetworkEdge(BaseModel):
+    """One inferred relationship edge in a GET /fraud_network/{case_id} graph."""
+
     source: str
     target: str
     relationship_type: str
@@ -519,6 +535,8 @@ class FraudNetworkEdge(BaseModel):
 
 
 class FraudNetworkBlock(BaseModel):
+    """One fraud network (a connected group of nodes/edges) within a case."""
+
     network_type: str
     network_key: Optional[str] = None
     formed_by_rule: Optional[str] = None
@@ -622,6 +640,9 @@ class FraudNetworkResponse(BaseModel):
 
 
 class InferredRelationship(BaseModel):
+    """One row of GET /rule_audit/{case_id} — a rule-inferred fact plus its
+    reject/revert and cascade-attribution state."""
+
     subject_id_a: str
     subject_id_b: Optional[str] = None
     relationship_type: str
@@ -657,6 +678,9 @@ class InferredRelationship(BaseModel):
 
 
 class RuleAuditEntry(BaseModel):
+    """One rule's row in the GET /rule_audit/{case_id} response — whether
+    it fired and the relationships it inferred."""
+
     rule_id: str
     rule_description: str
     fired: bool

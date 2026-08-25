@@ -12,20 +12,25 @@ and returns/raises whatever it does), or the underlying pipeline/
 staleness primitives (api/pipeline_execution.py, core/narrative_staleness.py,
 core/investigation_plan_override_repository.py).
 
-`_resolve_case_store` and `risk_assessment` are deliberately imported
-LATE (inside run_plan, not at module level) rather than at the top of
-this file: both still live in api/server.py (neither has been extracted
-to a service module — risk_assessment's own extraction is a separate,
-future refactor), and api/server.py imports THIS module at its own
-top level to wire up the /plan route. A top-level `from api.server
-import ...` here would therefore be a circular import at module load
-time. Deferring the import into the function body sidesteps the cycle
-(both modules are fully loaded by the time run_plan actually executes)
-and, as a bonus, means existing tests that patch
-`api.server._resolve_case_store` / `api.server.risk_assessment` before
+`_resolve_case_store` is deliberately imported LATE (inside run_plan,
+not at module level) rather than at the top of this file: it still
+lives in api/server.py (a route-agnostic CS-4 helper that hasn't been
+extracted to a service module of its own), and api/server.py imports
+THIS module at its own top level to wire up the /plan route. A
+top-level `from api.server import _resolve_case_store` here would
+therefore be a circular import at module load time. Deferring the
+import into the function body sidesteps the cycle and, as a bonus,
+means existing tests that patch `api.server._resolve_case_store` before
 calling `server.plan(...)` keep working unmodified — the deferred
-import re-resolves those names from api.server's current state at call
+import re-resolves the name from api.server's current state at call
 time, after any patch has already been applied.
+
+The /risk_assessment prerequisite is invoked via
+`api.services.risk_assessment_service.run_risk_assessment` directly
+rather than `api.server.risk_assessment` (risk_assessment has since
+been extracted to its own service module, same pattern as this one) —
+importing the sibling service module avoids needing a second late
+import for it.
 
 Extracted verbatim from api/server.py's `/plan` route body during the
 service-layer refactor — same behavior, same log lines, same response
@@ -73,6 +78,7 @@ from api.response_builders import (
     format_provenance_lines,
     resolve_plan_agent_summary,
 )
+from api.services import risk_assessment_service
 from core.agent_audit_repository import log_agent_call
 from core.case_store import (
     AGENT_SUMMARY_CACHE_KEY,
@@ -384,7 +390,7 @@ def run_plan(req: PlanRequest, username: str, token: str) -> Dict[str, Any]:
     Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
     """
     # Deferred — see module docstring for why.
-    from api.server import _resolve_case_store, risk_assessment
+    from api.server import _resolve_case_store
 
     start = time.time()
     try:
@@ -402,8 +408,8 @@ def run_plan(req: PlanRequest, username: str, token: str) -> Dict[str, Any]:
             req.case_id,
             req.ai_summary,
             required_field="risk_assessment",
-            run_prerequisite_route=lambda: risk_assessment(
-                RiskAssessmentRequest(case_id=req.case_id), username=username, token=token
+            run_prerequisite_route=lambda: risk_assessment_service.run_risk_assessment(
+                RiskAssessmentRequest(case_id=req.case_id), username, token
             ),
             resolve_case_store=_resolve_case_store,
             route_name="plan",

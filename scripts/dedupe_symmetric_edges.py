@@ -186,6 +186,7 @@ def find_and_dedupe(apply: bool, case_id: str | None) -> int:
 
 
 def main() -> int:
+    """CLI entry point: parse --apply/--case-id and run the dedupe scan."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--apply",

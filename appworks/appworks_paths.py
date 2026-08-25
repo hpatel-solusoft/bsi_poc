@@ -12,6 +12,9 @@ Usage:
 
 
 class AppWorksPaths:
+    """Every AppWorks REST endpoint path used by this application, grouped
+    by entity. No AppWorks path string lives outside this class."""
+
     class FraudRules:
         @staticmethod
         def risk_rules_all() -> str:

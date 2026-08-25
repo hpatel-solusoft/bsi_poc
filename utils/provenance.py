@@ -80,6 +80,10 @@ def graph_envelope(
 
 
 class ProvenanceTracker:
+    """Collects and de-duplicates the human-readable source citations for
+    a single tool call, translating internal AppWorks entity names into
+    investigator-facing display terms via DISPLAY_NAMES/ALLOWED_ENTITIES."""
+
     # UI DISPLAY ALIASES (The Beautifier)
     # Translates internal AppWorks schema names into human-readable investigator terms.
     DISPLAY_NAMES = {

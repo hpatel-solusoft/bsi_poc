@@ -45,17 +45,6 @@ from fastapi.responses import StreamingResponse
 from neo4j.exceptions import Neo4jError
 
 from agent_service.runner_provider import get_runner
-from agent_service.prompt_builders import (
-    build_copilot_prompt,
-    build_risk_assessment_prompt,
-    build_similar_cases_prompt,
-)
-from api.message_utils import (
-    build_ai_summary,
-    extract_agent_summary,
-    extract_tool_results,
-    merge_provenance,
-)
 from api.models import (
     ConversationHistoryResponse,
     CopilotRequest,
@@ -80,68 +69,52 @@ from api.models import (
     SimilarCasesRequest,
     intakeRequest,
 )
-from api.pipeline_execution import (
-    evaluate_cache_staleness,
-    fetch_live_risk_signals,
-    fetch_live_rule_aware_tasks,
-    fetch_live_similar_cases,
-    resolve_prerequisite_case_data,
-    run_risk_assessment_pipeline,
-    run_similar_cases_pipeline,
+
+# Not called directly by any route body left in this file (all moved to
+# api/services/*.py) — kept importable on this module regardless because
+# tests still do mock.patch.object(server, "<name>") for each of these.
+from api.pipeline_execution import evaluate_cache_staleness  # noqa: F401
+from api.pipeline_execution import run_risk_assessment_pipeline  # noqa: F401
+from api.pipeline_execution import run_similar_cases_pipeline  # noqa: F401
+from api.response_builders import validate_ai_summary_contract
+from api.services import (
+    copilot_service,
+    intake_service,
+    plan_service,
+    report_service,
+    risk_assessment_service,
+    similar_cases_service,
 )
-from api.response_builders import (
-    apply_step_override_to_summary,
-    build_confidence_summary,
-    format_provenance_lines,
-    render_markdown_html,
-    render_markdown_html_with_sources,
-    validate_ai_summary_contract,
-)
-from api.services import intake_service, plan_service, report_service
 from api.auth_headers import get_token, get_username
 from core import graph_ingest_repository
 from core.agent_audit_repository import log_agent_call
 from core.case_store import (
-    AGENT_SUMMARY_CACHE_KEY,
-    CASE_STORE,
     fetch_copilot_history,
     get_cached_investigation_steps,
-    get_case_ai_summary_cache_updated_at,
     get_complaint_number,
-    get_route_generated_at,
-    get_route_summary_text,
-    get_route_username,
-    merge_agent_summary_cache,
-    persist_case_session,
     resolve_case_data,
-    resolve_copilot_history,
-    store_copilot_turn,
     try_resolve_case_data,
 )
+
+# Not called directly by any route body left in this file (all moved to
+# api/services/*.py) — kept importable on this module regardless because
+# tests still do `server.CASE_STORE[...]` / `server.AGENT_SUMMARY_CACHE_KEY`
+# and mock.patch.object(server, "<name>") for the rest.
+from core.case_store import AGENT_SUMMARY_CACHE_KEY  # noqa: F401
+from core.case_store import CASE_STORE  # noqa: F401
+from core.case_store import get_case_ai_summary_cache_updated_at  # noqa: F401
+from core.case_store import persist_case_session  # noqa: F401
+from core.case_store import resolve_copilot_history  # noqa: F401
+from core.case_store import store_copilot_turn  # noqa: F401
 from core.db import DatabaseUnavailableError
 from core.db import close_pool as close_db_pool
 from core.db import init_pool as init_db_pool
 from core.investigation_plan_override_repository import (
-    compute_plan_staleness,
     delete_override,
     get_override,
     upsert_override,
 )
-from core.narrative_staleness import StalenessCheck
 from etl.ingest_service import ingest as run_graph_ingest
-
-# NOTE ON LAYERING: this is the one deliberate exception to "no file in
-# api/ imports directly from appworks/" (guideline_.txt Section 5). This
-# imports ONLY the exception TYPE, for HTTP error-boundary translation —
-# no appworks/ function is called from here, no appworks/ business logic
-# lives here. AppworksSessionExpiredError is raised deep inside a tool
-# call (appworks_auth.fetch/fetch_list) and needs a distinct HTTP status
-# (401, not 500) at the one layer that owns HTTP concerns. The
-# alternative — catching the broader `ConnectionError` it subclasses —
-# would also catch unrelated failures (a genuine AppWorks outage, a
-# misconfigured service-account login) and misreport them as "your
-# session expired," which is worse.
-from appworks.appworks_auth import AppworksSessionExpiredError
 from reasoning_layer.apply_schema import apply_schema
 from reasoning_layer.fraud_network import get_fraud_network
 from reasoning_layer.neo4j_client import (
@@ -504,200 +477,16 @@ def similar_cases(
 ):
     """
     ON-DEMAND — Similar Cases Route (Step 2 in flow).
-    Calls search_similar_cases to find historical cases with matching fraud patterns.
-    Requires case_data from a prior /intake run (via CS-4 or ai_summary body).
-    Explains historical case matches, pattern relevance, and archive findings.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
+    Thin HTTP adapter — all business logic lives in
+    api.services.similar_cases_service.run_similar_cases (prerequisite
+    resolution, staleness check, agent-summary cache lookup, structural-
+    matching + LLM-explain pipeline, persistence, response shaping).
+    Kept as a real route function (not just `app.post(...)(run_similar_cases)`)
+    so /risk_assessment and other in-process callers can keep calling
+    `similar_cases(...)` as a plain Python function, same as before this
+    refactor.
     """
-    start = time.time()
-
-    try:
-
-        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
-        # AI-33: an investigator can open Similar Cases without ever
-        # having opened Case Summary. Rather than assuming the frontend
-        # guarantees click order, auto-run /intake's own logic internally
-        # the moment complaint_intelligence (Case Summary's output) isn't
-        # already resolvable — instead of the hard 400 this used to raise.
-        case_data, data_source = resolve_prerequisite_case_data(
-            req.case_id,
-            req.ai_summary,
-            required_field="complaint_intelligence",
-            run_prerequisite_route=lambda: intake(
-                intakeRequest(case_id=req.case_id), username=username, token=token
-            ),
-            resolve_case_store=_resolve_case_store,
-            route_name="similar_cases",
-        )
-        logger.info(
-            "case_id=%s data_source=%s key_count=%d",
-            req.case_id,
-            data_source,
-            len(list(case_data.keys())),
-        )
-
-        # AI-32: the two independent staleness triggers, combined — see
-        # core.narrative_staleness's module docstring. /similar_cases has
-        # no separate "pipeline" stage of its own (find_structural_matches
-        # is already a live, always-fresh Neo4j read regardless of cache
-        # state — see fetch_live_similar_cases below). staleness.stale
-        # reports the graph trigger only to the caller (see
-        # StalenessCheck.stale's docstring for why core_data is
-        # excluded); should_auto_refresh (the gate below) only fires on
-        # an explicit reload_ai_summary=True — a graph-only change no
-        # longer forces this route to regenerate its narrative on its
-        # own (see StalenessCheck.should_auto_refresh's docstring).
-        staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
-
-        # Agent-summary cache: if similar_cases has already produced and
-        # persisted an agent_summary for this case_id, answer from it
-        # WITHOUT calling the LLM again. Only an explicit
-        # reload_ai_summary=True bypasses this lookup and falls through
-        # to a fresh agent run below.
-        if not staleness.should_auto_refresh:
-            cached_summary = get_route_summary_text(case_data, "similar_cases")
-            if cached_summary is not None:
-                # similar_cases is ALWAYS a live Neo4j read, cache hit or
-                # not — case_data never carries the structural matches
-                # section at all (it is entirely graph-derived; see
-                # core.persistence_filters.strip_graph_derived_fields), so
-                # this tab reflects the graph as it stands right now.
-                live_similar_cases = fetch_live_similar_cases(req.case_id)
-                duration_seconds = round(time.time() - start, 1)
-                logger.info(
-                    "similar_cases CACHE HIT for case_id=%s — answering from "
-                    "case_ai_summary_store, no LLM call made",
-                    req.case_id,
-                )
-                log_agent_call(
-                    case_id=req.case_id,
-                    agent_name="similar_cases",
-                    endpoint="/similar_cases",
-                    latency_ms=int(duration_seconds * 1000),
-                    status="success",
-                    username=username,
-                )
-                return {
-                    "complaint_number": get_complaint_number(case_data) or req.case_id,
-                    "status": "completed",
-                    "details": {
-                        "agent_summary": cached_summary,
-                        "provenance_trail": format_provenance_lines(case_data.get("provenance_trail", [])),
-                        "graph_findings": {
-                            "similar_cases": live_similar_cases,
-                        },
-                        "meta": {
-                            "data_source": data_source,
-                            "agent_summary_source": "db_cache",
-                            "stale": staleness.stale,
-                            "generated_at": get_route_generated_at(case_data, "similar_cases"),
-                            "username": get_route_username(case_data, "similar_cases"),
-                        },
-                    },
-                }
-
-        runner = _get_runner()
-
-        # Direct structural-matching + LLM-explain pipeline work
-        # (Section 8.3 AI-14, Section 9.2) — factored out to
-        # api/pipeline_execution.py.
-        agent_summary, similar_cases_data, similar_section, merged_provenance = run_similar_cases_pipeline(
-            req.case_id,
-            case_data,
-            runner,
-            build_similar_cases_prompt,
-            token=token,
-        )
-
-        # Update CS-4 warm store but return only the route-specific section.
-        CASE_STORE[req.case_id].update(similar_section)
-        CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
-
-        # ai_summary: updated contract — investigation sections with similar cases.
-        # Persisted server-side (Postgres case_ai_summary_store) for the next
-        # route to fall back on; no longer returned to the caller.
-        ai_summary = build_ai_summary(
-            case_data,
-            {"similar_cases": similar_cases_data},
-            merged_provenance,
-        )
-        # Cache this run's agent_summary markdown (carrying forward any
-        # other route's already-cached entry for this case_id) inside
-        # ai_summary["investigation"], the same place every other
-        # investigation field lives, so it round-trips on the next fetch.
-        ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
-            case_data,
-            "similar_cases",
-            agent_summary,
-            username=username,
-        )
-        similar_cases_generated_at = get_route_generated_at(ai_summary["investigation"], "similar_cases")
-        similar_cases_username = get_route_username(ai_summary["investigation"], "similar_cases")
-        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
-            AGENT_SUMMARY_CACHE_KEY
-        ]
-        persist_case_session(req.case_id, ai_summary)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="similar_cases",
-            endpoint="/similar_cases",
-            latency_ms=int((time.time() - start) * 1000),
-            status="success",
-            username=username,
-        )
-
-        logger.info("SIMILAR CASES NARRATIVE TOTAL KEYs: %d", len(similar_cases_data))
-        return {
-            "complaint_number": get_complaint_number(case_data) or req.case_id,
-            "status": "completed",
-            "details": {
-                "agent_summary": agent_summary,
-                "provenance_trail": format_provenance_lines(merged_provenance),
-                # Raw Neo4j structural match result (AI-14 —
-                # reasoning_layer.similar_cases.find_structural_matches):
-                # matches, match_reasons, score, source, total_candidates_scored.
-                # Previously computed into `sections`/ai_summary but never
-                # returned to the caller — only the LLM's narrative explanation
-                # of it was. Surfaced here the same way graph_findings is on
-                # /intake, so the graph JSON itself reaches the UI.
-                "graph_findings": {
-                    "similar_cases": similar_cases_data,
-                },
-                "meta": {
-                    "data_source": data_source,
-                    "agent_summary_source": "llm",
-                    "stale": staleness.stale,
-                    "generated_at": similar_cases_generated_at,
-                    "username": similar_cases_username,
-                },
-            },
-        }
-    except AppworksSessionExpiredError as exc:
-        logger.warning("similar_cases route: AppWorks session expired for case_id=%s", req.case_id)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="similar_cases",
-            endpoint="/similar_cases",
-            latency_ms=int((time.time() - start) * 1000),
-            status="auth_error",
-            username=username,
-        )
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Similar cases route failed for case_id=%s", req.case_id)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="similar_cases",
-            endpoint="/similar_cases",
-            latency_ms=int((time.time() - start) * 1000),
-            status="error",
-            username=username,
-        )
-        raise HTTPException(status_code=500, detail=f"Similar cases analysis failed: {exc}") from exc
-    finally:
-        logger.info("POST /similar_cases completed for case_id=%s", req.case_id)
+    return similar_cases_service.run_similar_cases(req, username, token)
 
 
 @app.post("/risk_assessment")
@@ -708,252 +497,17 @@ def risk_assessment(
 ):
     """
     ON-DEMAND — Risk Assessment Route (Step 3 in flow).
-    Calls get_risk_rules and calculate_risk_metrics.
-    Requires case_data from a prior /intake + /similar_cases run
-    (via CS-4 or ai_summary body).
-    Explains case seriousness, triggered rules, and escalation thresholds.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot |
+    Thin HTTP adapter — all business logic lives in
+    api.services.risk_assessment_service.run_risk_assessment
+    (prerequisite resolution, staleness check, agent-summary cache
+    lookup, LLM agent call + graph risk-signal pipeline, persistence,
+    response shaping).
+    Kept as a real route function (not just `app.post(...)(run_risk_assessment)`)
+    so /plan, /reload_all, and other in-process callers can keep calling
+    `risk_assessment(...)` as a plain Python function, same as before
+    this refactor.
     """
-    start = time.time()
-    try:
-
-        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
-        # AI-33: an investigator can open Risk Assessment without ever
-        # having opened Similar Cases. Auto-run /similar_cases' own logic
-        # internally the moment similar_cases (that route's output) isn't
-        # already resolvable, instead of the hard 400 this used to raise.
-        # /similar_cases' own entry check (complaint_intelligence) fires
-        # the same way if IT turns out to be missing too — this route
-        # only needs to know about the one route immediately before it.
-        case_data, data_source = resolve_prerequisite_case_data(
-            req.case_id,
-            req.ai_summary,
-            required_field="similar_cases",
-            run_prerequisite_route=lambda: similar_cases(
-                SimilarCasesRequest(case_id=req.case_id), username=username, token=token
-            ),
-            resolve_case_store=_resolve_case_store,
-            route_name="risk_assessment",
-        )
-        logger.info("case_id=%s data_source=%s", req.case_id, data_source)
-
-        # AI-32: the two independent staleness triggers, combined — see
-        # core.narrative_staleness's module docstring. Like
-        # /similar_cases, /risk_assessment has no separate "pipeline"
-        # stage of its own (neo4j_signals/risk_score/risk_tier are
-        # already a live, always-fresh recompute regardless of cache
-        # state — see fetch_live_risk_signals below). staleness.stale
-        # reports the graph trigger only to the caller (see
-        # StalenessCheck.stale's docstring for why core_data is
-        # excluded); should_auto_refresh (the gate below) only fires on
-        # an explicit reload_ai_summary=True — a graph-only change no
-        # longer forces this route to regenerate its narrative on its
-        # own (see StalenessCheck.should_auto_refresh's docstring).
-        staleness = evaluate_cache_staleness(req.case_id, req.reload_ai_summary)
-
-        # Agent-summary cache: if risk_assessment has already produced
-        # and persisted an agent_summary for this case_id, answer from it
-        # WITHOUT calling the LLM again. Only an explicit
-        # reload_ai_summary=True bypasses this lookup and falls through
-        # to a fresh agent run below.
-        if not staleness.should_auto_refresh:
-            cached_summary = get_route_summary_text(case_data, "risk_assessment")
-            cached_risk_assessment = case_data.get("risk_assessment")
-            if (
-                cached_summary is not None
-                and isinstance(cached_risk_assessment, dict)
-                and "risk_score" in cached_risk_assessment
-            ):
-                # neo4j_signals / risk_score / risk_tier are ALWAYS
-                # recomputed live from Neo4j, cache hit or not.
-                # cached_risk_assessment.risk_score/risk_tier are the
-                # untouched AppWorks BASE values here — Postgres/CS-4
-                # persist base_risk_score/base_risk_tier under those plain
-                # keys precisely so there is a clean starting point to
-                # re-augment from (see
-                # core.persistence_filters.strip_graph_derived_fields).
-                # base_risk_score/base_risk_tier are preferred when
-                # present (a warm same-process CASE_STORE entry from the
-                # LLM run that just populated it still carries the real
-                # augmented dict, with both keys).
-                subject_id = (case_data.get("complaint_intelligence") or {}).get("subject_primary_id")
-                base_risk_score = cached_risk_assessment.get(
-                    "base_risk_score", cached_risk_assessment.get("risk_score")
-                )
-                base_risk_tier = cached_risk_assessment.get(
-                    "base_risk_tier", cached_risk_assessment.get("risk_tier")
-                )
-                live_risk = fetch_live_risk_signals(
-                    req.case_id,
-                    subject_id,
-                    base_risk_score,
-                    base_risk_tier,
-                )
-                duration_seconds = round(time.time() - start, 1)
-                logger.info(
-                    "risk_assessment CACHE HIT for case_id=%s — answering from "
-                    "case_ai_summary_store, no LLM call made",
-                    req.case_id,
-                )
-                log_agent_call(
-                    case_id=req.case_id,
-                    agent_name="risk_assessment",
-                    endpoint="/risk_assessment",
-                    latency_ms=int(duration_seconds * 1000),
-                    status="success",
-                    username=username,
-                )
-                return {
-                    "complaint_number": get_complaint_number(case_data) or req.case_id,
-                    "status": "completed",
-                    "details": {
-                        "agent_summary": cached_summary,
-                        "provenance_trail": format_provenance_lines(case_data.get("provenance_trail", [])),
-                        "graph_findings": {
-                            "neo4j_signals": live_risk.get("neo4j_signals"),
-                            "base_risk_score": live_risk.get("base_risk_score", base_risk_score),
-                            "base_risk_tier": live_risk.get("base_risk_tier", base_risk_tier),
-                            "risk_score": live_risk.get("risk_score"),
-                            "risk_tier": live_risk.get("risk_tier"),
-                        },
-                        "meta": {
-                            "data_source": data_source,
-                            "agent_summary_source": "db_cache",
-                            "stale": staleness.stale,
-                            "generated_at": get_route_generated_at(case_data, "risk_assessment"),
-                            "username": get_route_username(case_data, "risk_assessment"),
-                        },
-                    },
-                }
-
-        runner = _get_runner()
-
-        # --- EXPLICIT DEPENDENCY INJECTION ---
-        # We package the backend state into a generic execution_context.
-        # token is the caller's AppWorks SAMLart (AuthFieldsMixin.token) —
-        # semantic_layer/dispatcher.py consumes and removes it before any
-        # tool function sees **context_kwargs; it is never forwarded to a
-        # tool as a parameter. See appworks/appworks_auth.py's
-        # set_request_token for how it reaches the actual AppWorks call.
-        execution_context = {"ai_summary": req.ai_summary, "token": token}
-        # -------------------------------------
-
-        messages, new_provenance, tool_call_log = runner.run_scoped(
-            system_prompt=build_risk_assessment_prompt(case_data),
-            user_message=(
-                f"Review the case data for case {req.case_id} and execute the "
-                "appropriate tools to calculate the risk assessment and explain why "
-                "this case received its risk score."
-            ),
-            scope="RISK_ASSESSMENT",  # ← this scope includes intake + enrichment tools only
-            execution_context=execution_context,
-        )
-
-        sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
-
-        # Direct graph risk-signal pipeline work (Section 8.4 AI-15) plus
-        # recommendation-text normalization — factored out to
-        # api/pipeline_execution.py.
-        risk_assessment, risk_section, merged_provenance = run_risk_assessment_pipeline(
-            req.case_id,
-            case_data,
-            sections,
-            tool_call_log,
-            new_provenance,
-            messages,
-        )
-
-        # Update CS-4 warm store but return only the route-specific section.
-        CASE_STORE[req.case_id].update(risk_section)
-        CASE_STORE[req.case_id]["provenance_trail"] = merged_provenance
-
-        ai_summary = build_ai_summary(
-            case_data,
-            {"risk_assessment": risk_assessment},
-            merged_provenance,
-        )
-        # Cache this run's agent_summary markdown (carrying forward any
-        # other route's already-cached entry for this case_id) inside
-        # ai_summary["investigation"], the same place every other
-        # investigation field lives, so it round-trips on the next fetch.
-        assistant_text = extract_agent_summary(messages)
-        ai_summary["investigation"][AGENT_SUMMARY_CACHE_KEY] = merge_agent_summary_cache(
-            case_data,
-            "risk_assessment",
-            assistant_text,
-            username=username,
-        )
-        risk_assessment_generated_at = get_route_generated_at(ai_summary["investigation"], "risk_assessment")
-        risk_assessment_username = get_route_username(ai_summary["investigation"], "risk_assessment")
-        CASE_STORE[req.case_id][AGENT_SUMMARY_CACHE_KEY] = ai_summary["investigation"][
-            AGENT_SUMMARY_CACHE_KEY
-        ]
-        persist_case_session(req.case_id, ai_summary)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="risk_assessment",
-            endpoint="/risk_assessment",
-            latency_ms=int((time.time() - start) * 1000),
-            status="success",
-            username=username,
-        )
-
-        return {
-            "complaint_number": get_complaint_number(case_data) or req.case_id,
-            "status": "completed",
-            "details": {
-                "agent_summary": assistant_text,
-                "provenance_trail": format_provenance_lines(merged_provenance),
-                # Neo4j graph risk signals (AI-15 —
-                # reasoning_layer.risk_signals.apply_graph_risk_signals):
-                # the four Section 8.4 signals plus the AppWorks base score
-                # they were layered on. Returned the same way graph_findings
-                # is on /intake and /similar_cases, so the investigator can
-                # see WHICH graph signal moved the score rather than only the
-                # LLM's prose about the final number. base_* are carried
-                # alongside so the graph contribution stays auditable.
-                "graph_findings": {
-                    "neo4j_signals": risk_assessment.get("neo4j_signals"),
-                    "base_risk_score": risk_assessment.get("base_risk_score"),
-                    "base_risk_tier": risk_assessment.get("base_risk_tier"),
-                    "risk_score": risk_assessment.get("risk_score"),
-                    "risk_tier": risk_assessment.get("risk_tier"),
-                },
-                "meta": {
-                    "data_source": data_source,
-                    "agent_summary_source": "llm",
-                    "stale": staleness.stale,
-                    "generated_at": risk_assessment_generated_at,
-                    "username": risk_assessment_username,
-                },
-            },
-        }
-    except AppworksSessionExpiredError as exc:
-        logger.warning("risk_assessment route: AppWorks session expired for case_id=%s", req.case_id)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="risk_assessment",
-            endpoint="/risk_assessment",
-            latency_ms=int((time.time() - start) * 1000),
-            status="auth_error",
-            username=username,
-        )
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Risk assessment route failed for case_id=%s", req.case_id)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="risk_assessment",
-            endpoint="/risk_assessment",
-            latency_ms=int((time.time() - start) * 1000),
-            status="error",
-            username=username,
-        )
-        raise HTTPException(status_code=500, detail=f"Risk assessment failed: {exc}") from exc
-    finally:
-        logger.info("POST /risk_assessment completed for case_id=%s", req.case_id)
+    return risk_assessment_service.run_risk_assessment(req, username, token)
 
 
 @app.post("/plan")
@@ -1859,215 +1413,16 @@ def copilot(
 ):
     """
     ON-DEMAND — Copilot Route (Step 5 in flow).
-    Answers investigator questions grounded in case context (CS-5).
-    Answers from CS-4 context first; falls back to PostgreSQL
-    case_ai_summary_store, then to ai_summary in the body if supplied.
-    conversation_history is server-owned in PostgreSQL (D.2, rolling
-    20-turn window) — the response returns only the new answer, never
-    the full transcript, since AppWorks/the client no longer needs to
-    round-trip it.
-    Flow: /intake → /similar_cases → /risk_assessment → /plan → /copilot
+    Thin HTTP adapter — all business logic lives in
+    api.services.copilot_service.run_copilot (CS-4 resolution, override
+    merge, conversation-history resolution, LLM agent call, provenance/
+    citation assembly, persistence, response shaping).
+    Kept as a real route function (not just `app.post(...)(run_copilot)`)
+    for the same reason as every other extracted route: any in-process
+    caller (and the existing tests) can keep calling `copilot(...)` as a
+    plain Python function, same as before this refactor.
     """
-    start = time.time()
-    try:
-        # CS-4 pattern: warm lookup -> Postgres fallback -> ai_summary body.
-        case_data, case_data_source = _resolve_case_store(req.case_id, req.ai_summary)
-
-        # AI-33: soft-check only. Unlike /similar_cases, /risk_assessment,
-        # and /plan, Copilot never auto-runs another route to backfill a
-        # missing prerequisite — doing so would itself block the chat
-        # response on that route's LLM call, which is exactly what this
-        # check exists to avoid. If Case Summary's output isn't there yet,
-        # Copilot degrades gracefully and answers from whatever context it
-        # does have (build_copilot_prompt already handles a sparse
-        # case_data); this is purely an observability signal for why an
-        # answer might be thinner than usual, never a gate on the chat.
-        if not case_data.get("complaint_intelligence"):
-            logger.info(
-                "copilot SOFT-CHECK case_id=%s — complaint_intelligence not yet "
-                "resolved (Case Summary likely never opened for this case); "
-                "answering from available context without blocking",
-                req.case_id,
-            )
-
-        # Captured BEFORE this route's own persist_case_session call below
-        # (Section E.5) — see the identical comment in /plan.
-        cache_updated_at_before_call = get_case_ai_summary_cache_updated_at(req.case_id)
-
-        # reload_ai_summary=False (default): Copilot always answers the
-        # question below — there is nothing to "skip" for a Q&A route —
-        # but it does NOT force any extra work: it answers against
-        # whatever graph_context is already cached, unchanged from today.
-        # reload_ai_summary=True: force the reasoning pipeline to re-run
-        # for this case's primary subject before answering (even if it
-        # already completed), refreshing graph_context/graph_signals/
-        # rules_fired in both PostgreSQL (pipeline_execution_state) and
-        # Neo4j, then merge the refreshed context into case_data so the
-        # answer below is grounded in it.
-        # AI-17 / Section 6.3: "Copilot never re-triggers the Reasoning
-        # Pipeline under any condition." This block previously called
-        # enrich_graph_context(force=True) on reload_ai_summary, which did
-        # exactly that. Copilot only ever READS the already-reasoned graph
-        # (Principle 10) — the pipeline is owned by /intake and the ETL, and
-        # a Q&A turn re-running inference would let a question mutate the
-        # case an investigator is reading, and change answers mid-conversation.
-        #
-        # reload_ai_summary is therefore honoured as a CACHE instruction only:
-        # _resolve_case_store above has already re-read the freshest stored
-        # context, and any graph refresh must be requested from /intake.
-        if req.reload_ai_summary:
-            logger.info(
-                "copilot reload_ai_summary=True for case_id=%s — answering from the "
-                "freshest stored context; the reasoning pipeline is never re-triggered "
-                "from Copilot (Section 6.3)",
-                req.case_id,
-            )
-
-        # Modify Investigation Steps flow (Section D.6): looked up
-        # server-side, from any client, any session — never relying on
-        # the caller to relay it — so Copilot always sees the
-        # human-modified steps and can answer questions about the
-        # modification itself. Takes precedence over the legacy
-        # frontend-relayed modified_ai_investigation_plan field, which
-        # is kept only for callers that have not migrated yet.
-        override = get_override(req.case_id)
-        if override is not None:
-            case_data["modified_ai_investigation_plan"] = {
-                "source": "human_approved",
-                "steps": override["modified_steps"],
-                "modified_by": override["modified_by"],
-                "modified_on": override["modified_on"].isoformat(),
-                "comment": override.get("comment") or "",
-            }
-        elif req.modified_ai_investigation_plan:
-            case_data["modified_ai_investigation_plan"] = req.modified_ai_investigation_plan
-
-        plan_stale = (
-            compute_plan_staleness(cache_updated_at_before_call, override["modified_on"])
-            if override is not None
-            else False
-        )
-
-        conversation_history, history_source = resolve_copilot_history(
-            req.case_id,
-            req.conversation_history,
-        )
-        logger.info(
-            "case_id=%s case_data_source=%s conversation_history_source=%s",
-            req.case_id,
-            case_data_source,
-            history_source,
-        )
-
-        runner = _get_runner()
-
-        messages, new_provenance_trail, tool_call_log = runner.run_scoped(
-            system_prompt=build_copilot_prompt(req.case_id, case_data),
-            user_message=req.question,
-            conversation_history=conversation_history,
-            # token: caller's AppWorks SAMLart, consumed by
-            # semantic_layer/dispatcher.py — see the risk_assessment
-            # route above for the full explanation. Copilot runs with
-            # scope="ALL" (default), so any AppWorks-touching tool is
-            # reachable here too.
-            execution_context={"token": token},
-        )
-
-        answer = extract_agent_summary(messages)
-
-        # sources_cited: include the stored provenance trail from CS-4 (so context-
-        # grounded answers cite the original AppWorks sources) plus any new tool
-        # calls made during this copilot turn.
-        # This aligns with Section 3.4 where the response shows sources from the
-        # original investigation even when tool_calls_made = 0.
-        stored_provenance = case_data.get("provenance_trail", [])
-        combined_provenance = merge_provenance(stored_provenance, new_provenance_trail)
-
-        sources_cited = [f"retrieved {p.get('retrieved_at', '')}" for p in combined_provenance]
-        sources_cited_details = [
-            {
-                "computed_by": p.get("computed_by", ""),
-                "retrieved_at": p.get("retrieved_at", ""),
-                "sources": p.get("sources", []),
-            }
-            for p in combined_provenance
-        ]
-
-        # Durable transcript write: PostgreSQL conversation_history (D.2) is
-        # authoritative; the in-memory store is updated for this process's
-        # fast path. The full transcript is not returned to the caller.
-        # sources_cited_details is persisted alongside the assistant's turn
-        # so a later /copilot call resolving history from Postgres (or
-        # anyone reading conversation_history directly) still has the
-        # citations this answer was grounded in — previously this argument
-        # was never passed, so every row's sources_cited column was "[]".
-        store_copilot_turn(
-            req.case_id,
-            req.question,
-            answer,
-            sources_cited=sources_cited_details,
-            username=username,
-        )
-
-        # CS-4: Update the warm store only if the case entry still exists (it may
-        # have been evicted if TTL expires between _resolve_case_store and here),
-        # and write through to Postgres case_ai_summary_store so the next fallback
-        # read for this case sees whatever new tool output Copilot produced.
-        if new_provenance_trail and req.case_id in CASE_STORE:
-            new_sections = extract_tool_results(messages, runner.dispatcher.tool_to_section)
-            CASE_STORE[req.case_id].update(new_sections)
-            CASE_STORE[req.case_id]["provenance_trail"] = combined_provenance
-
-            ai_summary = build_ai_summary(case_data, new_sections, combined_provenance)
-            persist_case_session(req.case_id, ai_summary)
-
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="copilot",
-            endpoint="/copilot",
-            latency_ms=int((time.time() - start) * 1000),
-            status="success",
-            username=username,
-        )
-
-        return {
-            "answer": answer,
-            "provenance_trail": format_provenance_lines(combined_provenance),
-            "sources_cited": sources_cited,
-            "sources_cited_details": sources_cited_details,
-            "case_data_source": case_data_source,
-            "conversation_history": conversation_history,
-            "conversation_history_source": history_source,
-            "reload_ai_summary": req.reload_ai_summary,
-            "plan_source": "User Modified" if override is not None else "AI Summerized",
-            "plan_stale": plan_stale,
-        }
-    except AppworksSessionExpiredError as exc:
-        logger.warning("copilot route: AppWorks session expired for case_id=%s", req.case_id)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="copilot",
-            endpoint="/copilot",
-            latency_ms=int((time.time() - start) * 1000),
-            status="auth_error",
-            username=username,
-        )
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Copilot route failed for case_id=%s", req.case_id)
-        log_agent_call(
-            case_id=req.case_id,
-            agent_name="copilot",
-            endpoint="/copilot",
-            latency_ms=int((time.time() - start) * 1000),
-            status="error",
-            username=username,
-        )
-        raise HTTPException(status_code=500, detail=f"Copilot failed: {exc}") from exc
-    finally:
-        logger.info("POST /copilot completed for case_id=%s", req.case_id)
+    return copilot_service.run_copilot(req, username, token)
 
 
 @app.get("/copilot/{case_id}", response_model=ConversationHistoryResponse)
