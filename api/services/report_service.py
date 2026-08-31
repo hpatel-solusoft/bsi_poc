@@ -88,10 +88,10 @@ from core.case_store import get_complaint_number
 from core.investigation_plan_override_repository import get_override
 from core.narrative_staleness import StalenessCheck
 from core.report_artifacts_repository import get_latest_report, save_report
-from reasoning_layer.decision_log import build_decision_log, render_reviewed_and_excluded_markdown
+from reasoning_layer.reports.decision_log import build_decision_log, render_reviewed_and_excluded_markdown
 from reasoning_layer.neo4j_client import GraphUnavailableError
-from reasoning_layer.report_generation import assemble_related_network
-from reasoning_layer.report_llm_context import build_report_llm_context
+from reasoning_layer.reports.report_generation import assemble_related_network
+from reasoning_layer.reports.report_llm_context import build_report_llm_context
 from semantic_layer.entity_contracts import GeneratedReport as GeneratedReportContract
 from utils.report_pdf_renderer import render_report_pdf, report_pdf_filename
 
@@ -622,7 +622,7 @@ def run_generate_report(req: ReportGenerationRequest, username: str, token: str)
                 "provenance": {
                     "sources": [],
                     "retrieved_at": "",
-                    "computed_by": "reasoning_layer.report_generation.assemble_related_network",
+                    "computed_by": "reasoning_layer.reports.report_generation.assemble_related_network",
                 },
             }
 
@@ -1018,7 +1018,7 @@ def run_generate_report_pdf(req: ReportGenerationRequest, username: str, token: 
                 "provenance": {
                     "sources": [],
                     "retrieved_at": "",
-                    "computed_by": "reasoning_layer.report_generation.assemble_related_network",
+                    "computed_by": "reasoning_layer.reports.report_generation.assemble_related_network",
                 },
             }
 

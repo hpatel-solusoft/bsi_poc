@@ -45,7 +45,7 @@ from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
-from reasoning_layer.rule_audit_queries import PRIMARY_SUBJECT_QUERY, PROP_QUERIES, REL_QUERIES
+from reasoning_layer.queries.rule_audit_queries import PRIMARY_SUBJECT_QUERY, PROP_QUERIES, REL_QUERIES
 
 
 def _envelope(result: Dict[str, Any]) -> dict:

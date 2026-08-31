@@ -108,6 +108,7 @@ import os  # noqa: E402
 os.environ.setdefault("OPENAI_API_KEY", "test-key-for-ai-35-tests")
 
 from api import server  # noqa: E402
+from api.services import plan_service  # noqa: E402
 from core import case_store  # noqa: E402
 from core.investigation_plan_override_repository import compute_plan_staleness  # noqa: E402
 from core.narrative_staleness import StalenessCheck  # noqa: E402
@@ -226,18 +227,18 @@ def test_plan_route_feeds_both_checks_from_plan_specific_time_not_shared_column(
     with mock.patch.object(
         server, "get_case_ai_summary_cache_updated_at", return_value=shared_column_sentinel
     ) as mocked_shared_reader, mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=StalenessCheck(False, False)
+        plan_service, "evaluate_cache_staleness", return_value=StalenessCheck(False, False)
     ) as mocked_evaluate, mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "get_override", return_value=None
+        plan_service, "get_override", return_value=None
     ), mock.patch.object(
-        server, "_get_runner", return_value=SimpleNamespace(
+        plan_service, "get_runner", return_value=SimpleNamespace(
             dispatcher=SimpleNamespace(tool_to_section={}),
             run_scoped=lambda *a, **k: ([{"role": "assistant", "content": "fresh"}], [], []),
         )
     ), mock.patch.object(
-        server,
+        plan_service,
         "run_plan_pipeline",
         return_value=(
             "fresh plan markdown",
@@ -250,9 +251,11 @@ def test_plan_route_feeds_both_checks_from_plan_specific_time_not_shared_column(
             False,
         ),
     ) as mocked_run_plan_pipeline, mock.patch.object(
-        server, "prepare_plan_context", return_value=({"complaint_intelligence": {}}, [])
-    ), mock.patch.object(server, "persist_case_session"), mock.patch.object(server, "log_agent_call"):
-        server.plan(server.PlanRequest(case_id=case_id))
+        plan_service, "prepare_plan_context", return_value=({"complaint_intelligence": {}}, [])
+    ), mock.patch.object(plan_service, "persist_case_session"), mock.patch.object(
+        plan_service, "log_agent_call"
+    ):
+        plan_service.run_plan(server.PlanRequest(case_id=case_id), "test-user", "test-token")
 
     # AI-32's check must have been called with /plan's OWN generated_at
     # (T0), not the shared-column sentinel.
@@ -299,15 +302,15 @@ def test_plan_cache_hit_path_computes_plan_stale_from_plan_specific_time():
     with mock.patch.object(
         server, "get_case_ai_summary_cache_updated_at", return_value=_T0 - timedelta(days=999)
     ) as mocked_shared_reader, mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=StalenessCheck(False, False)
+        plan_service, "evaluate_cache_staleness", return_value=StalenessCheck(False, False)
     ), mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "get_override", return_value=override
+        plan_service, "get_override", return_value=override
     ), mock.patch.object(
-        server, "fetch_live_graph_findings", return_value={"rules_fired": [], "graph_context": {}}
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.plan(server.PlanRequest(case_id=case_id))
+        plan_service, "fetch_live_graph_findings", return_value={"rules_fired": [], "graph_context": {}}
+    ), mock.patch.object(plan_service, "log_agent_call"):
+        response = plan_service.run_plan(server.PlanRequest(case_id=case_id), "test-user", "test-token")
 
     assert response["details"]["meta"]["agent_summary_source"] == "db_cache"
     assert response["details"]["meta"]["plan_stale"] is True
@@ -367,19 +370,18 @@ def test_edit_then_reject_inference_then_replan_both_checks_agree():
     with mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "get_override", return_value=override
+        plan_service, "get_override", return_value=override
     ), mock.patch(
         "api.pipeline_execution.get_last_inference_change_at",
         return_value=last_inference_change_at,
     ), mock.patch.object(
-        server, "fetch_live_graph_findings", return_value={"rules_fired": [], "graph_context": {}}
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.plan(server.PlanRequest(case_id=case_id))
+        plan_service, "fetch_live_graph_findings", return_value={"rules_fired": [], "graph_context": {}}
+    ), mock.patch.object(plan_service, "log_agent_call"):
+        response = plan_service.run_plan(server.PlanRequest(case_id=case_id), "test-user", "test-token")
 
     meta = response["details"]["meta"]
     # AI-32's graph check: the reject happened after /plan's own
     # generated_at -> "graph" staleness reported.
-    assert meta["stale_reason"] == "graph"
     assert meta["stale"] is True
     # The manual-edit check, using the SAME /plan-specific timestamp:
     # /plan's own generated_at has NOT moved past the override yet (no

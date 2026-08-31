@@ -18,7 +18,7 @@ What this DOES prove:
     InferenceNotFoundError, never a silent no-op or a 500
   * every validation rule in rejection.reject_inference actually rejects
     the input it claims to (missing subject_id_b, extra subject_id_b,
-    unknown rule_id, mismatched relationship_type, blank investigator_id)
+    unknown rule_id, blank reason, blank investigator_id)
   * fraud_network.get_fraud_network groups nodes/edges by network and
     keeps rejected edges (dashed-style requirement) rather than
     filtering them out
@@ -42,7 +42,8 @@ from __future__ import annotations
 import sys
 from unittest import mock
 
-from reasoning_layer import fraud_network, rejection, rule_audit
+from reasoning_layer import rejection, rule_audit
+from reasoning_layer.network import fraud_network
 from tests.verify import FAILURES, PASSES, FakeSession, check, fake_session_cm
 
 # --------------------------------------------------------------------
@@ -54,24 +55,42 @@ def test_reject_symmetric_edge():
     print("\n[D2.1] rejection.py — symmetric edge (Rule_01_Shared_Employer)")
 
     def responder(q, p):
+        if "is_primary = true" in q:
+            return {"primary_subject_id": "S1"}
         if 'SET r.status = "rejected"' in q and "SHARES_EMPLOYER_WITH" in q:
-            assert p["subject_id_a"] == "S2" and p["subject_id_b"] == "S1"
-            return {"target_id": "rel-123"}
+            assert p["target_subject_id_a"] == "S2" and p["target_subject_id_b"] == "S1"
+            # .data() (not .single()) — must be a list of rows.
+            return [{"subject_id_a": "S2", "subject_id_b": "S1"}]
         if "MERGE (rej:Rejection" in q:
             assert (
                 p["from_key"] == "S1" and p["to_key"] == "S2"
             ), "from_key/to_key must be sorted regardless of call order"
             return {"rejection_id": "rej-1", "rejected_at": "2026-07-19T00:00:00Z", "rejected_by": "inv-1"}
+        if "last_inference_change_at" in q:
+            return {"case_id": "C1"}
         raise AssertionError(f"unexpected query: {q}")
 
     session = FakeSession(responder)
-    with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+    # _resolve_case_scope's own primary-subject lookup is answered by the
+    # responder above (same session, same mocked rejection.get_session);
+    # resolve_scope() is a SEPARATE call that opens its own session via
+    # reasoning_layer.scope's own get_session — mocked directly here
+    # rather than through the fake session, since scope resolution
+    # itself is reasoning_layer/scope.py's own concern, already covered
+    # by that module's own tests, not this one's.
+    fake_scope = {
+        "scope_subject_ids": ["S1", "S2"],
+        "scope_case_ids": ["C1"],
+        "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
+    }
+    with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+        rejection, "resolve_scope", return_value=fake_scope
+    ), mock.patch.object(rejection.cascade, "cascade_reject", return_value=[]):
         envelope = rejection.reject_inference(
             case_id="C1",
             subject_id_a="S2",
             subject_id_b="S1",
             rule_id="Rule_01_Shared_Employer",
-            relationship_type="SHARES_EMPLOYER_WITH",
             investigator_id="inv-1",
             reason="Confirmed different employers on review",
         )
@@ -79,17 +98,29 @@ def test_reject_symmetric_edge():
         "symmetric edge: from_key/to_key sorted, not call-order dependent",
         envelope["result"]["accepted"] is True,
     )
-    check("symmetric edge: rejection_id returned", envelope["result"]["rejection_id"] == "rej-1")
-    check("symmetric edge: exactly one locate + one merge issued", len(session.calls) == 2)
+    check(
+        "symmetric edge: rejected_items carries the resolved match_id",
+        envelope["result"]["rejected_items"][0]["match_id"]
+        == rejection.build_match_id("Rule_01_Shared_Employer", "S2", "S1"),
+    )
+    check(
+        "symmetric edge: primary-subject lookup + locate + merge + timestamp touch issued",
+        len(session.calls) == 4,
+    )
 
 
 def test_reject_network_edge_both_subjects():
     print("\n[D2.2] rejection.py — network edge, both subjects (Rule_09_PCA_CheckSplit)")
 
     def responder(q, p):
-        if "MEMBER_OF_FRAUD_NETWORK" in q and "OPTIONAL MATCH" in q:
-            check("network edge: subject_id_b passed through for dual rejection", p["subject_id_b"] == "S2")
-            return {"target_id": "rel-a", "network_type": "CheckSplit", "network_key": "C1"}
+        if "is_primary = true" in q:
+            return {"primary_subject_id": "S1"}
+        if "MEMBER_OF_FRAUD_NETWORK" in q and 'SET r.status = "rejected"' in q:
+            check(
+                "network edge: subject_id_b passed through for dual rejection",
+                p["target_subject_id_b"] == "S2",
+            )
+            return [{"subject_id_a": "S1", "network_type": "CheckSplit", "network_key": "C1"}]
         if "MERGE (rej:Rejection" in q:
             check(
                 "network edge: to_key built from live FraudNetwork node, not hardcoded",
@@ -97,17 +128,26 @@ def test_reject_network_edge_both_subjects():
             )
             check("network edge: from_key is the subject the investigator acted on", p["from_key"] == "S1")
             return {"rejection_id": "rej-2", "rejected_at": "t", "rejected_by": "inv-1"}
+        if "last_inference_change_at" in q:
+            return {"case_id": "C1"}
         raise AssertionError(f"unexpected query: {q}")
 
     session = FakeSession(responder)
-    with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+    fake_scope = {
+        "scope_subject_ids": ["S1", "S2"],
+        "scope_case_ids": ["C1"],
+        "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
+    }
+    with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+        rejection, "resolve_scope", return_value=fake_scope
+    ), mock.patch.object(rejection.cascade, "cascade_reject", return_value=[]):
         envelope = rejection.reject_inference(
             case_id="C1",
             subject_id_a="S1",
             subject_id_b="S2",
             rule_id="Rule_09_PCA_CheckSplit",
-            relationship_type="MEMBER_OF_FRAUD_NETWORK",
             investigator_id="inv-1",
+            reason="Confirmed independent transactions on review",
         )
     check("network edge: accepted", envelope["result"]["accepted"] is True)
 
@@ -116,27 +156,39 @@ def test_reject_case_flag():
     print("\n[D2.3] rejection.py — case-property flag (Rule_08_Recidivist_Escalation)")
 
     def responder(q, p):
+        if "is_primary = true" in q:
+            return {"primary_subject_id": "S1"}
         if 'risk_escalation_status = "active"' in q:
             check(
                 "case flag: verifies caller's subject_id_a against the stored escalating subject",
                 p["subject_id_a"] == "S1",
             )
-            return {"target_id": "case-1"}
+            return [{"subject_id_a": "S1"}]
         if "MERGE (rej:Rejection" in q:
             check(
                 "case flag: from_key=subject, to_key=case_id", p["from_key"] == "S1" and p["to_key"] == "C1"
             )
             return {"rejection_id": "rej-3", "rejected_at": "t", "rejected_by": "inv-1"}
+        if "last_inference_change_at" in q:
+            return {"case_id": "C1"}
         raise AssertionError(f"unexpected query: {q}")
 
     session = FakeSession(responder)
-    with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+    fake_scope = {
+        "scope_subject_ids": ["S1"],
+        "scope_case_ids": ["C1"],
+        "primary_subject_id": "S1",
+        "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
+    }
+    with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+        rejection, "resolve_scope", return_value=fake_scope
+    ), mock.patch.object(rejection.cascade, "cascade_reject", return_value=[]):
         envelope = rejection.reject_inference(
             case_id="C1",
             subject_id_a="S1",
             rule_id="Rule_08_Recidivist_Escalation",
-            relationship_type="CASE_RISK_ESCALATION",
             investigator_id="inv-1",
+            reason="Escalation criteria no longer met on review",
         )
     check("case flag: accepted", envelope["result"]["accepted"] is True)
 
@@ -145,24 +197,35 @@ def test_reject_allegation_flag_resolves_allegation_id():
     print("\n[D2.4] rejection.py — allegation flag (Rule_12), allegation_id resolved by lookup")
 
     def responder(q, p):
+        if "is_primary = true" in q:
+            return {"primary_subject_id": "S1"}
         if 'wage_corroboration_status = "active"' in q:
-            return {"target_id": "al-1", "allegation_id": "ALLEG-99"}
+            return [{"subject_id_a": "S1", "allegation_id": "ALLEG-99"}]
         if "MERGE (rej:Rejection" in q:
             check(
                 "allegation flag: to_key is the resolved allegation_id, " "never supplied by the caller",
                 p["to_key"] == "ALLEG-99",
             )
             return {"rejection_id": "rej-4", "rejected_at": "t", "rejected_by": "inv-1"}
+        if "last_inference_change_at" in q:
+            return {"case_id": "C1"}
         raise AssertionError(f"unexpected query: {q}")
 
     session = FakeSession(responder)
-    with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+    fake_scope = {
+        "scope_subject_ids": ["S1"],
+        "scope_case_ids": ["C1"],
+        "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
+    }
+    with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+        rejection, "resolve_scope", return_value=fake_scope
+    ), mock.patch.object(rejection.cascade, "cascade_reject", return_value=[]):
         envelope = rejection.reject_inference(
             case_id="C1",
             subject_id_a="S1",
             rule_id="Rule_12_SLAM_Wage_Corroboration",
-            relationship_type="WAGE_CORROBORATION",
             investigator_id="inv-1",
+            reason="Wage records do not actually corroborate on review",
         )
     check("allegation flag: accepted", envelope["result"]["accepted"] is True)
 
@@ -178,8 +241,8 @@ def test_reject_not_found_raises():
                 subject_id_a="S1",
                 subject_id_b="S2",
                 rule_id="Rule_01_Shared_Employer",
-                relationship_type="SHARES_EMPLOYER_WITH",
                 investigator_id="inv-1",
+                reason="Attempting to reject an already-resolved fact",
             )
         except rejection.InferenceNotFoundError:
             raised = True
@@ -192,11 +255,26 @@ def test_reject_not_found_raises():
 
 def test_reject_input_validation():
     print("\n[D2.6] rejection.py — input validation")
-    session = FakeSession(lambda q, p: {"target_id": "x"})
+    # Every query this generic responder doesn't specifically recognize
+    # returns a non-list value, which FakeResult.data() empties to []
+    # (see tests/verify.py) — i.e. "the family's own query found nothing
+    # to reject." That is exactly the fallback this test wants for the
+    # locate step: these checks are about validation that happens
+    # BEFORE (or, for missing-subject_id_b, in place of) a real Neo4j
+    # lookup, not about what a specific family's query returns.
+    session = FakeSession(lambda q, p: {"primary_subject_id": "S1"} if "is_primary = true" in q else {})
+    fake_scope = {
+        "scope_subject_ids": ["S1", "S2"],
+        "scope_case_ids": ["C1"],
+        "primary_subject_id": "S1",
+        "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
+    }
 
     def expect_value_error(**kwargs):
         try:
-            with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+            with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+                rejection, "resolve_scope", return_value=fake_scope
+            ), mock.patch.object(rejection.cascade, "cascade_reject", return_value=[]):
                 rejection.reject_inference(**kwargs)
             return False
         except ValueError:
@@ -208,29 +286,8 @@ def test_reject_input_validation():
             case_id="C1",
             subject_id_a="S1",
             rule_id="Rule_99_Nonexistent",
-            relationship_type="X",
             investigator_id="inv-1",
-        ),
-    )
-    check(
-        "missing subject_id_b rejected for a two-subject rule",
-        expect_value_error(
-            case_id="C1",
-            subject_id_a="S1",
-            rule_id="Rule_01_Shared_Employer",
-            relationship_type="SHARES_EMPLOYER_WITH",
-            investigator_id="inv-1",
-        ),
-    )
-    check(
-        "extra subject_id_b rejected for a single-subject rule",
-        expect_value_error(
-            case_id="C1",
-            subject_id_a="S1",
-            subject_id_b="S2",
-            rule_id="Rule_11_Cross_Case_Hub",
-            relationship_type="CROSS_CASE_HUB",
-            investigator_id="inv-1",
+            reason="test",
         ),
     )
     check(
@@ -240,28 +297,65 @@ def test_reject_input_validation():
             subject_id_a="S1",
             subject_id_b="S2",
             rule_id="Rule_01_Shared_Employer",
-            relationship_type="SHARES_EMPLOYER_WITH",
             investigator_id="  ",
+            reason="test",
         ),
     )
-    try:
-        with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+    check(
+        # relationship_type is no longer a caller-supplied argument (it is
+        # derived internally from rule_id via _RULE_SPECS — see
+        # reject_inference's own docstring), so a mismatched
+        # relationship_type is no longer a representable input at all;
+        # this replaces that old check with the other input reject_inference
+        # validates the same way — a blank reason, same as blank
+        # investigator_id above.
+        "blank reason rejected — a rejection must be explained",
+        expect_value_error(
+            case_id="C1",
+            subject_id_a="S1",
+            subject_id_b="S2",
+            rule_id="Rule_01_Shared_Employer",
+            investigator_id="inv-1",
+            reason="   ",
+        ),
+    )
+
+    # missing subject_id_b for a two-subject rule (Rule_01) and an extra
+    # subject_id_b for a single-subject rule (Rule_11) are NO LONGER
+    # ValueErrors — _resolve_target only checks that SOME target is
+    # identifiable at all (match_id or subject_id_a), never whether
+    # subject_id_b is appropriate for the rule's family (see
+    # _resolve_target's own docstring). Family-appropriateness is left
+    # entirely to each family's own Cypher WHERE clause:
+    #   * Rule_01 (symmetric edge) WITHOUT subject_id_b: the instance
+    #     filter degrades to matching a pair that both equal
+    #     subject_id_a, which no real edge satisfies — so this now
+    #     raises InferenceNotFoundError (nothing matched), not ValueError.
+    with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+        rejection, "resolve_scope", return_value=fake_scope
+    ), mock.patch.object(rejection.cascade, "cascade_reject", return_value=[]):
+        raised_not_found = False
+        try:
             rejection.reject_inference(
                 case_id="C1",
                 subject_id_a="S1",
-                subject_id_b="S2",
                 rule_id="Rule_01_Shared_Employer",
-                relationship_type="SHARES_ADDRESS_WITH",
                 investigator_id="inv-1",
+                reason="test",
             )
-        mismatch_raised = False
-    except rejection.RelationshipTypeMismatchError:
-        mismatch_raised = True
+        except rejection.InferenceNotFoundError:
+            raised_not_found = True
     check(
-        "relationship_type mismatched against rule_id raises "
-        "RelationshipTypeMismatchError (defense in depth)",
-        mismatch_raised,
+        "missing subject_id_b for a two-subject rule no longer raises ValueError — "
+        "it now raises InferenceNotFoundError, since the instance filter degrades to "
+        "matching nothing rather than being rejected upfront",
+        raised_not_found,
     )
+    #   * Rule_11 (subject flag) doesn't reference target_subject_id_b in
+    #     its WHERE clause at all — an extra subject_id_b is silently
+    #     ignored, not an error. There is nothing left to assert here;
+    #     this is intentionally not tested as a "must raise" case any
+    #     more, since it no longer is one.
 
 
 def test_all_rule_ids_have_a_spec():
@@ -284,45 +378,78 @@ def test_all_rule_ids_have_a_spec():
 def test_fraud_network_groups_and_keeps_rejected_edges():
     print("\n[D3.1] fraud_network.py — grouping + rejected edges kept")
 
-    def responder(q, p):
-        if "MEMBER_OF_FRAUD_NETWORK" in q and "APPEARS_IN_CASE" in q:
-            return [
-                {
-                    "network_ref": "n1",
+    # get_fraud_network now runs ONE query (CASE_SUBGRAPH_QUERY) that
+    # returns a single record with raw {ref, labels, properties,
+    # is_case_subject} nodes and {ref, type, source_ref, target_ref,
+    # properties} relationships — not the two separate pre-shaped
+    # queries this test used to fake. See
+    # reasoning_layer/queries/fraud_network_query.py's own RETURN clause
+    # for this exact shape.
+    raw_record = {
+        "nodes": [
+            {
+                "ref": "ref-s1",
+                "labels": ["Subject"],
+                "properties": {"subject_id": "S1", "first_name": "A", "last_name": ""},
+                "is_case_subject": True,
+            },
+            {
+                "ref": "ref-s2",
+                "labels": ["Subject"],
+                "properties": {"subject_id": "S2", "first_name": "B", "last_name": ""},
+                "is_case_subject": False,
+            },
+            {
+                "ref": "ref-fn1",
+                "labels": ["FraudNetwork"],
+                "properties": {
                     "network_type": "Employer",
                     "network_key": "EMP-1",
                     "formed_by_rule": "Rule_02_Employer_Fraud_Network",
-                    "members": [
-                        {
-                            "subject_id": "S1",
-                            "display_name": "A",
-                            "confidence": "High",
-                            "status": "active",
-                            "source_rule": "Rule_02_Employer_Fraud_Network",
-                            "is_primary": True,
-                        },
-                        {
-                            "subject_id": "S2",
-                            "display_name": "B",
-                            "confidence": "Medium",
-                            "status": "rejected",
-                            "source_rule": "Rule_02_Employer_Fraud_Network",
-                            "is_primary": False,
-                        },
-                    ],
-                }
-            ]
-        if "SHARES_EMPLOYER_WITH" in q:
-            return [
-                {
-                    "source": "S1",
-                    "target": "S2",
-                    "relationship_type": "SHARES_EMPLOYER_WITH",
+                },
+                "is_case_subject": False,
+            },
+        ],
+        "relationships": [
+            {
+                "ref": "ref-e1",
+                "type": "MEMBER_OF_FRAUD_NETWORK",
+                "source_ref": "ref-s1",
+                "target_ref": "ref-fn1",
+                "properties": {
+                    "confidence": "High",
+                    "status": "active",
+                    "source_rule": "Rule_02_Employer_Fraud_Network",
+                },
+            },
+            {
+                "ref": "ref-e2",
+                "type": "MEMBER_OF_FRAUD_NETWORK",
+                "source_ref": "ref-s2",
+                "target_ref": "ref-fn1",
+                "properties": {
+                    "confidence": "Medium",
+                    "status": "rejected",
+                    "source_rule": "Rule_02_Employer_Fraud_Network",
+                },
+            },
+            {
+                "ref": "ref-e3",
+                "type": "SHARES_EMPLOYER_WITH",
+                "source_ref": "ref-s1",
+                "target_ref": "ref-s2",
+                "properties": {
                     "confidence": "High",
                     "status": "rejected",
                     "source_rule": "Rule_01_Shared_Employer",
-                }
-            ]
+                },
+            },
+        ],
+    }
+
+    def responder(q, p):
+        if "CASE_SUBGRAPH" in q or "case_node:Case" in q:
+            return raw_record
         raise AssertionError(f"unexpected query: {q}")
 
     session = FakeSession(responder)
@@ -348,27 +475,44 @@ def test_fraud_network_groups_and_keeps_rejected_edges():
 def test_fraud_network_confidence_falls_back_when_all_rejected():
     print("\n[D3.2] fraud_network.py — confidence when every membership is rejected")
 
-    def responder(q, p):
-        if "MEMBER_OF_FRAUD_NETWORK" in q:
-            return [
-                {
-                    "network_ref": "n1",
+    raw_record = {
+        "nodes": [
+            {
+                "ref": "ref-s1",
+                "labels": ["Subject"],
+                "properties": {"subject_id": "S1", "first_name": "A", "last_name": ""},
+                "is_case_subject": True,
+            },
+            {
+                "ref": "ref-fn1",
+                "labels": ["FraudNetwork"],
+                "properties": {
                     "network_type": "Address",
                     "network_key": "ADDR-1",
                     "formed_by_rule": "Rule_04_Address_Fraud_Network",
-                    "members": [
-                        {
-                            "subject_id": "S1",
-                            "display_name": "A",
-                            "confidence": "Medium",
-                            "status": "rejected",
-                            "source_rule": "Rule_04_Address_Fraud_Network",
-                            "is_primary": True,
-                        },
-                    ],
-                }
-            ]
-        return []
+                },
+                "is_case_subject": False,
+            },
+        ],
+        "relationships": [
+            {
+                "ref": "ref-e1",
+                "type": "MEMBER_OF_FRAUD_NETWORK",
+                "source_ref": "ref-s1",
+                "target_ref": "ref-fn1",
+                "properties": {
+                    "confidence": "Medium",
+                    "status": "rejected",
+                    "source_rule": "Rule_04_Address_Fraud_Network",
+                },
+            },
+        ],
+    }
+
+    def responder(q, p):
+        if "case_node:Case" in q:
+            return raw_record
+        raise AssertionError(f"unexpected query: {q}")
 
     session = FakeSession(responder)
     with mock.patch.object(fraud_network, "get_session", fake_session_cm(session)):
@@ -534,16 +678,24 @@ def test_route_error_mapping():
     import api.server as server
     from api.models import RejectInferenceRequest
 
-    session = FakeSession(lambda q, p: None)
+    session = FakeSession(lambda q, p: {"primary_subject_id": "S1"} if "is_primary = true" in q else None)
     req = RejectInferenceRequest(
         case_id="C1",
         subject_id_a="S1",
         subject_id_b="S2",
         rule_id="Rule_01_Shared_Employer",
-        relationship_type="SHARES_EMPLOYER_WITH",
         investigator_id="inv-1",
+        reason="test",
     )
-    with mock.patch.object(rejection, "get_session", fake_session_cm(session)):
+    fake_scope = {
+        "scope_subject_ids": ["S1", "S2"],
+        "scope_case_ids": ["C1"],
+        "primary_subject_id": "S1",
+        "expansion": {"co_subject": 0, "employer": 0, "address": 0, "alias": 0},
+    }
+    with mock.patch.object(rejection, "get_session", fake_session_cm(session)), mock.patch.object(
+        rejection, "resolve_scope", return_value=fake_scope
+    ):
         try:
             server.reject_inference_route(req)
             status = None
@@ -555,8 +707,8 @@ def test_route_error_mapping():
         case_id="C1",
         subject_id_a="S1",
         rule_id="Rule_99_Nonexistent",
-        relationship_type="X",
         investigator_id="inv-1",
+        reason="test",
     )
     try:
         server.reject_inference_route(bad_req)

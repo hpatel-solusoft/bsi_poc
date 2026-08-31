@@ -1,0 +1,22 @@
+[flake8]
+max-line-length = 110
+extend-ignore =
+    # E203: whitespace before ':' — black and flake8 disagree here;
+    # black's formatting is correct, so this rule is silenced rather
+    # than fought (standard black+flake8 pairing, per black's own docs).
+    E203,
+    # W503: line break before binary operator — same story, opposite
+    # of PEP 8's older guidance; black formats to the newer convention.
+    W503
+exclude =
+    .git,
+    __pycache__,
+    .pytest_cache,
+    *.egg-info,
+    build,
+    dist
+per-file-ignores =
+    # __init__.py files in this repo are documentation-only (a package
+    # docstring explaining ownership boundaries) — no code, so nothing
+    # to flag, but flake8's F401 doesn't apply here regardless.
+    __init__.py:F401

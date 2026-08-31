@@ -37,8 +37,11 @@ def test_combination_neither_stale():
         last_inference_change_at=_BEFORE,  # reject/revert happened, but before the cache
         cache_generated_at=_T0,
     )
-    assert check.stale_reason is None
+    assert check.core_data_changed is False
+    assert check.graph_changed is False
+    assert check.stale is False
     assert check.should_refresh is False
+    assert check.should_auto_refresh is False
     assert check.should_rerun_full_pipeline is False
 
 
@@ -48,8 +51,14 @@ def test_combination_core_data_only():
         last_inference_change_at=_BEFORE,
         cache_generated_at=_T0,
     )
-    assert check.stale_reason == "core_data"
+    assert check.core_data_changed is True
+    assert check.graph_changed is False
+    # `stale` deliberately reports the graph signal ONLY — see
+    # StalenessCheck.stale's docstring — so a core-data-only change is
+    # NOT reflected in `stale`, even though it does trigger a refresh.
+    assert check.stale is False
     assert check.should_refresh is True
+    assert check.should_auto_refresh is True
     assert check.should_rerun_full_pipeline is True
 
 
@@ -59,8 +68,14 @@ def test_combination_graph_only():
         last_inference_change_at=_AFTER,  # reject/revert happened AFTER the cache
         cache_generated_at=_T0,
     )
-    assert check.stale_reason == "graph"
+    assert check.core_data_changed is False
+    assert check.graph_changed is True
+    assert check.stale is True
     assert check.should_refresh is True
+    assert check.should_auto_refresh is False, (
+        "a graph-only signal must not by itself auto-run the agent — see "
+        "StalenessCheck.should_auto_refresh's docstring"
+    )
     assert check.should_rerun_full_pipeline is False, (
         "graph-only staleness must never trigger the expensive full pipeline "
         "re-run — see StalenessCheck.should_rerun_full_pipeline's docstring"
@@ -73,8 +88,11 @@ def test_combination_both():
         last_inference_change_at=_AFTER,
         cache_generated_at=_T0,
     )
-    assert check.stale_reason == "both"
+    assert check.core_data_changed is True
+    assert check.graph_changed is True
+    assert check.stale is True
     assert check.should_refresh is True
+    assert check.should_auto_refresh is True
     assert check.should_rerun_full_pipeline is True
 
 
@@ -122,17 +140,26 @@ def test_is_graph_newer_strictly_before_is_false():
 
 
 @pytest.mark.parametrize(
-    "core_data_changed,graph_changed,expected_reason",
+    "core_data_changed,graph_changed,expected_stale,expected_auto_refresh",
     [
-        (False, False, None),
-        (True, False, "core_data"),
-        (False, True, "graph"),
-        (True, True, "both"),
+        (False, False, False, False),
+        (True, False, False, True),
+        (False, True, True, False),
+        (True, True, True, True),
     ],
 )
-def test_staleness_check_stale_reason_matrix(core_data_changed, graph_changed, expected_reason):
+def test_staleness_check_combination_matrix(
+    core_data_changed, graph_changed, expected_stale, expected_auto_refresh
+):
+    """The 4-combination matrix, restated on the fields that actually
+    exist today: `stale` reports the graph signal only (see `stale`'s
+    docstring — there is deliberately no separate reason string, since
+    with one signal ever surfaced a reason would say nothing `stale`
+    doesn't), and `should_auto_refresh` reports the core_data signal
+    only (see its own docstring)."""
     check = StalenessCheck(core_data_changed=core_data_changed, graph_changed=graph_changed)
-    assert check.stale_reason == expected_reason
+    assert check.stale == expected_stale
+    assert check.should_auto_refresh == expected_auto_refresh
     assert check.should_refresh == (core_data_changed or graph_changed)
     assert check.should_rerun_full_pipeline == core_data_changed
 

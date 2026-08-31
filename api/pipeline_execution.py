@@ -41,7 +41,7 @@ from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.investigation_tasks import build_rule_aware_tasks, tag_step_sources
 from reasoning_layer.neo4j_client import GraphUnavailableError
 from reasoning_layer.risk_signals import apply_graph_risk_signals
-from reasoning_layer.similar_cases import find_structural_matches
+from reasoning_layer.network.similar_cases import find_structural_matches
 from semantic_layer.entity_contracts import (
     InvestigationPlan as InvestigationPlanContract,
 )
@@ -513,7 +513,7 @@ def run_similar_cases_pipeline(
             "provenance": {
                 "sources": ["Neo4j graph query"],
                 "retrieved_at": "",
-                "computed_by": "reasoning_layer.similar_cases",
+                "computed_by": "reasoning_layer.network.similar_cases",
             },
         },
     )

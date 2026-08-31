@@ -427,7 +427,7 @@ def test_ingest_calls_sync_case_once_per_case_id_and_skips_reasoning_on_request(
 
     with (
         mock.patch.object(ingest_service.graph_sync, "sync_case", side_effect=fake_sync_case),
-        mock.patch.object(ingest_service.graph_ingest_repository, "mark_started", lambda case_id: None),
+        mock.patch.object(ingest_service.graph_ingest_repository, "mark_started", lambda case_id, username=None: None),
         mock.patch.object(ingest_service.graph_ingest_repository, "mark_loaded", lambda case_id, counts: None),
     ):
         report = ingest_service.ingest(["CASE-1001"], run_reasoning=False)
@@ -450,7 +450,7 @@ def test_ingest_isolates_one_bad_case_from_the_rest():
 
     with (
         mock.patch.object(ingest_service.graph_sync, "sync_case", side_effect=flaky_sync_case),
-        mock.patch.object(ingest_service.graph_ingest_repository, "mark_started", lambda case_id: None),
+        mock.patch.object(ingest_service.graph_ingest_repository, "mark_started", lambda case_id, username=None: None),
         mock.patch.object(ingest_service.graph_ingest_repository, "mark_loaded", lambda case_id, counts: None),
         mock.patch.object(ingest_service.graph_ingest_repository, "mark_failed", lambda case_id, error: None),
         mock.patch("time.sleep", lambda seconds: None),  # skip real backoff delay in the test

@@ -116,7 +116,7 @@ from core.investigation_plan_override_repository import (
 )
 from etl.ingest_service import ingest as run_graph_ingest
 from reasoning_layer.apply_schema import apply_schema
-from reasoning_layer.fraud_network import get_fraud_network
+from reasoning_layer.network.fraud_network import get_fraud_network
 from reasoning_layer.neo4j_client import (
     GraphUnavailableError,
 )

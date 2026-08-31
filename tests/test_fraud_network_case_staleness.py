@@ -64,7 +64,7 @@ def _install_external_import_stubs() -> None:
 
 _install_external_import_stubs()
 
-from reasoning_layer import fraud_network  # noqa: E402
+from reasoning_layer.network import fraud_network  # noqa: E402
 
 
 class FakeResult:

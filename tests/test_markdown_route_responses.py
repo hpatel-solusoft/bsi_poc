@@ -88,6 +88,13 @@ def _install_external_import_stubs() -> None:
 _install_external_import_stubs()
 
 from api import server
+from api.services import (
+    intake_service,
+    plan_service,
+    report_service,
+    risk_assessment_service,
+    similar_cases_service,
+)
 
 
 MARKDOWN = "## Heading\nRaw **markdown** body."
@@ -128,11 +135,13 @@ def test_intake_cache_returns_raw_markdown_agent_summary():
     case_data = {"provenance_trail": [], "rules_fired": []}
 
     with mock.patch.object(
-        server,
+        intake_service,
         "get_cached_route_summary",
         return_value=(case_data, MARKDOWN),
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.intake(server.intakeRequest(case_id="CASE-MD-INTAKE"))
+    ), mock.patch.object(intake_service, "log_agent_call"):
+        response = intake_service.run_intake(
+            server.intakeRequest(case_id="CASE-MD-INTAKE"), "test-user", "test-token"
+        )
 
     assert_raw_markdown(response["details"]["agent_summary"])
 
@@ -141,6 +150,7 @@ def test_similar_cases_cache_returns_raw_markdown_agent_summary():
     case_data = {
         server.AGENT_SUMMARY_CACHE_KEY: {"similar_cases": MARKDOWN},
         "similar_cases": {"matches": []},
+        "complaint_intelligence": {"subject_primary_id": "SUBJ-1"},
         "provenance_trail": [],
     }
 
@@ -148,8 +158,10 @@ def test_similar_cases_cache_returns_raw_markdown_agent_summary():
         server,
         "_resolve_case_store",
         return_value=(case_data, "mock"),
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.similar_cases(server.SimilarCasesRequest(case_id="CASE-MD-SIMILAR"))
+    ), mock.patch.object(similar_cases_service, "log_agent_call"):
+        response = similar_cases_service.run_similar_cases(
+            server.SimilarCasesRequest(case_id="CASE-MD-SIMILAR"), "test-user", "test-token"
+        )
 
     assert_raw_markdown(response["details"]["agent_summary"])
 
@@ -162,17 +174,21 @@ def test_risk_assessment_fresh_returns_raw_markdown_agent_summary_not_tuple():
     with mock.patch.object(
         server,
         "_resolve_case_store",
-        return_value=({}, "mock"),
+        return_value=({"similar_cases": {"matches": []}}, "mock"),
     ), mock.patch.object(
-        server,
-        "_get_runner",
+        risk_assessment_service,
+        "get_runner",
         return_value=FakeRunner(),
     ), mock.patch.object(
-        server,
+        risk_assessment_service,
         "run_risk_assessment_pipeline",
         return_value=(risk_payload, {"risk_assessment": risk_payload}, []),
-    ), mock.patch.object(server, "persist_case_session"), mock.patch.object(server, "log_agent_call"):
-        response = server.risk_assessment(server.RiskAssessmentRequest(case_id=case_id))
+    ), mock.patch.object(risk_assessment_service, "persist_case_session"), mock.patch.object(
+        risk_assessment_service, "log_agent_call"
+    ):
+        response = risk_assessment_service.run_risk_assessment(
+            server.RiskAssessmentRequest(case_id=case_id), "test-user", "test-token"
+        )
 
     assert_raw_markdown(response["details"]["agent_summary"])
 
@@ -188,6 +204,7 @@ def test_plan_cache_with_override_returns_spliced_raw_markdown_agent_summary():
     case_data = {
         server.AGENT_SUMMARY_CACHE_KEY: {"plan": cached_summary},
         "investigation_plan": {"investigation_steps": [{"step": 1, "action": "Old step"}]},
+        "risk_assessment": {"risk_score": 40, "risk_tier": "High"},
         "rules_fired": [],
         "provenance_trail": [],
     }
@@ -206,11 +223,11 @@ def test_plan_cache_with_override_returns_spliced_raw_markdown_agent_summary():
         "get_case_ai_summary_cache_updated_at",
         return_value=None,
     ), mock.patch.object(
-        server,
+        plan_service,
         "get_override",
         return_value=override,
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.plan(server.PlanRequest(case_id=case_id))
+    ), mock.patch.object(plan_service, "log_agent_call"):
+        response = plan_service.run_plan(server.PlanRequest(case_id=case_id), "test-user", "test-token")
 
     summary = response["details"]["agent_summary"]
     assert isinstance(summary, str)
@@ -246,30 +263,34 @@ def test_generate_report_fresh_returns_raw_markdown_agent_summary():
         "_resolve_case_store",
         return_value=(case_data, "mock"),
     ), mock.patch.object(
-        server,
-        "_get_runner",
+        report_service,
+        "get_runner",
         return_value=FakeRunner(),
     ), mock.patch.object(
-        server,
+        report_service,
+        "get_latest_report",
+        return_value=None,
+    ), mock.patch.object(
+        report_service,
         "assemble_related_network",
         return_value=related_envelope,
     ), mock.patch.object(
-        server,
+        report_service,
         "get_override",
         return_value=None,
     ), mock.patch.object(
-        server,
+        report_service,
         "build_decision_log",
         return_value=decision_log_envelope,
     ), mock.patch.object(
-        server,
+        report_service,
         "build_report_llm_context",
         return_value={},
-    ), mock.patch.object(server, "save_report", return_value={"id": 1}), mock.patch.object(
-        server, "log_agent_call"
+    ), mock.patch.object(report_service, "save_report", return_value={"id": 1}), mock.patch.object(
+        report_service, "log_agent_call"
     ):
-        response = server.generate_report(
-            server.ReportGenerationRequest(case_id=case_id, reload_ai_summary=True)
+        response = report_service.run_generate_report(
+            server.ReportGenerationRequest(case_id=case_id, reload_ai_summary=True), "test-user", "test-token"
         )
 
     assert_raw_markdown(response["details"]["agent_summary"])
@@ -313,7 +334,12 @@ def test_copilot_returns_raw_markdown_answer_and_keeps_structured_sources():
 
 
 def test_generate_report_pdf_still_returns_pdf_response():
-    source = inspect.getsource(server.generate_report_pdf)
+    # run_generate_report_pdf itself is a thin orchestrator (mirrors
+    # run_generate_report's own cache-hit/fresh-run split) — the actual
+    # PDF response is built in its cache-hit helper,
+    # _generate_report_pdf_try_cache (and identically in the fresh-run
+    # helper, _generate_report_pdf_generate_fresh).
+    source = inspect.getsource(report_service._generate_report_pdf_try_cache)
 
     assert "render_report_pdf(" in source
     assert 'media_type="application/pdf"' in source

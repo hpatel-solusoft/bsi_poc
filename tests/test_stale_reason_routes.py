@@ -107,6 +107,13 @@ _install_external_import_stubs()
 os.environ.setdefault("OPENAI_API_KEY", "test-key-for-ai-32-tests")
 
 from api import server  # noqa: E402
+from api.services import (  # noqa: E402
+    intake_service,
+    plan_service,
+    report_service,
+    risk_assessment_service,
+    similar_cases_service,
+)
 from core.narrative_staleness import StalenessCheck  # noqa: E402
 
 _T0 = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -155,10 +162,10 @@ def _intake_cache_hit_kwargs(case_id: str):
     case_data = {"provenance_trail": [], "rules_fired": [], "complaint_intelligence": {}}
     return dict(
         get_cached_route_summary=mock.patch.object(
-            server, "get_cached_route_summary", return_value=(case_data, "cached markdown")
+            intake_service, "get_cached_route_summary", return_value=(case_data, "cached markdown")
         ),
         fetch_live_graph_findings=mock.patch.object(
-            server,
+            intake_service,
             "fetch_live_graph_findings",
             return_value={
                 "network_match_flag": None,
@@ -167,7 +174,7 @@ def _intake_cache_hit_kwargs(case_id: str):
                 "rules_fired": [],
             },
         ),
-        log_agent_call=mock.patch.object(server, "log_agent_call"),
+        log_agent_call=mock.patch.object(intake_service, "log_agent_call"),
     )
 
 
@@ -175,92 +182,100 @@ def test_intake_neither_serves_cache_with_null_stale_reason():
     case_id = "CASE-STALE-INTAKE"
     patches = _intake_cache_hit_kwargs(case_id)
     with mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=_NEITHER
+        intake_service, "evaluate_cache_staleness", return_value=_NEITHER
     ), patches["get_cached_route_summary"], patches["fetch_live_graph_findings"], patches["log_agent_call"]:
-        response = server.intake(server.intakeRequest(case_id=case_id))
+        response = intake_service.run_intake(
+            server.intakeRequest(case_id=case_id), "test-user", "test-token"
+        )
 
     assert response["details"]["meta"]["pipeline_status"] == "cached"
-    assert response["details"]["meta"]["stale_reason"] is None
+    assert response["details"]["meta"]["stale"] is False
 
 
 def _intake_fresh_run_patches(case_id: str, run_intake_direct_pipeline_mock):
     return [
-        mock.patch.object(server, "_get_runner", return_value=FakeRunner()),
-        mock.patch.object(server, "run_intake_direct_pipeline", run_intake_direct_pipeline_mock),
-        mock.patch.object(server, "try_resolve_case_data", return_value={}),
-        mock.patch.object(server, "persist_case_session"),
-        mock.patch.object(server, "log_agent_call"),
+        mock.patch.object(intake_service, "get_runner", return_value=FakeRunner()),
+        mock.patch.object(intake_service, "run_intake_direct_pipeline", run_intake_direct_pipeline_mock),
+        mock.patch.object(intake_service, "try_resolve_case_data", return_value={}),
+        mock.patch.object(intake_service, "persist_case_session"),
+        mock.patch.object(intake_service, "log_agent_call"),
         # No cache to hit in any of the fresh-run combinations below —
         # they all reach this path specifically because
         # staleness.should_refresh is True.
-        mock.patch.object(server, "get_cached_route_summary", return_value=None),
+        mock.patch.object(intake_service, "get_cached_route_summary", return_value=None),
     ]
 
 
 def test_intake_core_data_only_forces_full_pipeline_rerun():
     case_id = "CASE-STALE-INTAKE"
     run_pipeline_mock = mock.Mock(
-        side_effect=lambda case_id, force, sections, provenance_trail: (
+        side_effect=lambda case_id, force, sections, provenance_trail, username: (
             {**sections, "network_match_flag": None, "graph_context": None, "graph_signals": None},
             provenance_trail,
         )
     )
     patches = _intake_fresh_run_patches(case_id, run_pipeline_mock)
-    with mock.patch.object(server, "evaluate_cache_staleness", return_value=_CORE_DATA_ONLY):
+    with mock.patch.object(intake_service, "evaluate_cache_staleness", return_value=_CORE_DATA_ONLY):
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-            response = server.intake(server.intakeRequest(case_id=case_id, reload_ai_summary=True))
+            response = intake_service.run_intake(
+                server.intakeRequest(case_id=case_id, reload_ai_summary=True), "test-user", "test-token"
+            )
 
     # should_rerun_full_pipeline is True for core_data-only -> force=True
     # threaded through to run_intake_direct_pipeline, NOT the other way.
     run_pipeline_mock.assert_called_once()
     called_force = run_pipeline_mock.call_args.args[1]
     assert called_force is True
-    assert response["details"]["meta"]["stale_reason"] == "core_data"
+    assert response["details"]["meta"]["stale"] is False
     assert response["details"]["meta"]["pipeline_status"] == "reloaded"
 
 
 def test_intake_graph_only_regenerates_narrative_without_forcing_pipeline():
     case_id = "CASE-STALE-INTAKE"
     run_pipeline_mock = mock.Mock(
-        side_effect=lambda case_id, force, sections, provenance_trail: (
+        side_effect=lambda case_id, force, sections, provenance_trail, username: (
             {**sections, "network_match_flag": None, "graph_context": None, "graph_signals": None},
             provenance_trail,
         )
     )
     patches = _intake_fresh_run_patches(case_id, run_pipeline_mock)
-    with mock.patch.object(server, "evaluate_cache_staleness", return_value=_GRAPH_ONLY):
+    with mock.patch.object(intake_service, "evaluate_cache_staleness", return_value=_GRAPH_ONLY):
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             # reload_ai_summary=False on the request itself — the graph
             # trigger alone is what must still bypass the cache and call
             # the LLM again (should_refresh True even though the caller
             # never asked for a reload).
-            response = server.intake(server.intakeRequest(case_id=case_id, reload_ai_summary=False))
+            response = intake_service.run_intake(
+                server.intakeRequest(case_id=case_id, reload_ai_summary=False), "test-user", "test-token"
+            )
 
     called_force = run_pipeline_mock.call_args.args[1]
     assert called_force is False, (
         "graph-only staleness must NOT force the Wave 1/2 pipeline rerun — "
         "see StalenessCheck.should_rerun_full_pipeline's docstring"
     )
-    assert response["details"]["meta"]["stale_reason"] == "graph"
+    assert response["details"]["meta"]["stale"] is True
     assert response["details"]["meta"]["pipeline_status"] == "narrative_regenerated"
 
 
 def test_intake_both_forces_full_pipeline_rerun_and_reports_both():
     case_id = "CASE-STALE-INTAKE"
     run_pipeline_mock = mock.Mock(
-        side_effect=lambda case_id, force, sections, provenance_trail: (
+        side_effect=lambda case_id, force, sections, provenance_trail, username: (
             {**sections, "network_match_flag": None, "graph_context": None, "graph_signals": None},
             provenance_trail,
         )
     )
     patches = _intake_fresh_run_patches(case_id, run_pipeline_mock)
-    with mock.patch.object(server, "evaluate_cache_staleness", return_value=_BOTH):
+    with mock.patch.object(intake_service, "evaluate_cache_staleness", return_value=_BOTH):
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-            response = server.intake(server.intakeRequest(case_id=case_id, reload_ai_summary=True))
+            response = intake_service.run_intake(
+                server.intakeRequest(case_id=case_id, reload_ai_summary=True), "test-user", "test-token"
+            )
 
     called_force = run_pipeline_mock.call_args.args[1]
     assert called_force is True
-    assert response["details"]["meta"]["stale_reason"] == "both"
+    assert response["details"]["meta"]["stale"] is True
     assert response["details"]["meta"]["pipeline_status"] == "reloaded"
 
 
@@ -272,72 +287,88 @@ def test_intake_both_forces_full_pipeline_rerun_and_reports_both():
 # --------------------------------------------------------------------
 
 
-def test_similar_cases_graph_only_bypasses_cache_and_reports_graph():
+def test_similar_cases_graph_only_reports_stale_while_still_serving_cache():
+    """A graph-only signal must NOT by itself bypass the cache (see
+    _similar_cases_cache_hit's own docstring — only an explicit
+    reload_ai_summary=True does that); it must still be reported as
+    `stale=True` in the response so the caller knows to ask for a
+    reload if it wants one."""
     case_id = "CASE-STALE-SIMILAR"
     server.CASE_STORE[case_id] = {}
     case_data = {
         server.AGENT_SUMMARY_CACHE_KEY: {"similar_cases": "cached markdown"},
         "similar_cases": {"matches": []},
+        "complaint_intelligence": {"subject_primary_id": "SUBJ-1"},
         "provenance_trail": [],
     }
     with mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
+        similar_cases_service, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
     ), mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "_get_runner", return_value=FakeRunner()
-    ), mock.patch.object(
-        server,
-        "run_similar_cases_pipeline",
-        return_value=("fresh markdown", {"matches": []}, {"similar_cases": {"matches": []}}, []),
-    ), mock.patch.object(server, "persist_case_session"), mock.patch.object(server, "log_agent_call"):
-        response = server.similar_cases(server.SimilarCasesRequest(case_id=case_id))
+        similar_cases_service, "fetch_live_similar_cases", return_value=[]
+    ), mock.patch.object(similar_cases_service, "log_agent_call"):
+        response = similar_cases_service.run_similar_cases(
+            server.SimilarCasesRequest(case_id=case_id), "test-user", "test-token"
+        )
 
-    assert response["details"]["meta"]["agent_summary_source"] == "llm"
-    assert response["details"]["meta"]["stale_reason"] == "graph"
+    assert response["details"]["meta"]["agent_summary_source"] == "db_cache"
+    assert response["details"]["meta"]["stale"] is True
 
 
-def test_risk_assessment_graph_only_bypasses_cache_and_reports_graph():
+def test_risk_assessment_graph_only_reports_stale_while_still_serving_cache():
     case_id = "CASE-STALE-RISK"
     server.CASE_STORE[case_id] = {}
-    risk_payload = {"risk_score": 40, "risk_tier": "High", "neo4j_signals": {}}
+    case_data = {
+        server.AGENT_SUMMARY_CACHE_KEY: {"risk_assessment": "cached markdown"},
+        "risk_assessment": {"risk_score": 40, "risk_tier": "High"},
+        "similar_cases": {"matches": []},
+        "provenance_trail": [],
+    }
     with mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
+        risk_assessment_service, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
     ), mock.patch.object(
-        server, "_resolve_case_store", return_value=({}, "mock")
+        server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "_get_runner", return_value=FakeRunner()
-    ), mock.patch.object(
-        server,
-        "run_risk_assessment_pipeline",
-        return_value=(risk_payload, {"risk_assessment": risk_payload}, []),
-    ), mock.patch.object(server, "persist_case_session"), mock.patch.object(server, "log_agent_call"):
-        response = server.risk_assessment(server.RiskAssessmentRequest(case_id=case_id))
+        risk_assessment_service, "fetch_live_risk_signals", return_value={}
+    ), mock.patch.object(risk_assessment_service, "log_agent_call"):
+        response = risk_assessment_service.run_risk_assessment(
+            server.RiskAssessmentRequest(case_id=case_id), "test-user", "test-token"
+        )
 
-    assert response["details"]["meta"]["agent_summary_source"] == "llm"
-    assert response["details"]["meta"]["stale_reason"] == "graph"
+    assert response["details"]["meta"]["agent_summary_source"] == "db_cache"
+    assert response["details"]["meta"]["stale"] is True
 
 
 def test_plan_graph_only_bypasses_cache_when_no_override_exists():
     case_id = "CASE-STALE-PLAN"
     server.CASE_STORE[case_id] = {}
-    case_data = {"complaint_intelligence": {}, "rules_fired": [], "provenance_trail": []}
+    case_data = {
+        "complaint_intelligence": {},
+        "risk_assessment": {"risk_score": 40, "risk_tier": "High"},
+        "rules_fired": [],
+        "provenance_trail": [],
+    }
     # AI-35: /plan no longer reads get_case_ai_summary_cache_updated_at
     # (the shared, case-wide column) at all — it reads its own per-tab
     # generated_at instead (core.case_store.get_route_generated_at_datetime,
     # real here since case_data has no cached "plan" entry yet, so it
     # naturally resolves to None). No mock is needed for it any more; the
     # absence of one here is itself part of what this test now proves.
+    # No cached "plan" agent_summary exists in case_data at all here
+    # (unlike the similar_cases/risk_assessment graph-only tests above),
+    # so _plan_cache_hit correctly returns None regardless of staleness —
+    # this is a genuine no-cache-to-serve case, not a staleness bypass.
     with mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
+        plan_service, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
     ), mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "get_override", return_value=None
+        plan_service, "get_override", return_value=None
     ), mock.patch.object(
-        server, "_get_runner", return_value=FakeRunner()
+        plan_service, "get_runner", return_value=FakeRunner()
     ), mock.patch.object(
-        server,
+        plan_service,
         "run_plan_pipeline",
         return_value=(
             "fresh plan markdown",
@@ -350,12 +381,14 @@ def test_plan_graph_only_bypasses_cache_when_no_override_exists():
             False,
         ),
     ), mock.patch.object(
-        server, "prepare_plan_context", return_value=({"complaint_intelligence": {}}, [])
-    ), mock.patch.object(server, "persist_case_session"), mock.patch.object(server, "log_agent_call"):
-        response = server.plan(server.PlanRequest(case_id=case_id))
+        plan_service, "prepare_plan_context", return_value=({"complaint_intelligence": {}}, [])
+    ), mock.patch.object(plan_service, "persist_case_session"), mock.patch.object(
+        plan_service, "log_agent_call"
+    ):
+        response = plan_service.run_plan(server.PlanRequest(case_id=case_id), "test-user", "test-token")
 
     assert response["details"]["meta"]["agent_summary_source"] == "llm"
-    assert response["details"]["meta"]["stale_reason"] == "graph"
+    assert response["details"]["meta"]["stale"] is True
 
 
 def test_plan_override_always_wins_even_when_graph_changed():
@@ -371,6 +404,7 @@ def test_plan_override_always_wins_even_when_graph_changed():
     case_data = {
         server.AGENT_SUMMARY_CACHE_KEY: {"plan": cached_summary},
         "investigation_plan": {"investigation_steps": [{"step": 1, "action": "Old step"}]},
+        "risk_assessment": {"risk_score": 40, "risk_tier": "High"},
         "rules_fired": [],
         "provenance_trail": [],
     }
@@ -382,17 +416,19 @@ def test_plan_override_always_wins_even_when_graph_changed():
     # AI-35: no get_case_ai_summary_cache_updated_at mock needed (or read)
     # for /plan any more — see the test above's comment.
     with mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=_BOTH
+        plan_service, "evaluate_cache_staleness", return_value=_BOTH
     ), mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "get_override", return_value=override
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.plan(server.PlanRequest(case_id=case_id, reload_ai_summary=True))
+        plan_service, "get_override", return_value=override
+    ), mock.patch.object(plan_service, "log_agent_call"):
+        response = plan_service.run_plan(
+            server.PlanRequest(case_id=case_id, reload_ai_summary=True), "test-user", "test-token"
+        )
 
     assert response["details"]["meta"]["agent_summary_source"] == "db_cache"
     assert response["details"]["meta"]["plan_source"] == "User Modified"
-    assert response["details"]["meta"]["stale_reason"] == "both"
+    assert response["details"]["meta"]["stale"] is True
     # No cached "plan" generated_at exists (legacy bare-string entry) —
     # compute_plan_staleness has nothing to compare the override against,
     # so it degrades to False rather than guessing.
@@ -450,20 +486,24 @@ def test_generate_report_content_unchanged_but_graph_timestamp_newer_still_serve
     with mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "assemble_related_network", return_value=related_envelope
+        report_service, "get_runner", return_value=FakeRunner()
     ), mock.patch.object(
-        server, "get_override", return_value=None
+        report_service, "assemble_related_network", return_value=related_envelope
     ), mock.patch.object(
-        server, "get_latest_report", return_value=cached_report
+        report_service, "get_override", return_value=None
     ), mock.patch.object(
-        server, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
+        report_service, "get_latest_report", return_value=cached_report
     ), mock.patch.object(
-        server, "build_decision_log", return_value=decision_log_envelope
-    ), mock.patch.object(server, "log_agent_call"):
-        response = server.generate_report(server.ReportGenerationRequest(case_id=case_id))
+        report_service, "evaluate_cache_staleness", return_value=_GRAPH_ONLY
+    ), mock.patch.object(
+        report_service, "build_decision_log", return_value=decision_log_envelope
+    ), mock.patch.object(report_service, "log_agent_call"):
+        response = report_service.run_generate_report(
+            server.ReportGenerationRequest(case_id=case_id), "test-user", "test-token"
+        )
 
     assert response["details"]["meta"]["agent_summary_source"] == "db_cache"
-    assert response["details"]["meta"]["stale_reason"] == "graph"
+    assert response["details"]["meta"]["stale"] is True
 
 
 def test_generate_report_content_differs_bypasses_cache_regardless_of_timestamp():
@@ -508,27 +548,29 @@ def test_generate_report_content_differs_bypasses_cache_regardless_of_timestamp(
     with mock.patch.object(
         server, "_resolve_case_store", return_value=(case_data, "mock")
     ), mock.patch.object(
-        server, "assemble_related_network", return_value=related_envelope
+        report_service, "assemble_related_network", return_value=related_envelope
     ), mock.patch.object(
-        server, "get_override", return_value=None
+        report_service, "get_override", return_value=None
     ), mock.patch.object(
-        server, "get_latest_report", return_value=cached_report
+        report_service, "get_latest_report", return_value=cached_report
     ), mock.patch.object(
         # timestamp signal alone says "not stale" — content diff must
         # still be what drives this test's expected outcome.
-        server,
+        report_service,
         "evaluate_cache_staleness",
         return_value=_NEITHER,
     ), mock.patch.object(
-        server, "build_decision_log", return_value=decision_log_envelope
+        report_service, "build_decision_log", return_value=decision_log_envelope
     ), mock.patch.object(
-        server, "build_report_llm_context", return_value={}
+        report_service, "build_report_llm_context", return_value={}
     ), mock.patch.object(
-        server, "_get_runner", return_value=FakeRunner()
-    ), mock.patch.object(server, "save_report", return_value={"id": 2}), mock.patch.object(
-        server, "log_agent_call"
+        report_service, "get_runner", return_value=FakeRunner()
+    ), mock.patch.object(report_service, "save_report", return_value={"id": 2}), mock.patch.object(
+        report_service, "log_agent_call"
     ):
-        response = server.generate_report(server.ReportGenerationRequest(case_id=case_id))
+        response = report_service.run_generate_report(
+            server.ReportGenerationRequest(case_id=case_id), "test-user", "test-token"
+        )
 
     assert response["details"]["meta"]["agent_summary_source"] == "llm"
-    assert response["details"]["meta"]["stale_reason"] == "graph"
+    assert response["details"]["meta"]["stale"] is True

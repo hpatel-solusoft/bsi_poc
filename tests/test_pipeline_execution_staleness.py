@@ -89,7 +89,9 @@ def test_uses_supplied_cache_generated_at_without_a_second_lookup():
         )
 
     mock_get_cache_ts.assert_not_called()
-    assert check.stale_reason == "graph"
+    assert check.core_data_changed is False
+    assert check.graph_changed is True
+    assert check.stale is True
 
 
 def test_fetches_cache_generated_at_when_not_supplied():
@@ -101,7 +103,9 @@ def test_fetches_cache_generated_at_when_not_supplied():
         check = pipeline_execution.evaluate_cache_staleness("CASE-1", reload_ai_summary_requested=False)
 
     mock_get_cache_ts.assert_called_once_with("CASE-1")
-    assert check.stale_reason == "graph"
+    assert check.core_data_changed is False
+    assert check.graph_changed is True
+    assert check.stale is True
 
 
 def test_reload_ai_summary_true_is_core_data_regardless_of_graph_state():
@@ -110,7 +114,8 @@ def test_reload_ai_summary_true_is_core_data_regardless_of_graph_state():
     ), mock.patch.object(pipeline_execution, "get_last_inference_change_at", return_value=_BEFORE):
         check = pipeline_execution.evaluate_cache_staleness("CASE-1", reload_ai_summary_requested=True)
 
-    assert check.stale_reason == "core_data"
+    assert check.core_data_changed is True
+    assert check.graph_changed is False
     assert check.should_rerun_full_pipeline is True
 
 
@@ -124,7 +129,8 @@ def test_neo4j_outage_degrades_to_no_graph_signal_not_a_raise():
     ):
         check = pipeline_execution.evaluate_cache_staleness("CASE-1", reload_ai_summary_requested=False)
 
-    assert check.stale_reason is None
+    assert check.core_data_changed is False
+    assert check.graph_changed is False
     assert check.should_refresh is False
 
 
@@ -140,7 +146,8 @@ def test_neo4j_outage_with_reload_requested_still_reports_core_data():
     ):
         check = pipeline_execution.evaluate_cache_staleness("CASE-1", reload_ai_summary_requested=True)
 
-    assert check.stale_reason == "core_data"
+    assert check.core_data_changed is True
+    assert check.graph_changed is False
 
 
 def test_all_four_combinations_end_to_end_through_the_glue_function():
@@ -148,12 +155,12 @@ def test_all_four_combinations_end_to_end_through_the_glue_function():
     cover, but exercised through the actual I/O-fetching function every
     route calls — not just the pure combiner."""
     cases = [
-        (False, _BEFORE, None),
-        (True, _BEFORE, "core_data"),
-        (False, _AFTER, "graph"),
-        (True, _AFTER, "both"),
+        (False, _BEFORE, False, False),
+        (True, _BEFORE, True, False),
+        (False, _AFTER, False, True),
+        (True, _AFTER, True, True),
     ]
-    for reload_requested, last_inference_change_at, expected_reason in cases:
+    for reload_requested, last_inference_change_at, expected_core_data_changed, expected_graph_changed in cases:
         with mock.patch.object(
             pipeline_execution, "get_case_ai_summary_cache_updated_at", return_value=_T0
         ), mock.patch.object(
@@ -164,8 +171,13 @@ def test_all_four_combinations_end_to_end_through_the_glue_function():
             check = pipeline_execution.evaluate_cache_staleness(
                 "CASE-1", reload_ai_summary_requested=reload_requested
             )
-        assert check.stale_reason == expected_reason, (
+        assert check.core_data_changed == expected_core_data_changed, (
             f"reload_requested={reload_requested}, "
             f"last_inference_change_at={last_inference_change_at}: "
-            f"expected {expected_reason!r}, got {check.stale_reason!r}"
+            f"expected core_data_changed={expected_core_data_changed}, got {check.core_data_changed}"
+        )
+        assert check.graph_changed == expected_graph_changed, (
+            f"reload_requested={reload_requested}, "
+            f"last_inference_change_at={last_inference_change_at}: "
+            f"expected graph_changed={expected_graph_changed}, got {check.graph_changed}"
         )

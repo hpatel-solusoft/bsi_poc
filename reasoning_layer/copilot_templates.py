@@ -365,7 +365,7 @@ def get_structural_similar_cases(case_id: str, limit: int = 25, **kwargs) -> dic
     and then the Similar Cases tab and the Copilot would tell the
     investigator different things about the same pair of cases.
     """
-    from reasoning_layer.similar_cases import find_structural_matches
+    from reasoning_layer.network.similar_cases import find_structural_matches
 
     envelope = find_structural_matches(case_id, limit=limit)
     logger.info(

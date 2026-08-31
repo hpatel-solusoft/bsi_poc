@@ -1,0 +1,30 @@
+[tool.black]
+line-length = 110
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 110
+known_first_party = [
+    "agent_service",
+    "api",
+    "appworks",
+    "core",
+    "etl",
+    "reasoning_layer",
+    "semantic_layer",
+    "utils",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Enabled repo-wide but not enforced as an error yet (Section 13's
+# checklist item is "mypy passes with no type errors" as a target, not
+# a precondition of this file existing) — flip these on once an initial
+# type-error sweep is done deliberately, not as a side effect of adding
+# this config.
+check_untyped_defs = true
+disallow_untyped_defs = false

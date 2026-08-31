@@ -342,6 +342,16 @@ def test_two_hop_revert_walks_all_the_way_back_including_coalesce_trap_fallback(
     graph = FakeCascadeGraph(case_flags={"status": "rejected", "subject_id": "B", "auto_invalidated": True})
     graph.set_edge("SHARES_EMPLOYER_WITH", "B", "active")  # just reverted back to active
     graph.set_membership("B", "Employer:FEIN-1", "auto_invalidated")
+    # Rule_08 has TWO upstream contributors (see
+    # _all_upstream_conditions_hold's own docstring): Rule_07's
+    # HAS_PRIOR_GUILTY_CASE finding, and the network membership this
+    # test exercises. Only the network leg is ever touched by this
+    # scenario's own narrative (reverting Rule_01's SHARES_EMPLOYER_WITH
+    # edge) — Rule_07's leg was never broken, so it must be set up as
+    # active/untouched here, not left unset (which would silently
+    # default to inactive and make _all_upstream_conditions_hold false
+    # even after the network leg is correctly reinstated below).
+    graph.set_edge("HAS_PRIOR_GUILTY_CASE", "B", "active")
 
     session = FakeSession(graph.responder)
     p1, p2, p3 = _patch_reinstate_internals(execute_writes=0)

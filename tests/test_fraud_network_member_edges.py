@@ -45,7 +45,7 @@ def _install_external_import_stubs() -> None:
 
 _install_external_import_stubs()
 
-from reasoning_layer.fraud_network import _build_edges  # noqa: E402
+from reasoning_layer.network.fraud_network import _build_edges  # noqa: E402
 from reasoning_layer.rejection import build_match_id, decode_match_id  # noqa: E402
 
 

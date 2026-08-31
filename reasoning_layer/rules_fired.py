@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 _CONFIDENCE_ORDER = {"Unresolved": 0, "Medium": 1, "High": 2}
 
-from reasoning_layer.rules_fired_queries import PROP_RULES, REL_RULES
+from reasoning_layer.queries.rules_fired_queries import PROP_RULES, REL_RULES
 
 # Rule 12's `corroborated` is deliberately wage_corroboration_verified, not
 # a Rule 14 flag: for this rule, "corroborated" means the wage period was
