@@ -35,6 +35,15 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
     the old Subject.item() + workfolder_mappings() + workfolder_mapping_item()
     3-call chase (the last of which existed only because childEntities list
     rows carry a bare 'self' href, not the parent Workfolder relationship).
+
+    prior_cases includes only rows where this subject was the PRIMARY
+    subject on that other case — a "prior case" means this subject was
+    themselves under investigation there, not merely linked to it as a
+    co-subject (e.g. a PCA, employer contact, or anyone else incidentally
+    connected to a case actually about someone else). A co-subject
+    appearance is excluded before the per-case Workfolder/commentary fetch
+    below, so it costs nothing beyond the one row the Subjects query
+    already returned.
     """
     logger.info("🚀 [LIVE] Context Enrichment for Subject ID: %s", subject_id)
 
@@ -73,6 +82,26 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
             # Exclude current case
             if case_id and str(wf_id) == str(case_id):
                 logger.info("  Skipping current case %s from prior case history", wf_id)
+                continue
+
+            # Prior Cases means "this subject was themselves under
+            # investigation," not "this subject was mentioned on a case" —
+            # a co-subject appearance (e.g. a PCA, employer contact, or
+            # anyone else incidentally linked to another person's case) is
+            # not that subject's own case history. Without this filter, any
+            # case that adds this subject as a secondary/co-subject — even
+            # one entirely unrelated to them, correctly entered or not —
+            # would silently inflate their Prior Cases count. Skipped here,
+            # before the Workfolder/commentary fetch below, so a filtered
+            # row also costs nothing beyond the one row already returned by
+            # the Subjects query.
+            if not is_primary:
+                logger.info(
+                    "  Skipping case %s from prior case history — subject %s is a "
+                    "co-subject there, not the primary subject",
+                    wf_id,
+                    subject_id,
+                )
                 continue
 
             tracker.add_source("Workfolder", wf_id)
