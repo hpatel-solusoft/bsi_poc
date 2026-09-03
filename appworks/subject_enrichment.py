@@ -44,6 +44,17 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
     appearance is excluded before the per-case Workfolder/commentary fetch
     below, so it costs nothing beyond the one row the Subjects query
     already returned.
+
+    THE SAME RULE ALSO GATES THIS SUBJECT ENTIRELY, RELATIVE TO case_id:
+    if `subject_id` is not itself the primary subject ON case_id (e.g.
+    they're a co-subject / absent parent / PCA on the case this call was
+    made for), prior_cases is returned empty regardless of what history
+    this subject actually has elsewhere. Rationale is the same one level
+    up: a co-subject's own unrelated case history is not case_id's prior
+    case history, and surfacing it there would misattribute someone
+    else's pattern to this investigation. Only name/DOB are still
+    returned for such a subject — harmless identity metadata, not a
+    case-history claim.
     """
     logger.info("🚀 [LIVE] Context Enrichment for Subject ID: %s", subject_id)
 
@@ -53,6 +64,37 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
     rows = get_relationship_items(href, "All_Subjects")
 
     logger.info("📋 Found %d case row(s) for Subject %s", len(rows), subject_id)
+
+    # Prior Cases is a PRIMARY SUBJECT's own case history, surfaced on
+    # the CURRENT case — not every subject's case history. A co-subject
+    # of the current case (e.g. an absent parent, a PCA, an employer
+    # contact) has their own case history too, but it isn't the current
+    # case's prior-case history; showing it there would attribute a
+    # stranger's pattern to this investigation. So before collecting any
+    # prior case for `subject_id`, first determine whether `subject_id`
+    # is THE primary subject on `case_id` itself — the same
+    # Subjects_IsPrimarySubject flag AppWorks already returns per row,
+    # just read off the row for the current case instead of a prior one.
+    # No case_id means the caller isn't scoping to one case (return
+    # everything, as before); found with is_primary False, or not found
+    # at all (this subject has no row for case_id — shouldn't normally
+    # happen when called for a subject actually on the case, but fails
+    # safe rather than assuming primary), means: this subject's prior
+    # cases don't belong on this case's Prior Cases panel.
+    is_primary_on_this_case = None
+    if case_id:
+        for row in rows:
+            wf_id = embedded_id(row, "Subjects_Workfolder")
+            if wf_id and str(wf_id) == str(case_id):
+                is_primary_on_this_case = bool(row.get("Properties", {}).get("Subjects_IsPrimarySubject", False))
+                break
+        if not is_primary_on_this_case:
+            logger.info(
+                "  Subject %s is not the primary subject on case %s — "
+                "returning name/DOB only, no prior case history",
+                subject_id,
+                case_id,
+            )
 
     first_name = ""
     last_name = ""
@@ -74,6 +116,13 @@ def get_enriched_subject_profile(subject_id: str, case_id: Optional[str] = None)
                 last_name = detail_props.get("Subject_LastName", "") or ""
             if dob is None:
                 dob = detail_props.get("Subject_DOB")
+
+            if case_id and not is_primary_on_this_case:
+                # Names/DOB above are still collected (harmless identity
+                # metadata), but this subject is a co-subject of the
+                # current case, so none of their case history — prior or
+                # otherwise — belongs on this case's Prior Cases panel.
+                continue
 
             if not wf_id:
                 logger.warning("⚠️ Subjects row with no resolvable Subjects_Workfolder id skipped")

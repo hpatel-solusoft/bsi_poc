@@ -28,18 +28,25 @@ the prior-guilty exclusion below — that filter also traverses through
 :Subject, but it is a candidate-set exclusion (a disqualifier), not a
 scoring dimension, and was explicitly kept as-is.
 
-EXCLUSION — A PRIOR-GUILTY CASE IS NOT A "SIMILAR" CASE: a case c2 is
-dropped from the candidate set (never scored, never returned) when any
-subject on the active case c1 has an active HAS_PRIOR_GUILTY_CASE edge to
-c2. That edge (Rule_07_Prior_Guilty; see rules/wave2/rule_07_prior_guilty
-.cypher) already means c2 has been adjudicated and attributed to one of
-c1's subjects — it belongs in the Prior Guilty / recidivism surfaces
-(risk_signals.py, investigation_tasks.py), not in a list meant to suggest
-*new* candidate cases an investigator hasn't already resolved a verdict
-on. Filtered the same way risk_signals.py reads this edge (`pg.status =
-"active"`) so an investigator-rejected prior-guilty link does not
-suppress a case here either — rejection restores it as an ordinary
-similar-case candidate.
+EXCLUSION — A SUBJECT'S OWN PRIOR CASE IS NOT A "SIMILAR" CASE: a case
+c2 is dropped from the candidate set (never scored, never returned) when
+c1's PRIMARY subject is ALSO the primary subject of c2 (APPEARS_IN_CASE.
+is_primary = true on both sides). That's not a new candidate to
+investigate — it's the same person's own case history, already surfaced
+on the Prior Cases panel (appworks/subject_enrichment.py, which defines
+"prior case" the same way: primary-subject-on-that-other-case, nothing
+more). Deliberately NOT keyed to HAS_PRIOR_GUILTY_CASE / any outcome
+vocabulary (Rule_07_Prior_Guilty; rules/wave2/rule_07_prior_guilty.cypher)
+— that edge only exists for a CLOSED case with a GUILTY finding, so a
+subject's own prior case that closed with, say, "insufficient evidence"
+has no such edge and would slip through un-excluded. Own-history is a
+structural fact independent of how either case resolved, so the
+exclusion is structural (is_primary on both sides) too — nothing here to
+keep in sync with the rule library's outcome vocabulary. Scoped to c1's
+PRIMARY subject specifically, not every subject on c1: a co-subject of
+the active case (an absent parent, a PCA, an employer contact) is not
+who the active case is about, so their own unrelated case history must
+not disqualify a genuinely similar case.
 
 The LLM's role becomes EXPLAINING what the graph found, never selecting it
 (Section 8.3, 9.2 Turn 2). This module makes no LLM call and no AppWorks
@@ -102,33 +109,33 @@ MATCH (c2:Case)-[:HAS_ALLEGATION]->(a2:Allegation)
 // case_id is typed in the graph.
 WHERE toString(c2.case_id) <> toString($case_id)
   AND toLower(a2.allegation_type) IN c1_types
-  // Prior-guilty exclusion: c2 is not a "similar" case if it is already
-  // a resolved prior-guilty case for one of c1's subjects — that's a
-  // recidivism finding (Rule_07_Prior_Guilty), a different surface, not
-  // a new candidate to investigate. Scoped to c1's subjects (not c2's),
-  // since the question is "does someone on the ACTIVE case already have
-  // a guilty verdict on c2", and to pg.status = "active" so a rejected
-  // prior-guilty link doesn't wrongly suppress a genuine similar case.
-  //
-  // PRIMARY-ON-c2 REQUIRED: the same subject `s` must ALSO be the primary
-  // subject (APPEARS_IN_CASE.is_primary = true) on c2 itself, not merely
-  // a co-subject there. HAS_PRIOR_GUILTY_CASE already tells us the guilty
-  // verdict on c2 is attributable to s (Rule_07 uses
-  // ALLEGATION_LIKELY_AGAINST_SUBJECT for that) — but that's a fact about
-  // whose conduct was found guilty, not about whose case c2 IS. A subject
-  // who was a co-subject (e.g. PCA, witness) on c2 while someone else was
-  // primary there doesn't make c2 disqualified as a similar case; only
-  // being the primary subject of c2 does. Per investigator review of live
-  // data (case 658407434): 5 candidates share an active
-  // HAS_PRIOR_GUILTY_CASE edge from the same subject, but that subject is
-  // primary on the candidate case for only some of them — the rest have
-  // him as a co-subject there and belong back in results. See the
-  // verification query in this module's docstring before trusting this
-  // blind; the query below encodes the rule, not a specific case's counts.
+  // Own-history exclusion, generalized off subject_enrichment.py's exact
+  // "prior case" definition — a case is that subject's OWN case history
+  // if and only if they are the PRIMARY subject on it (APPEARS_IN_CASE.
+  // is_primary = true), not merely linked to it as a co-subject (PCA,
+  // employer contact, absent parent, etc). c2 is excluded here when the
+  // PRIMARY subject of c1 is ALSO the primary subject of c2 — that's not
+  // a new "similar" case to investigate, it's the same person's own case
+  // history, already surfaced separately on the Prior Cases panel
+  // (appworks/subject_enrichment.py). Two deliberate choices:
+  //   1. Scoped to c1's PRIMARY subject only (ap1.is_primary = true),
+  //      not every subject on c1 — a co-subject of the ACTIVE case (e.g.
+  //      an absent parent on a SLAM case) is not who this case is about,
+  //      so their own unrelated case history must not disqualify c2 from
+  //      being a legitimate similar case. Mirrors the same fix just made
+  //      in subject_enrichment.get_enriched_subject_profile.
+  //   2. NOT keyed to HAS_PRIOR_GUILTY_CASE / any outcome vocabulary —
+  //      that relationship only exists for closed cases with a GUILTY
+  //      finding (Rule_07_Prior_Guilty), so a subject's own prior case
+  //      that closed with "insufficient evidence" (no verdict either
+  //      way) has no such edge and would slip through un-excluded. Own-
+  //      history is a structural fact (same person, primary on both
+  //      cases) independent of how either case resolved, so the
+  //      exclusion is structural too — no outcome/status hardcoding to
+  //      keep in sync with the rule library's vocabulary.
   AND NOT EXISTS {
-        MATCH (c1)<-[:APPEARS_IN_CASE]-(s:Subject)-[pg:HAS_PRIOR_GUILTY_CASE]->(c2)
-        MATCH (s)-[ap2:APPEARS_IN_CASE]->(c2)
-        WHERE pg.status = "active" AND ap2.is_primary = true
+        MATCH (c1)<-[ap1:APPEARS_IN_CASE]-(s:Subject)-[ap2:APPEARS_IN_CASE]->(c2)
+        WHERE ap1.is_primary = true AND ap2.is_primary = true
       }
 WITH c2, collect(DISTINCT a2.allegation_type) AS shared_types,
      0.5 AS similarity_score,
@@ -182,8 +189,8 @@ def find_structural_matches(case_id: str, limit: int = SIMILAR_CASES_MAX_TOTAL) 
     yields an empty match list — not an error. That is the honest answer:
     nothing to match on.
 
-    A candidate case already linked to one of case_id's subjects via an
-    active HAS_PRIOR_GUILTY_CASE edge is excluded from matches (and from
+    A candidate case where case_id's primary subject is also the primary
+    subject of that candidate case is excluded from matches (and from
     total_candidates_scored) — see the module docstring's EXCLUSION note.
 
     Raises:
