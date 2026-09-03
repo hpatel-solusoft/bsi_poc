@@ -22,6 +22,7 @@ from appworks.appworks_paths import AppWorksPaths
 from appworks.appworks_utils import (
     embedded_id,
     extract_id_from_href,
+    extract_list_items,
     extract_workfolder_id_from_allegation,
     get_relationship_items,
     safe_fetch,
@@ -205,8 +206,9 @@ def _fetch_similar_case_volume(case_id: str, wf_res: Dict, tracker: ProvenanceTr
 
                 # We need to manually fetch the list endpoint since it differs from item payloads
 
-                list_res = fetch(AppWorksPaths.Allegations.case_allegations_by_type_id(type_id))
-                matched = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
+                type_list_path = AppWorksPaths.Allegations.case_allegations_by_type_id(type_id)
+                list_res = fetch(type_list_path)
+                matched = extract_list_items(type_list_path, list_res)
 
                 for alleg in matched:
                     wf_id = extract_workfolder_id_from_allegation(alleg)
@@ -568,9 +570,14 @@ def _fetch_risk_rules(tracker: Optional[ProvenanceTracker] = None) -> list[Dict]
     try:
         res = fetch(_RULES_LIST_ENDPOINT)
 
-        items = res.get("_embedded", {}).get("FraudRiskRules_FraudRiskRulesListInternal", [])
-        if not items:
-            items = res.get("_embedded", {}).get("AgentRulesTable_AgentRulesTableListInternal", [])
+        # extract_list_items() derives the primary key from
+        # _RULES_LIST_ENDPOINT itself (FraudRiskRules_FraudRiskRulesListInternal)
+        # and, if that key isn't present, falls back to the first
+        # list-valued '_embedded' entry — which is what covers deployments
+        # that embed this same endpoint's rows under
+        # AgentRulesTable_AgentRulesTableListInternal instead, without this
+        # module needing to hardcode that alternate name itself.
+        items = extract_list_items(_RULES_LIST_ENDPOINT, res)
 
         for idx, item in enumerate(items):
             props = item.get("Properties", {})

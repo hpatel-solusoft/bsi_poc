@@ -110,6 +110,76 @@ def get_relationship_items(rel_href: str, embedded_key: str) -> List[Dict]:
         return []
 
 
+def list_name_from_path(path: str) -> str:
+    """
+    Derive the AppWorks list name from a '/lists/<ListName>' endpoint path.
+
+    AppWorks always echoes this exact path segment back as the top-level
+    key under '_embedded' in that endpoint's response. Deriving it here —
+    from the very same path string appworks_paths.py builds the request
+    from — means the list name is written ONCE, in appworks_paths.py.
+    Renaming an endpoint there is the only edit required; every caller of
+    extract_list_items() below picks up the new key automatically instead
+    of needing its own hardcoded copy kept in sync by hand.
+    """
+    if not path:
+        return ""
+    marker = "/lists/"
+    idx = path.find(marker)
+    if idx == -1:
+        return ""
+    tail = path[idx + len(marker) :]
+    # Drop any query string, then take just the list-name segment.
+    return tail.split("?", 1)[0].split("/", 1)[0]
+
+
+def extract_list_items(path: str, raw: Optional[Dict]) -> List[Dict]:
+    """
+    Extract the row list from a '/lists/' endpoint response.
+
+    The '_embedded' key is derived from `path` via list_name_from_path()
+    instead of being repeated as a second, independently-hardcoded
+    literal at each call site — that duplication is what let the
+    AllegationTypeTask catalogue silently return 0 rows after its
+    AppWorks list name was renamed in appworks_paths.py but a stale copy
+    of the old name lived on in a parsing module. See appworks_paths.py's
+    module docstring: it is the single source of truth for AppWorks path
+    strings, and this function is what makes that true for the
+    corresponding response key as well.
+
+    Falls back to the first list-valued (or dict-valued, treated as a
+    single-row list) entry under '_embedded' if the derived key isn't
+    present, since some AppWorks deployments/list variants have been
+    observed to embed under a differently-named key than the URL's own
+    list name (e.g. FraudRiskRules vs. AgentRulesTable — see
+    risk_scoring.py). Returns [] if nothing usable is found.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if not isinstance(raw, dict):
+        return []
+
+    embedded_block = raw.get("_embedded", {}) or {}
+
+    key = list_name_from_path(path)
+    if key:
+        items = embedded_block.get(key)
+        if isinstance(items, list):
+            return items
+        if isinstance(items, dict):
+            return [items]
+
+    for val in embedded_block.values():
+        if isinstance(val, list):
+            return val
+        if isinstance(val, dict):
+            return [val]
+
+    return []
+
+
 def embedded(item: Dict, relationship_key: str) -> Dict:
     """
     Reads the '{relationship_key}$Properties' block AppWorks embeds directly

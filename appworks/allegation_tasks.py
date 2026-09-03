@@ -31,12 +31,10 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from appworks.appworks_paths import AppWorksPaths
-from appworks.appworks_utils import extract_id_from_href
+from appworks.appworks_utils import extract_id_from_href, extract_list_items
 from utils.provenance import ProvenanceTracker
 
 logger = logging.getLogger(__name__)
-
-_LIST_KEY = "AllegationTypeTask_ManageAllegationTypeTasks"
 
 
 def _normalize(value: Any) -> str:
@@ -89,8 +87,9 @@ def get_allegation_type_tasks(allegation_types: Optional[List[str]] = None, **kw
     try:
         from appworks.appworks_auth import AppworksSessionExpiredError, fetch
 
-        raw = fetch(AppWorksPaths.AllegationTypeTask.manage_allegation_type_tasks())
-        items = raw if isinstance(raw, list) else raw.get("_embedded", {}).get(_LIST_KEY, [])
+        path = AppWorksPaths.AllegationTypeTask.manage_allegation_type_tasks()
+        raw = fetch(path)
+        items = extract_list_items(path, raw)
     except AppworksSessionExpiredError:
         raise
     except Exception as exc:  # noqa: BLE001 — see docstring: degrade, don't fail the plan

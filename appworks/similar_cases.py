@@ -14,6 +14,7 @@ from appworks.appworks_paths import AppWorksPaths
 # ── NEW: Architecture Standard Imports ───────────────────────
 from appworks.appworks_utils import (
     extract_id_from_href,
+    extract_list_items,
     extract_workfolder_id_from_allegation,
     parse_aw_date,
     safe_fetch,
@@ -98,7 +99,7 @@ def search_similar_cases(case_id: str, fraud_types: list, max_total_results: int
         try:
 
             list_res = fetch(list_href)
-            rows = list_res.get("_embedded", {}).get("Allegations_All", []) if list_res else []
+            rows = extract_list_items(list_href, list_res)
         except AppworksSessionExpiredError:
             raise
         except Exception as e:
@@ -182,12 +183,9 @@ def get_allegation_types(**kwargs) -> dict:
 
     try:
 
-        raw = fetch(AppWorksPaths.Allegations.allegation_type_manage())
-        items = (
-            raw
-            if isinstance(raw, list)
-            else raw.get("_embedded", {}).get("AllegationType_ManageAllegationType", [])
-        )
+        path = AppWorksPaths.Allegations.allegation_type_manage()
+        raw = fetch(path)
+        items = extract_list_items(path, raw)
     except AppworksSessionExpiredError:
         raise
     except Exception as e:
