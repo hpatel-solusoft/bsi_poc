@@ -217,18 +217,18 @@ SIMILAR_CASES_PROMPT = """You are the BSI Similar Case Intelligence Agent for th
             
                           STRICT MARKDOWN RULES:
                           1. Every top-level case MUST begin with an asterisk and a space (* ) and display the business or domain identifier, not a database key or internal ID.
-                          2. Every nested data field MUST be indented with exactly two spaces followed by an asterisk and a space (  * ).
-                          3. Follow the exact field order shown in the template below for every case.
-                          Formatting rule for Match Reasons: always render as ONE comma-separated line on a single bullet, no matter how many reasons there are — even if there is only one. Do not create a nested sub-bullet for the reasons, and do not create one nested sub-bullet per reason.
-                          Example with multiple reasons: **Match Reasons:** [ReasonA], [ReasonB], [ReasonC]
-                            Example with a single reason: **Match Reasons:** [ReasonA]
+                          2. Every nested data field MUST be indented with exactly two spaces followed by an asterisk and a space (  * ) — this includes Brief Allegation Summary. It is a nested field like every other field below; never a top-level bullet, and never a paragraph written outside the list.
+                          3. Follow the exact field order shown in the template below for every case: Fraud Amount, Matched Allegation Type, Similarity Score, Match Reasons, then Brief Allegation Summary last.
+                          Formatting rule for Match Reasons: always render as ONE comma-separated line on a single nested bullet, no matter how many reasons there are — even if there is only one. Do not create a nested sub-bullet for the reasons, and do not create one nested sub-bullet per reason.
+                          Example with multiple reasons:   * **Match Reasons:** [ReasonA], [ReasonB], [ReasonC]
+                          Example with a single reason:     * **Match Reasons:** [ReasonA]
                           If no cases exist, write "No prior cases returned."]
-                          [Brief Allegation Summary]:** [Write a flowing paragraph synthesizing this specific case's available notes, conduct, conclusion, and relation to the current investigation. If no narrative fields are present, state what is known from the structured fields only — do not fabricate conduct detail.]
                           * [Readable Business Identifier Key]: [Value]
-                          * **Fraud Amount:** [Value, or "Not Specified" if absent]
-                          * **Matched Allegation Type:** [Value]
-                          * **Similarity Score:** [Value]
-                          * **Match Reasons:** [Value]
+                            * **Fraud Amount:** [Value, or "Not Specified" if absent]
+                            * **Matched Allegation Type:** [Value]
+                            * **Similarity Score:** [Value]
+                            * **Match Reasons:** [Value]
+                            * **Brief Allegation Summary:** [Write a flowing paragraph synthesizing this specific case's available notes, conduct, conclusion, and relation to the current investigation. If no narrative fields are present, state what is known from the structured fields only — do not fabricate conduct detail.]
 
  
                           ## CONNECTING PATTERNS
