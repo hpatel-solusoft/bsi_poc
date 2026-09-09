@@ -313,6 +313,10 @@ def render_decision_log_markdown(entries: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
 
     if plan_entries:
+        # Section title so investigators can distinguish this block from
+        # the inference-connection block below at a glance.
+        lines.append("**Investigation Plan Modification**")
+        lines.append("")
         for entry in plan_entries:
             actor = entry.get("actor") or "not recorded"
             timestamp = entry.get("timestamp") or "not recorded"
@@ -330,9 +334,53 @@ def render_decision_log_markdown(entries: List[Dict[str, Any]]) -> str:
         # above) — never one per connection.
         count = rejected_entries[0].get("count", 0)
         lines.append("")
+        # Section title — mirrors "Investigation Plan Modification" above
+        # so each sub-block is clearly labelled for investigators.
+        lines.append("**Inference Connection Modification**")
+        lines.append("")
         lines.append(
             f"* {count} connection(s) reviewed and excluded by an investigator "
             "— see Reviewed and Excluded Connections above for detail."
         )
 
     return "\n".join(lines)
+
+
+def render_report_notes_markdown(generated_at: str) -> str:
+    """
+    Deterministically render the \"Report Notes\" section body with the
+    actual report generation timestamp.
+
+    Replaces the LLM-authored closing paragraph — which was observed
+    writing a stale or fabricated date (e.g. \"May 25, 2026\") rather than
+    the real generated_at value baked into the artifact — with a Python-
+    formatted string that cannot hallucinate.  Same motivation as
+    render_decision_log_markdown and render_reviewed_and_excluded_markdown:
+    \"No AI involved in content, just formatting\" (Report Design ACTIONS #3).
+
+    Args:
+        generated_at: ISO-8601 string set at report-generation time
+            (datetime.now(timezone.utc).isoformat() in report_service.py),
+            or the equivalent value read back from the cached artifact.
+
+    Returns:
+        One or two plain-English sentences stating the generation timestamp
+        and advising regeneration if the case has changed since.
+    """
+    from datetime import datetime, timezone as _tz
+
+    try:
+        dt = datetime.fromisoformat(generated_at)
+        # Always display in UTC so the timestamp is unambiguous regardless
+        # of the server's local timezone or the investigator's location.
+        formatted = dt.astimezone(_tz.utc).strftime("%B %d, %Y at %H:%M:%S UTC")
+    except (ValueError, AttributeError, TypeError):
+        # Graceful degradation: if generated_at is missing or unparseable,
+        # fall back to the raw string rather than crashing or emitting
+        # a misleading "not recorded".
+        formatted = generated_at or "the time of generation"
+
+    return (
+        f"This report reflects the case record as of {formatted}. "
+        "A new report should be generated if the case has since changed."
+    )

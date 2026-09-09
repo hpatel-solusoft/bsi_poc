@@ -88,7 +88,11 @@ from core.case_store import get_complaint_number
 from core.investigation_plan_override_repository import get_override
 from core.narrative_staleness import StalenessCheck
 from core.report_artifacts_repository import get_latest_report, save_report
-from reasoning_layer.reports.decision_log import build_decision_log, render_reviewed_and_excluded_markdown
+from reasoning_layer.reports.decision_log import (
+    build_decision_log,
+    render_report_notes_markdown,
+    render_reviewed_and_excluded_markdown,
+)
 from reasoning_layer.neo4j_client import GraphUnavailableError
 from reasoning_layer.reports.report_generation import assemble_related_network
 from reasoning_layer.reports.report_llm_context import build_report_llm_context
@@ -237,6 +241,15 @@ def _generate_report_try_cache(
                 resolved_report_markdown,
                 "Reviewed and Excluded Connections",
                 render_reviewed_and_excluded_markdown(cached_related_network),
+            )
+            # Same treatment for Report Notes — the LLM was observed
+            # writing a stale or fabricated date (e.g. "May 25, 2026")
+            # instead of the real generated_at baked into the artifact.
+            # Spliced deterministically so the timestamp is always exact.
+            resolved_report_markdown = replace_markdown_section(
+                resolved_report_markdown,
+                "Report Notes",
+                render_report_notes_markdown(cached_content.get("generated_at", "")),
             )
 
             duration_seconds = round(time.time() - start, 1)
@@ -467,6 +480,15 @@ def _generate_report_generate_fresh(
     complaint_number = get_complaint_number(case_data) or req.case_id
     report_id = f"RPT-{complaint_number}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     generated_at = datetime.now(timezone.utc).isoformat()
+    # Splice Report Notes deterministically — the LLM was observed writing
+    # a stale or fabricated date instead of the real generation timestamp.
+    # Same rationale as the Decision & Override Log and Reviewed and
+    # Excluded Connections splices above (Report Design ACTIONS #3).
+    assistant_text = replace_markdown_section(
+        assistant_text,
+        "Report Notes",
+        render_report_notes_markdown(generated_at),
+    )
     confidence_summary = related.get("confidence_summary", {"high": 0, "medium": 0, "unresolved": 0})
     report_content = {
         "report_id": report_id,
@@ -736,6 +758,14 @@ def _generate_report_pdf_try_cache(
         "Reviewed and Excluded Connections",
         render_reviewed_and_excluded_markdown(cached_related_network),
     )
+    # Same treatment for Report Notes — deterministic timestamp splice,
+    # see /generate_report above for why.
+    cached_generated_at = cached_content.get("generated_at", "")
+    resolved_report_markdown = replace_markdown_section(
+        resolved_report_markdown,
+        "Report Notes",
+        render_report_notes_markdown(cached_generated_at),
+    )
 
     duration_seconds = round(time.time() - start, 1)
     logger.info(
@@ -747,7 +777,6 @@ def _generate_report_pdf_try_cache(
     _log_call(req.case_id, username, "success", int(duration_seconds * 1000), "/generate_report/pdf")
 
     cached_report_id = cached_content.get("report_id", "")
-    cached_generated_at = cached_content.get("generated_at", "")
     cached_complaint_number = cached_content.get("complaint_number") or get_complaint_number(case_data)
     pdf_bytes = render_report_pdf(
         resolved_report_markdown,
@@ -885,6 +914,14 @@ def _generate_report_pdf_generate_fresh(
     complaint_number = get_complaint_number(case_data) or req.case_id
     report_id = f"RPT-{complaint_number}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     generated_at = datetime.now(timezone.utc).isoformat()
+    # Splice Report Notes deterministically — same fix as /generate_report
+    # above, applied here since this route runs its own independent LLM
+    # call rather than reusing that one.
+    assistant_text = replace_markdown_section(
+        assistant_text,
+        "Report Notes",
+        render_report_notes_markdown(generated_at),
+    )
     confidence_summary = related.get("confidence_summary", {"high": 0, "medium": 0, "unresolved": 0})
     report_content = {
         "report_id": report_id,
