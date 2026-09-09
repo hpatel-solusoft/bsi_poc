@@ -39,6 +39,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from config.plan_step_format import STEP_LABEL_RE
+
 logger = logging.getLogger(__name__)
 
 # Priority per rule. Section 8.5 requires a `priority` on every task but
@@ -216,11 +218,14 @@ def build_rule_aware_tasks(
 
 # --- step source attribution -------------------------------------------------
 # Section 8.5 / AI-16 require every investigation step to declare where it
-# came from. PLAN_PROMPT's MANDATORY STEP FORMAT (config/prompts.py) already
-# makes the LLM write this itself, inline, on every step:
-#   "**Step N:** <TaskName verbatim> <synthesized clause> (Source: ...)"
+# came from. PLAN_PROMPT's MANDATORY STEP FORMAT (config/prompts.py, built
+# from config.plan_step_format) already makes the LLM write this itself,
+# inline, on every step:
+#   "**<TaskName verbatim>:** <synthesized clause> (Source: ...)"
 # with the tag being exactly one of "Inference Rule — <rule_id>",
-# "BSI catalogue", or "analyst-recommended".
+# "BSI catalogue", or "analyst-recommended". The label/rationale split is
+# the SAME markdown-bold-colon convention config.plan_step_format.STEP_LABEL_RE
+# parses below — one contract, shared by both the prompt and this parser.
 #
 # That means the LLM's own text is the single source of truth for
 # attribution. This module's job is narrow: recover the SAME fact as a
@@ -263,10 +268,14 @@ def parse_declared_step_source(
     second heuristic — so a rule-aware step's priority can never drift
     from the priority BSI's own rule map assigns that rule.
 
-    Returns {"action", "source", "source_rule", "priority"}. Falls back to
-    llm_generated with no rule/priority when the turn is missing the
-    mandated tag entirely (a malformed LLM turn, not the expected path) —
-    logged, never raised, so one malformed step never fails the whole plan.
+    Returns {"action", "label", "rationale", "source", "source_rule",
+    "priority"}. Falls back to llm_generated with no rule/priority when the
+    turn is missing the mandated tag entirely (a malformed LLM turn, not
+    the expected path) — logged, never raised, so one malformed step never
+    fails the whole plan. "label"/"rationale" are None (not fabricated)
+    when the text does not follow the mandated **label:** rationale
+    convention — e.g. a step carried over from a human-edited override
+    that was never LLM-authored in the first place.
     """
     text = _STEP_PREFIX_RE.sub("", str(raw_text or "").strip())
 
@@ -300,8 +309,23 @@ def parse_declared_step_source(
                 priority = task.get("priority")
                 break
 
+    # Recover the structured label/rationale split from the SAME
+    # **label:** rationale convention config.plan_step_format defines for
+    # PLAN_PROMPT. Never a second, independent guess at the boundary — if
+    # the text does not match, label/rationale stay None rather than being
+    # fabricated from a heuristic that could disagree with what the
+    # investigator is reading on screen.
+    label = None
+    rationale = None
+    label_match = STEP_LABEL_RE.match(text)
+    if label_match:
+        label = label_match.group("label").strip()
+        rationale = label_match.group("rationale").strip()
+
     return {
         "action": text,
+        "label": label,
+        "rationale": rationale,
         "source": source,
         "source_rule": source_rule,
         "priority": priority,
@@ -339,6 +363,13 @@ def tag_step_sources(
             annotated["source_rule"] = parsed["source_rule"]
         if parsed["priority"]:
             annotated["priority"] = parsed["priority"]
+        # Structured label/rationale, only set when the mandated **label:**
+        # rationale convention actually matched (see parse_declared_step_source)
+        # — never defaulted or fabricated for a step that didn't carry it.
+        if parsed["label"]:
+            annotated["label"] = parsed["label"]
+        if parsed["rationale"]:
+            annotated["rationale"] = parsed["rationale"]
         tagged.append(annotated)
 
     logger.info(

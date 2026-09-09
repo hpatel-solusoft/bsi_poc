@@ -41,14 +41,28 @@ class AddressEntry(BaseModel):
 class InvestigationStep(BaseModel):
     """
     A single investigation step in the LLM-generated plan.
-    'action' carries the plain instruction sentence from the LLM.
-    'owner' and 'deadline_days' are Optional — populated during
+    'action' carries the plain instruction sentence from the LLM —
+    exactly as authored, e.g. "**Check DTA Beacon Database:** to confirm
+    ...". 'owner' and 'deadline_days' are Optional — populated during
     human review in the subsequent analyst step.
     extra='allow' — human review may add additional metadata fields.
     """
 
     step: Optional[int] = None
     action: str
+    # 'label'/'rationale' are the SAME text as 'action', split into its two
+    # structured halves by reasoning_layer.investigation_tasks.
+    # parse_declared_step_source (see config.plan_step_format for the
+    # shared **label:** rationale contract both sides parse/produce).
+    # Populated only when 'action' follows that convention — None for a
+    # step that doesn't (e.g. a human-authored override step, which is
+    # free text and is never split or reformatted). Consumers that want to
+    # render a step's task label and rationale as two distinct visual
+    # elements should prefer these over re-parsing 'action' themselves;
+    # consumers that just want the step's full text should keep using
+    # 'action', which is always present.
+    label: Optional[str] = None
+    rationale: Optional[str] = None
     owner: Optional[str] = None
     deadline_days: Optional[int] = None
     # AI-16 / Section 8.5: where this step came from — "catalog" (BSI

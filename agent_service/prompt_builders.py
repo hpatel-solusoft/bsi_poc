@@ -128,6 +128,14 @@ def build_copilot_prompt(case_id: str, case_data: dict) -> str:
     the context is serialised into the prompt. The LLM sees exactly one
     set of steps — no ambiguity, no instruction-following required to
     choose between two competing lists.
+
+    _verbatim_notice is a second, defense-in-depth signal for the same
+    verbatim-reproduction rule COPILOT_TOOL_PROMPT's GUARDRAILS already
+    state: it travels WITH the data itself (inside case_context, right
+    next to investigation_steps) rather than living only in the system
+    prompt, so the instruction survives even if a long context or a
+    later tool result pushes the system prompt's own guardrails further
+    from the model's attention when it composes the answer.
     """
     context = copy.deepcopy(case_data)
 
@@ -145,6 +153,12 @@ def build_copilot_prompt(case_id: str, case_data: dict) -> str:
         context["investigation_plan"]["_approved_by"] = human_plan.get("modified_by", "")
         context["investigation_plan"]["_approved_on"] = human_plan.get("modified_on", "")
         context["investigation_plan"]["_approval_comment"] = human_plan.get("comment", "")
+        context["investigation_plan"]["_verbatim_notice"] = (
+            "These investigation_steps were saved exactly as an investigator "
+            "typed or approved them. When asked about them, quote each step's "
+            "text exactly as given below — do not add, infer, or complete a "
+            "rationale/description for any step, including short or terse ones."
+        )
 
     return _render_prompt(
         COPILOT_TOOL_PROMPT,
