@@ -4,71 +4,63 @@ Owns: deterministic structural similar-case matching (AI-14 / Sections
 non-deterministic two-step LLM type-selection (get_allegation_types then
 search_similar_cases).
 
-Section 8.3 defines the change precisely:
-  * matching is a Cypher property match on allegation_type in Neo4j,
-    deterministic — the LLM no longer decides what matches;
-  * similarity is COMPUTED, not the hardcoded 1.0 of Phase 1:
-        allegation type exact match  -> 0.5 base (the entry requirement)
-    giving a score of exactly 0.5 for every match (see DEVIATION below);
-  * new output fields: match_reasons (which dimensions matched) and
-    source: "structural_graph".
+FOUR STRUCTURAL DIMENSIONS:
 
-DEVIATION FROM SECTION 8.3 — SUBJECT-BASED DIMENSIONS REMOVED: Section
-8.3 originally specified THREE structural dimensions (allegation_type,
-+0.25 for a shared-Subject Employer FEIN, +0.25 for shared-Subject
-FraudNetwork membership), giving a score in [0.5, 1.0]. Both of the
-dropped dimensions traversed through :Subject nodes on each case
-(`(c1)<-[:APPEARS_IN_CASE]-(:Subject)-[...]->(:Subject)-[:APPEARS_IN_CASE]->(c2)`).
-Per direct instruction, only the allegation_type dimension remains —
-matching is now purely on shared allegation_type, so similarity_score is
-always exactly 0.5 and match_reasons always exactly ["allegation_type"].
-The two OPTIONAL MATCH blocks for Employer FEIN and FraudNetwork are
-removed entirely rather than left dead in the query. This does NOT touch
-the prior-guilty exclusion below — that filter also traverses through
-:Subject, but it is a candidate-set exclusion (a disqualifier), not a
-scoring dimension, and was explicitly kept as-is.
+  Dimension 1 — Allegation type (base, required):
+      The candidate case shares at least one allegation_type with the
+      active case.  Cases with no shared type are excluded entirely.
+      Weight: SIMILAR_CASES_SCORE_BASE.
 
-EXCLUSION — A SUBJECT'S OWN PRIOR CASE IS NOT A "SIMILAR" CASE: a case
-c2 is dropped from the candidate set (never scored, never returned) when
-c1's PRIMARY subject is ALSO the primary subject of c2 (APPEARS_IN_CASE.
-is_primary = true on both sides). That's not a new candidate to
-investigate — it's the same person's own case history, already surfaced
-on the Prior Cases panel (appworks/subject_enrichment.py, which defines
-"prior case" the same way: primary-subject-on-that-other-case, nothing
-more). Deliberately NOT keyed to HAS_PRIOR_GUILTY_CASE / any outcome
-vocabulary (Rule_07_Prior_Guilty; rules/wave2/rule_07_prior_guilty.cypher)
-— that edge only exists for a CLOSED case with a GUILTY finding, so a
-subject's own prior case that closed with, say, "insufficient evidence"
-has no such edge and would slip through un-excluded. Own-history is a
-structural fact independent of how either case resolved, so the
-exclusion is structural (is_primary on both sides) too — nothing here to
-keep in sync with the rule library's outcome vocabulary. Scoped to c1's
-PRIMARY subject specifically, not every subject on c1: a co-subject of
-the active case (an absent parent, a PCA, an employer contact) is not
-who the active case is about, so their own unrelated case history must
-not disqualify a genuinely similar case.
+  Dimension 2 — Allegation description keyword overlap:
+      At least one significant word (longer than SIMILAR_CASES_DESCRIPTION_
+      MIN_WORD_LENGTH chars) from the active case's allegation comment_text
+      appears in the candidate's allegation comment_text (both lowercased).
+      Weight: SIMILAR_CASES_SCORE_DESCRIPTION.
 
-The LLM's role becomes EXPLAINING what the graph found, never selecting it
-(Section 8.3, 9.2 Turn 2). This module makes no LLM call and no AppWorks
-call — it is a pure Neo4j read.
+  Dimension 3 — Shared employer (via SHARES_EMPLOYER_WITH):
+      Uses Rule_01's already-computed SHARES_EMPLOYER_WITH edges rather
+      than re-traversing through :Employer/:EMPLOYED_BY nodes.  The
+      traversal is:
+          (c1)<-[:APPEARS_IN_CASE]-(s1:Subject)
+               -[:SHARES_EMPLOYER_WITH]-
+               (s2:Subject)-[:APPEARS_IN_CASE]->(c2)
+      This is more reliable than the :EMPLOYED_BY path because:
+        * SHARES_EMPLOYER_WITH connects subjects across cases directly,
+          regardless of whether the other case's employer data was ETL-
+          synced into the graph.
+        * Rule_01 already ran the FEIN-matching logic; the similar-cases
+          query does not need to duplicate it.
+        * The edges include both active and previously-rejected connections
+          — structural similarity is independent of whether an investigator
+          chose to exclude a connection for the current case.
+      Weight: SIMILAR_CASES_SCORE_EMPLOYER_FEIN.
 
-WHY THIS IS A DIRECT CALL, NOT A MANIFEST TOOL:
-Section 9.2 sketches find_structural_similar_cases as a dispatcher-routed
-tool, but it resolves to Neo4j, not AppWorks. Per the governance rule that
-manifest.yaml holds a tool ONLY IF it is LLM-called AND makes an AppWorks
-call, this is invoked directly by the /similar_cases route (the same
-pattern as check_network_match and enrich_graph_context), and its result
-is injected into the LLM's context so the LLM can explain it.
+  Dimension 4 — Shared fraud network membership:
+      Uses Rule_02/04/06's MEMBER_OF_FRAUD_NETWORK edges:
+          (c1)<-[:APPEARS_IN_CASE]-(:Subject)
+               -[:MEMBER_OF_FRAUD_NETWORK]->(fn:FraudNetwork)
+               <-[:MEMBER_OF_FRAUD_NETWORK]-(:Subject)
+               -[:APPEARS_IN_CASE]->(c2)
+      Weight: SIMILAR_CASES_SCORE_FRAUD_NETWORK.
 
-DETERMINISM (AI-14 todo — "same input must return the same results on
-repeated runs"): the query aggregates with collect(DISTINCT ...) and
-ORDERs BY score DESC, case_id ASC (score is now a constant 0.5, so this
-is effectively an order on case_id alone). There is no LLM, no randomness,
-and a total order on ties (case_id), so repeated runs on an unchanged
-graph return byte-identical output.
+ALL WEIGHTS live in config/settings.py and must sum to 1.0.
+DESCRIPTION WORD LENGTH THRESHOLD also lives in config/settings.py.
+Nothing in this module is hardcoded — change settings only to retune.
 
-Does NOT own: the AppWorks search_similar_cases path (now unused for this
-flow), the pipeline, or any write.
+EXCLUSION — OWN-HISTORY IS NOT "SIMILAR":
+A case c2 is dropped from the candidate set when c1's PRIMARY subject
+(APPEARS_IN_CASE.is_primary = true) is also the primary subject of c2.
+Scoped to c1's primary subject only; co-subjects are not who c1 is about.
+
+SCORE RANGE (with default 0.25 weights):
+  0.25  — allegation type only
+  0.50  — + any one bonus
+  0.75  — + any two bonuses
+  1.00  — all four dimensions matched
+
+DETERMINISM (AI-14): aggregates use collect/count(DISTINCT), score is
+derived from boolean flags, ORDER BY score DESC, case_id ASC gives a
+total order on ties.  No LLM, no randomness.
 """
 
 from __future__ import annotations
@@ -76,70 +68,117 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from config.settings import SIMILAR_CASES_MAX_TOTAL
+from config.settings import (
+    SIMILAR_CASES_DESCRIPTION_MIN_WORD_LENGTH,
+    SIMILAR_CASES_MAX_TOTAL,
+    SIMILAR_CASES_SCORE_BASE,
+    SIMILAR_CASES_SCORE_DESCRIPTION,
+    SIMILAR_CASES_SCORE_EMPLOYER_FEIN,
+    SIMILAR_CASES_SCORE_FRAUD_NETWORK,
+)
 from reasoning_layer.neo4j_client import get_session
 from utils.provenance import graph_provenance
 
 logger = logging.getLogger(__name__)
 
-# One read-only statement, one matching dimension (see DEVIATION FROM
-# SECTION 8.3 above — the Employer-FEIN and FraudNetwork subject-based
-# dimensions were removed by direct instruction).
+# ---------------------------------------------------------------------------
+# All scoring weights and the description word-length threshold are passed
+# as Cypher parameters from config/settings.py — zero numeric literals in
+# the query itself.
 #
-# Dimension 1 (base, required, only dimension): the candidate case shares
-#   at least one allegation_type with the active case. Cases with no shared
-#   type are not similar and never appear — this is the +0.5 entry
-#   requirement, so every returned case carries "allegation_type" in its
-#   reasons and scores exactly 0.5.
+# KEY DESIGN DECISION — Dimension 3 uses SHARES_EMPLOYER_WITH not EMPLOYED_BY:
 #
-# Matches use lower-cased allegation_type so "PCA" and "pca" unify, mirroring
-# the case-insensitive CONTAINS the rule library already uses.
+# The naive approach (traverse Subject -EMPLOYED_BY-> Employer <-EMPLOYED_BY-
+# Subject) requires both cases to have had their employer data ETL-synced into
+# the graph.  In practice, candidate cases often have allegation nodes but no
+# EMPLOYED_BY edges because they were synced before the employer ETL ran or
+# were synced from a different pipeline path.
+#
+# Rule_01_Shared_Employer already solved this: it runs across the full
+# reasoning scope of the active case (which the pipeline expands to include
+# co-subjects, employer contacts, etc. from other cases) and writes
+# SHARES_EMPLOYER_WITH edges directly between Subject nodes.  Those edges
+# connect subjects from the active case to subjects from other cases — the
+# exact cross-case link the similar-cases dimension needs.  Using them here
+# means Dimension 3 fires whenever Rule_01 ran for the active case and found
+# a match, without needing the candidate case to carry any ETL employer data.
+# ---------------------------------------------------------------------------
 _SIMILAR_CASES_QUERY = """
 MATCH (c1:Case {case_id: $case_id})-[:HAS_ALLEGATION]->(a1:Allegation)
-WITH c1, collect(DISTINCT toLower(a1.allegation_type)) AS c1_types
+WITH c1,
+     collect(DISTINCT toLower(a1.allegation_type)) AS c1_types,
+     [d IN collect(DISTINCT toLower(coalesce(trim(a1.comment_text), '')))
+      WHERE size(d) > 0] AS c1_descs
 WHERE size(c1_types) > 0
 
 MATCH (c2:Case)-[:HAS_ALLEGATION]->(a2:Allegation)
-// toString on both sides: a bare `<>` between $case_id (always a str here —
-// find_structural_matches does str(case_id).strip()) and a c2.case_id
-// property stored as a different type (e.g. int) evaluates to null in
-// Cypher, which WHERE treats as false — so the row is NOT filtered and the
-// current case can leak into its own "similar cases" results. Comparing
-// as strings on both sides keeps the exclusion correct regardless of how
-// case_id is typed in the graph.
 WHERE toString(c2.case_id) <> toString($case_id)
   AND toLower(a2.allegation_type) IN c1_types
-  // Own-history exclusion, generalized off subject_enrichment.py's exact
-  // "prior case" definition — a case is that subject's OWN case history
-  // if and only if they are the PRIMARY subject on it (APPEARS_IN_CASE.
-  // is_primary = true), not merely linked to it as a co-subject (PCA,
-  // employer contact, absent parent, etc). c2 is excluded here when the
-  // PRIMARY subject of c1 is ALSO the primary subject of c2 — that's not
-  // a new "similar" case to investigate, it's the same person's own case
-  // history, already surfaced separately on the Prior Cases panel
-  // (appworks/subject_enrichment.py). Two deliberate choices:
-  //   1. Scoped to c1's PRIMARY subject only (ap1.is_primary = true),
-  //      not every subject on c1 — a co-subject of the ACTIVE case (e.g.
-  //      an absent parent on a SLAM case) is not who this case is about,
-  //      so their own unrelated case history must not disqualify c2 from
-  //      being a legitimate similar case. Mirrors the same fix just made
-  //      in subject_enrichment.get_enriched_subject_profile.
-  //   2. NOT keyed to HAS_PRIOR_GUILTY_CASE / any outcome vocabulary —
-  //      that relationship only exists for closed cases with a GUILTY
-  //      finding (Rule_07_Prior_Guilty), so a subject's own prior case
-  //      that closed with "insufficient evidence" (no verdict either
-  //      way) has no such edge and would slip through un-excluded. Own-
-  //      history is a structural fact (same person, primary on both
-  //      cases) independent of how either case resolved, so the
-  //      exclusion is structural too — no outcome/status hardcoding to
-  //      keep in sync with the rule library's vocabulary.
+  // Own-history exclusion: drop c2 when c1's primary subject is also
+  // the primary subject of c2.
   AND NOT EXISTS {
         MATCH (c1)<-[ap1:APPEARS_IN_CASE]-(s:Subject)-[ap2:APPEARS_IN_CASE]->(c2)
         WHERE ap1.is_primary = true AND ap2.is_primary = true
       }
-WITH c2, collect(DISTINCT a2.allegation_type) AS shared_types,
-     0.5 AS similarity_score,
-     ["allegation_type"] AS match_reasons
+
+WITH c1, c2, c1_descs,
+     collect(DISTINCT a2.allegation_type) AS shared_types,
+     [d IN collect(DISTINCT toLower(coalesce(trim(a2.comment_text), '')))
+      WHERE size(d) > 0] AS c2_descs
+
+// Dimension 2 — Allegation description keyword overlap.
+// Tokenise each c1 description on spaces; keep tokens longer than
+// $desc_min_word_length characters (drops stop-words like "the", "with").
+// No hardcoded threshold — $desc_min_word_length is a settings parameter.
+WITH c1, c2, shared_types,
+     any(c1d IN c1_descs WHERE
+         any(word IN [w IN split(c1d, ' ') WHERE size(trim(w)) > $desc_min_word_length]
+             WHERE any(c2d IN c2_descs WHERE c2d CONTAINS word))
+     ) AS has_description
+
+// Dimension 3 — Shared employer via SHARES_EMPLOYER_WITH.
+// Uses Rule_01's already-computed edges: a subject from c1 is directly
+// connected by SHARES_EMPLOYER_WITH to a subject from c2.  This fires
+// regardless of whether the candidate case's employer data was ETL-synced,
+// because Rule_01 writes these edges across the full reasoning scope of
+// the active case (which the pipeline expands to include subjects from
+// other cases).  The relationship is undirected (-) since Rule_01 creates
+// it with a.subject_id < b.subject_id ordering but the match must find
+// it from either direction.
+OPTIONAL MATCH (c1)<-[:APPEARS_IN_CASE]-(s1:Subject)
+               -[:SHARES_EMPLOYER_WITH]-
+               (s2:Subject)-[:APPEARS_IN_CASE]->(c2)
+WITH c1, c2, shared_types, has_description,
+     count(DISTINCT s1) AS shared_employer_count
+
+// Dimension 4 — Shared fraud network membership via MEMBER_OF_FRAUD_NETWORK.
+// Uses Rule_02/04/06's written edges: a subject from c1 and a subject from c2
+// both point to the same :FraudNetwork node.
+OPTIONAL MATCH (c1)<-[:APPEARS_IN_CASE]-(:Subject)-[:MEMBER_OF_FRAUD_NETWORK]->(fn:FraudNetwork)
+               <-[:MEMBER_OF_FRAUD_NETWORK]-(:Subject)-[:APPEARS_IN_CASE]->(c2)
+WITH c2, shared_types, has_description,
+     shared_employer_count,
+     count(DISTINCT fn) AS shared_network_count
+
+WITH c2, shared_types,
+     has_description,
+     (shared_employer_count > 0) AS has_employer,
+     (shared_network_count  > 0) AS has_network
+
+// Score: base (always present) + conditional bonuses.
+// All coefficients are Cypher parameters — no numeric literals.
+WITH c2, shared_types,
+     $score_base
+       + CASE WHEN has_description THEN $score_description  ELSE 0.0 END
+       + CASE WHEN has_employer    THEN $score_employer_fein ELSE 0.0 END
+       + CASE WHEN has_network     THEN $score_fraud_network ELSE 0.0 END AS similarity_score,
+     [reason IN [
+        "allegation_type",
+        CASE WHEN has_description THEN "allegation_description" ELSE null END,
+        CASE WHEN has_employer    THEN "shared_employer_fein"   ELSE null END,
+        CASE WHEN has_network     THEN "shared_fraud_network"   ELSE null END
+     ] WHERE reason IS NOT NULL] AS match_reasons
+
 RETURN
     c2.case_id           AS case_id,
     c2.complaint_number  AS complaint_no,
@@ -155,25 +194,17 @@ ORDER BY similarity_score DESC, case_id ASC
 
 def find_structural_matches(case_id: str, limit: int = SIMILAR_CASES_MAX_TOTAL) -> dict:
     """
-    Return structurally similar cases for `case_id`, each scored exactly
-    0.5 (see the module docstring's DEVIATION FROM SECTION 8.3 note —
-    the Employer-FEIN and FraudNetwork scoring dimensions were removed;
-    only the allegation_type dimension remains).
+    Return structurally similar cases for `case_id`, scored 0.25–1.0
+    across four dimensions (allegation type, description, employer via
+    SHARES_EMPLOYER_WITH, fraud network via MEMBER_OF_FRAUD_NETWORK).
+
+    All scoring weights and the description word-length threshold come
+    from config/settings.py — nothing is hardcoded in the query.
 
     Args:
-        case_id: the active case to find matches for. Required, non-empty.
-        limit:   maximum matches to return (already ordered strongest-first).
-            Defaults to config.settings.SIMILAR_CASES_MAX_TOTAL (5) — not a
-            bare literal here, so the display cap for the /similar_cases
-            tab (api/pipeline_execution.py's caller relies on this
-            default) lives in exactly one place, alongside
-            SIMILAR_CASES_MAX_PER_TYPE/REQUIRED_STATUS/LOOKBACK_YEARS —
-            the rest of this feature's tunable constants. A caller that
-            genuinely wants a different cap (e.g.
-            reasoning_layer/copilot_templates.py's
-            get_structural_similar_cases, deliberately a higher, separate
-            default for the Copilot tool) still passes limit= explicitly;
-            this default only governs callers that don't.
+        case_id: the active case to find matches for.  Required, non-empty.
+        limit:   maximum matches to return (ordered strongest-first).
+            Defaults to config.settings.SIMILAR_CASES_MAX_TOTAL.
 
     Returns (inside the standard {result, provenance} envelope):
         {
@@ -185,26 +216,38 @@ def find_structural_matches(case_id: str, limit: int = SIMILAR_CASES_MAX_TOTAL) 
           "total_candidates_scored": int
         }
 
-    An active case with no allegations, or one absent from the graph,
-    yields an empty match list — not an error. That is the honest answer:
-    nothing to match on.
+    Scoring (default weights, all from settings):
+        0.25  — allegation type only  (SCORE_BASE)
+        +0.25 — description keyword overlap (SCORE_DESCRIPTION)
+        +0.25 — shared employer via SHARES_EMPLOYER_WITH (SCORE_EMPLOYER_FEIN)
+        +0.25 — shared fraud network (SCORE_FRAUD_NETWORK)
+        1.00  — all four match
 
-    A candidate case where case_id's primary subject is also the primary
-    subject of that candidate case is excluded from matches (and from
-    total_candidates_scored) — see the module docstring's EXCLUSION note.
+    match_reasons vocabulary:
+        "allegation_type"        — always present (entry requirement)
+        "allegation_description" — description keyword overlap fired
+        "shared_employer_fein"   — SHARES_EMPLOYER_WITH dimension fired
+        "shared_fraud_network"   — MEMBER_OF_FRAUD_NETWORK dimension fired
 
     Raises:
         ValueError: on a missing/blank case_id.
-        GraphUnavailableError / Neo4jError: propagated; the /similar_cases
-            route degrades to an empty, clearly-unavailable section rather
-            than failing.
+        GraphUnavailableError / Neo4jError: propagated upstream.
     """
     if not case_id or not str(case_id).strip():
         raise ValueError("find_structural_matches requires a non-empty case_id")
     case_id = str(case_id).strip()
 
     with get_session() as session:
-        rows = session.run(_SIMILAR_CASES_QUERY, case_id=case_id).data()
+        rows = session.run(
+            _SIMILAR_CASES_QUERY,
+            case_id=case_id,
+            # All numeric values come from settings — no literals in the query.
+            score_base=float(SIMILAR_CASES_SCORE_BASE),
+            score_description=float(SIMILAR_CASES_SCORE_DESCRIPTION),
+            score_employer_fein=float(SIMILAR_CASES_SCORE_EMPLOYER_FEIN),
+            score_fraud_network=float(SIMILAR_CASES_SCORE_FRAUD_NETWORK),
+            desc_min_word_length=int(SIMILAR_CASES_DESCRIPTION_MIN_WORD_LENGTH),
+        ).data()
 
     matches: List[Dict[str, Any]] = [
         {
@@ -224,10 +267,17 @@ def find_structural_matches(case_id: str, limit: int = SIMILAR_CASES_MAX_TOTAL) 
         matches = matches[:limit]
 
     logger.info(
-        "find_structural_matches: case_id=%s candidates_scored=%d returned=%d",
+        "find_structural_matches: case_id=%s candidates_scored=%d returned=%d "
+        "weights=[base=%.2f desc=%.2f fein=%.2f network=%.2f] "
+        "desc_min_word_length=%d",
         case_id,
         total_scored,
         len(matches),
+        SIMILAR_CASES_SCORE_BASE,
+        SIMILAR_CASES_SCORE_DESCRIPTION,
+        SIMILAR_CASES_SCORE_EMPLOYER_FEIN,
+        SIMILAR_CASES_SCORE_FRAUD_NETWORK,
+        SIMILAR_CASES_DESCRIPTION_MIN_WORD_LENGTH,
     )
 
     return {

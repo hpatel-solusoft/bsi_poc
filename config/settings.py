@@ -11,6 +11,22 @@ SIMILAR_CASES_REQUIRED_STATUS = "Closed"
 SIMILAR_CASES_LOOKBACK_YEARS = 4
 SIMILAR_CASES_BROAD_FETCH = True
 SIMILAR_CASES_FALLBACK_RAW = True
+
+# Scoring weights for each structural similarity dimension.
+# All four weights must sum to 1.0 so the maximum possible similarity
+# score equals exactly 1.0.  Allegation type is always the entry
+# requirement (cases without a shared type are not candidates at all);
+# the other three are optional bonuses added on top.
+# Change only these constants — never touch the query or the Python
+# call site — to retune scoring.
+SIMILAR_CASES_SCORE_BASE = 0.25           # allegation type match (always present; entry requirement)
+# Minimum token length for the allegation description keyword-overlap check.
+# Tokens shorter than or equal to this are treated as stop-words and ignored.
+# Passed as a Cypher parameter — never hardcoded in the query.
+SIMILAR_CASES_DESCRIPTION_MIN_WORD_LENGTH = 4
+SIMILAR_CASES_SCORE_DESCRIPTION = 0.25   # allegation description keyword overlap
+SIMILAR_CASES_SCORE_EMPLOYER_FEIN = 0.25 # shared employer FEIN via :Subject→:Employer
+SIMILAR_CASES_SCORE_FRAUD_NETWORK = 0.25 # shared fraud network via :Subject→:FraudNetwork
 # config/settings.py
 
 # Entities that should be surfaced in the UI Provenance citations.
