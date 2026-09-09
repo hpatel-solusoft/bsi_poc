@@ -1027,3 +1027,217 @@ def cascade_revert(
         session, case_id, upstream_rule_id, affected_subject_ids, reason, timestamp, investigator_id, "revert", changes
     )
     return changes
+
+
+# ---------------------------------------------------------------------------
+# Network-orphan sweep (AI-30 extension): handles the case where the global
+# _condition_still_holds check misses a subject because they have active
+# SHARES_EMPLOYER_WITH (or equivalent) edges to subjects OUTSIDE this
+# specific fraud network.  cascade_reject's per-subject global check is
+# necessary but not sufficient: Kevin Nunes may still have an active
+# SHARES_EMPLOYER_WITH edge to a subject in an entirely different case, so
+# the global check returns True and he is never auto-invalidated — even
+# though every connection WITHIN the BrightPath fraud network is rejected.
+#
+# This sweep runs after cascade_reject for symmetric-edge upstream rejections
+# (Rule 1/3/5).  For each fraud network any affected subject belongs to, it
+# asks: "are there ANY active upstream edges between current active members
+# of this network?" If not, all remaining active members are auto-rejected.
+# ---------------------------------------------------------------------------
+
+# All fraud networks any of the affected subjects currently belong to
+# (active OR already-rejected membership — we need both so we can find the
+# network even when the anchor subject was just auto-invalidated by the
+# cascade walk above).
+_NETWORKS_FOR_SUBJECTS = """
+MATCH (s:Subject)-[:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork)
+WHERE s.subject_id IN $subject_ids
+RETURN DISTINCT n.network_type AS network_type, n.network_key AS network_key
+"""
+
+# Active members still in the network (those whose membership edge has not
+# yet been rejected — the ones this sweep might still need to auto-reject).
+_ACTIVE_MEMBERS_OF_NETWORK = """
+MATCH (m:Subject)-[mm:MEMBER_OF_FRAUD_NETWORK]->(n:FraudNetwork {network_type: $network_type, network_key: $network_key})
+WHERE coalesce(mm.status, "active") = "active"
+RETURN m.subject_id AS subject_id
+"""
+
+# Does ANY active upstream relationship (of the type that built this network)
+# still exist BETWEEN two current active members?  Uses the same
+# type(r) = $relationship_type pattern as _STILL_ACTIVE_QUERY so the
+# relationship-type name is never hard-coded here.  The a.subject_id <
+# b.subject_id guard avoids counting undirected edges twice (each such edge
+# appears once per direction in Cypher's MATCH, so without the guard a
+# single active edge would still return count > 0 = True — correct — but
+# for clarity we deduplicate).
+_NETWORK_HAS_ACTIVE_INTERNAL_EDGE = """
+MATCH (a:Subject)-[r]-(b:Subject)
+WHERE a.subject_id IN $member_ids
+  AND b.subject_id IN $member_ids
+  AND a.subject_id < b.subject_id
+  AND type(r) = $relationship_type
+  AND coalesce(r.status, "active") = "active"
+RETURN count(r) > 0 AS has_active_edges
+"""
+
+# The upstream relationship type each network type depends on —
+# derived from DOWNSTREAM_DEPENDENTS rather than hand-duplicated, so it
+# cannot drift from the actual rule graph.  Built once at import time.
+_UPSTREAM_REL_TYPE_BY_NETWORK_TYPE: Dict[str, str] = {}
+for _rule_id, _network_type in _NETWORK_TYPE_BY_RULE_ID.items():
+    # Each network rule ID maps back to exactly one upstream relationship
+    # type via _REQUIRED_RELATIONSHIP_TYPES (e.g. Rule_02 → SHARES_EMPLOYER_WITH).
+    _rel_types = _REQUIRED_RELATIONSHIP_TYPES.get(_rule_id, [])
+    if _rel_types:
+        _UPSTREAM_REL_TYPE_BY_NETWORK_TYPE[_network_type] = _rel_types[0]
+del _rule_id, _network_type, _rel_types
+
+
+def sweep_network_orphans(
+    session,
+    case_id: str,
+    upstream_rule_id: str,
+    affected_subject_ids: List[str],
+    reason: str,
+    timestamp: str,
+    investigator_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Post-cascade network-integrity sweep for symmetric-edge rejections
+    (Rule 1/3/5).
+
+    cascade_reject's global _condition_still_holds check correctly skips
+    auto-invalidating a subject whose upstream condition still holds GLOBALLY
+    — e.g. Kevin Nunes has an active SHARES_EMPLOYER_WITH edge to some other
+    subject in a different case.  But that global active edge has nothing to
+    do with the BrightPath fraud network: within that specific network, every
+    connection is now rejected.  cascade_reject cannot see this because it
+    reasons per-subject globally, not per-network.
+
+    This function fills the gap: for each fraud network any affected subject
+    belongs to, it checks whether ANY active upstream edge still connects two
+    active members of that network.  If none does, every remaining active
+    member is auto-rejected, exactly as cascade_reject would have done had
+    the global condition also been false for them.
+
+    Must be called AFTER cascade_reject so its per-subject walk has already
+    auto-rejected subjects whose global condition clearly broke — this sweep
+    only catches the residual cases cascade_reject left active.
+
+    Returns the same {rule_id, subject_id, action: "auto_invalidated", ...}
+    change records as cascade_reject, for the caller to merge and log.
+    """
+    if not affected_subject_ids:
+        return []
+
+    changes: List[Dict[str, Any]] = []
+
+    # Step 1: find every fraud network any affected subject belongs to.
+    networks = session.run(
+        _NETWORKS_FOR_SUBJECTS,
+        subject_ids=list(affected_subject_ids),
+    ).data()
+
+    for network_row in networks:
+        network_type = network_row["network_type"]
+        network_key = network_row["network_key"]
+
+        # Only sweep network types this module knows the upstream rel type for.
+        rel_type = _UPSTREAM_REL_TYPE_BY_NETWORK_TYPE.get(network_type)
+        if not rel_type:
+            continue
+
+        # Determine the downstream rule_id for this network type (needed for
+        # _auto_invalidate's network_type lookup and for the change record).
+        downstream_rule_id = next(
+            (rid for rid, nt in _NETWORK_TYPE_BY_RULE_ID.items() if nt == network_type),
+            None,
+        )
+        if downstream_rule_id is None:
+            continue  # unknown network type — shouldn't happen, but be safe
+
+        # Step 2: find which members are still active in this network.
+        active_members = session.run(
+            _ACTIVE_MEMBERS_OF_NETWORK,
+            network_type=network_type,
+            network_key=network_key,
+        ).data()
+        active_member_ids = [row["subject_id"] for row in active_members]
+
+        if not active_member_ids:
+            # All members already rejected — nothing left to sweep.
+            continue
+
+        if len(active_member_ids) == 1:
+            # Single remaining active member: no pair exists to form an
+            # internal edge, so they are by definition orphaned.
+            has_active_edges = False
+        else:
+            # Step 3: does any active upstream edge still connect two active
+            # members WITHIN this network specifically?
+            result = session.run(
+                _NETWORK_HAS_ACTIVE_INTERNAL_EDGE,
+                member_ids=active_member_ids,
+                relationship_type=rel_type,
+            ).single()
+            has_active_edges = bool(result and result["has_active_edges"])
+
+        if has_active_edges:
+            # Network still internally connected — leave active members alone.
+            logger.debug(
+                "cascade sweep: network_type=%s network_key=%s still has active "
+                "internal %s edges — skipping orphan sweep",
+                network_type, network_key, rel_type,
+            )
+            continue
+
+        # Step 4: no active internal edges remain — auto-reject every still-
+        # active member that cascade_reject missed.
+        for subject_id in active_member_ids:
+            changed = _auto_invalidate(
+                session,
+                case_id,
+                downstream_rule_id,
+                subject_id,
+                upstream_rule_id,
+                reason,
+                timestamp,
+                investigator_id,
+            )
+            if changed:
+                changes.append(
+                    {
+                        "rule_id": downstream_rule_id,
+                        "subject_id": subject_id,
+                        "action": "auto_invalidated",
+                        "invalidated_by_rule_id": upstream_rule_id,
+                        "reason": reason,
+                        "investigator_id": investigator_id,
+                        "changed_at": timestamp,
+                    }
+                )
+                logger.info(
+                    "cascade sweep: AUTO-INVALIDATED case_id=%s rule_id=%s "
+                    "subject_id=%s (no active internal %s edges remain in "
+                    "network_type=%s network_key=%s) invalidated_by=%s "
+                    "investigator_id=%s reason=%r",
+                    case_id,
+                    downstream_rule_id,
+                    subject_id,
+                    rel_type,
+                    network_type,
+                    network_key,
+                    upstream_rule_id,
+                    investigator_id,
+                    reason,
+                )
+            else:
+                logger.debug(
+                    "cascade sweep: network orphan check found subject_id=%s "
+                    "already rejected or not a member of network_type=%s "
+                    "network_key=%s — no change",
+                    subject_id, network_type, network_key,
+                )
+
+    return changes

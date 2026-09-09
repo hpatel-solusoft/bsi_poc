@@ -929,15 +929,42 @@ def reject_inference(
         # then Rule_08 gets the same treatment two hops out). A no-op,
         # cheaply, for every rule_id DOWNSTREAM_DEPENDENTS has no entry
         # for (Rules 9-14 currently) — see that module's own docstring.
+        deduped_subject_ids = sorted(set(affected_subject_ids))
         cascade_changes = cascade.cascade_reject(
             session,
             case_id,
             rule_id,
-            sorted(set(affected_subject_ids)),
+            deduped_subject_ids,
             reason,
             rejected_at,
             investigator_id,
         )
+
+        # AI-30 extension: the global _condition_still_holds check inside
+        # cascade_reject intentionally skips subjects who still have active
+        # upstream edges ANYWHERE in the graph.  This is correct when those
+        # edges are in an unrelated case, but it means a subject like Kevin
+        # Nunes — who has active SHARES_EMPLOYER_WITH edges to subjects
+        # outside this network — is never auto-rejected from THIS network
+        # even after every within-network connection is rejected.
+        #
+        # sweep_network_orphans fills that gap: for each fraud network any
+        # affected subject belongs to, it checks whether any active upstream
+        # edge still connects two active members *of that specific network*.
+        # If none does, all remaining active members are auto-rejected.
+        # Only relevant for symmetric-edge families (Rules 1/3/5) — those
+        # are the upstream rules that feed into fraud-network membership.
+        if spec.family == _FAMILY_SYMMETRIC_EDGE:
+            sweep_changes = cascade.sweep_network_orphans(
+                session,
+                case_id,
+                rule_id,
+                deduped_subject_ids,
+                reason,
+                rejected_at,
+                investigator_id,
+            )
+            cascade_changes = list(cascade_changes) + sweep_changes
 
         # AI-31: one staleness touch per call, regardless of how many
         # instances or cascade hops this reject just wrote — see
