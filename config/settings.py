@@ -27,6 +27,16 @@ SIMILAR_CASES_DESCRIPTION_MIN_WORD_LENGTH = 4
 SIMILAR_CASES_SCORE_DESCRIPTION = 0.25   # allegation description keyword overlap
 SIMILAR_CASES_SCORE_EMPLOYER_FEIN = 0.25 # shared employer FEIN via :Subject→:Employer
 SIMILAR_CASES_SCORE_FRAUD_NETWORK = 0.25 # shared fraud network via :Subject→:FraudNetwork
+
+# Fraud Patterns tab (reasoning_layer/network/fraud_patterns.py).
+# Maximum related cases returned in precedents.matches. The true totals are
+# always reported separately, so this only limits what the tab displays.
+FRAUD_PATTERNS_MAX_PRECEDENTS = 5
+# "Outcomes in this category" counts a closed case as substantiated using the
+# same vocabulary Rule 7 uses to recognise a guilty outcome, read from the
+# live rule registry (config/rule.yaml supplies the default).
+FRAUD_PATTERNS_OUTCOME_RULE_ID = "Rule_07_Prior_Guilty"
+FRAUD_PATTERNS_OUTCOME_PARAM = "guilty_outcome_values"
 # config/settings.py
 
 # Entities that should be surfaced in the UI Provenance citations.

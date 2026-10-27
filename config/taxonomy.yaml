@@ -1,0 +1,74 @@
+# =============================================================================
+# BSI Fraud Patterns — Allegation Taxonomy
+# =============================================================================
+#
+# Single source of truth for which allegation types belong to which fraud
+# category. reasoning_layer/taxonomy_registry.py loads this file into Neo4j
+# on every startup (as :Category and :AllegationType nodes joined by
+# BELONGS_TO), so Neo4j always ends up matching this file: edit here,
+# restart, done. Nothing is written into Neo4j by hand.
+#
+# STATUS: DRAFT, based on the AppWorks type descriptions. Someone who knows
+# BSI cases should confirm the grouping, especially SUP (Support Payments),
+# FUN (Funeral Home) and CHK (Check). Verify every code and description
+# against the real AppWorks allegation-type list before finalizing.
+#
+# FIELDS
+#   code         The AppWorks allegation-type code. Unique across the file.
+#   description  The AppWorks description of that code.
+#   aliases      Optional. Other wordings seen in the stored allegation text
+#                (for example "DTA - Employment"). Find them with the WI-0
+#                query in the Agent 8 implementation document.
+#
+# MATCHING
+#   An allegation is linked to a type when its stored text equals the type's
+#   code, description or any alias after normalization (trimmed, repeated
+#   spaces collapsed, lowercase). No two types may share a match key.
+#
+# NOT CATEGORIZED ON PURPOSE
+#   OTH (Other) and EEC (no description in AppWorks) are deliberately absent.
+#   A case whose only allegation types are OTH or EEC has no category; the
+#   Fraud Patterns tab says so and does not error.
+# =============================================================================
+
+categories:
+  - name: Income / Asset Concealment
+    types:
+      - {code: ATS, description: Assets}
+      - {code: URINC, description: Unreported Income}
+      - {code: SLAM, description: Subject Living Above Means}
+      - {code: EMP, description: Employment}
+      - {code: SUP, description: Support Payments}
+      - {code: UCC, description: Unemployment}
+      - {code: BNFCNC, description: Benefit Concealment}
+      - {code: ERN, description: Other Earner in Home}
+      - {code: FUN, description: Funeral Home}
+
+  - name: Residency Misrepresentation
+    types:
+      - {code: DEPNOT, description: Dependent Not in Home}
+      - {code: DNH, description: Dependent Not in Home 1}
+      - {code: NRT, description: Non Resident}
+      - {code: NOTLMA, description: Out of State}
+      - {code: NCP, description: NCP Present}
+
+  - name: Identity Fraud
+    types:
+      - {code: FID, description: False Identity}
+
+  - name: Duplicate Benefit Fraud
+    types:
+      - {code: CHK, description: Check}
+      - {code: MUL, description: Multiple Assistance}
+
+  - name: Program-Specific Fraud
+    types:
+      - {code: EBT, description: EBT Fraud}
+      - {code: TRF, description: Trafficking}
+      - {code: DDI, description: Drug Diversion}
+      - {code: PCA, description: Personal Care Attendant}
+
+  - name: Misconduct Allegation
+    types:
+      - {code: AM, description: Agency Misconduct}
+      - {code: MIS, description: Employee Misconduct}

@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from reasoning_layer import rule_registry
+from reasoning_layer import rule_registry, taxonomy_registry
 from reasoning_layer.neo4j_client import get_session
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,9 @@ def _statements() -> List[str]:
 
 
 def apply_schema() -> int:
-    """Apply every constraint/index, then seed the rule registry. Returns
-    the number of statements executed. Idempotent."""
+    """Apply every constraint/index, then seed the rule registry and load
+    the allegation taxonomy. Returns the number of statements executed.
+    Idempotent."""
     statements = _statements()
     with get_session() as session:
         for statement in statements:
@@ -51,6 +52,7 @@ def apply_schema() -> int:
     logger.info("apply_schema: %d constraint/index statements applied", len(statements))
 
     rule_registry.ensure_registry()
+    taxonomy_registry.ensure_taxonomy()
     return len(statements)
 
 
@@ -61,4 +63,7 @@ if __name__ == "__main__":
     except Exception as exc:  # noqa: BLE001 — CLI entry point: report and exit non-zero
         print(f"FAILED to apply schema: {exc}")
         sys.exit(1)
-    print(f"OK — {count} constraints/indexes applied, :InferenceRule registry seeded.")
+    print(
+        f"OK — {count} constraints/indexes applied, :InferenceRule registry seeded, "
+        "allegation taxonomy loaded."
+    )

@@ -47,6 +47,26 @@ class SimilarCasesRequest(BaseModel):
     reload_ai_summary: bool = False
 
 
+class FraudPatternsRequest(BaseModel):
+    """Request body for POST /fraud_patterns — ON-DEMAND flow, Fraud Patterns tab."""
+
+    case_id: str
+    # ai_summary is optional — see SimilarCasesRequest for the resolution order.
+    ai_summary: Optional[Dict[str, Any]] = None
+    # Optional. Default False: if a written summary is already cached for
+    # this case_id, reuse it instead of calling the LLM again. True: always
+    # re-run and overwrite it. The graph result is read live either way.
+    reload_ai_summary: bool = False
+
+
+class FraudPatternsResponse(BaseModel):
+    """Response body for POST /fraud_patterns (same envelope as the other tabs)."""
+
+    complaint_number: str
+    status: str
+    details: Dict[str, Any]
+
+
 class PlanRequest(BaseModel):
     """Request body for POST /plan — ON-DEMAND flow, Step 4."""
 

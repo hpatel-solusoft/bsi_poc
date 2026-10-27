@@ -66,6 +66,7 @@ from etl import normalizers as N
 from etl.graph_sync_queries import (
     Q_ADDRESSES,
     Q_ALIASES,
+    Q_ALLEGATION_TYPE_LINKS,
     Q_ALLEGATIONS,
     Q_CASE,
     Q_CO_SUBJECTS,
@@ -74,8 +75,10 @@ from etl.graph_sync_queries import (
     Q_MERGED_INTO,
     Q_SUBJECTS,
     Q_WAGES,
+    UNLINK_ALLEGATION_TYPES,
 )
 from reasoning_layer.neo4j_client import get_session
+from reasoning_layer.taxonomy_registry import normalize_match_key
 
 logger = logging.getLogger(__name__)
 
@@ -509,6 +512,7 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
 _Q_CASE = Q_CASE
 _Q_MERGED_INTO = Q_MERGED_INTO
 _Q_ALLEGATIONS = Q_ALLEGATIONS
+_Q_ALLEGATION_TYPE_LINKS = Q_ALLEGATION_TYPE_LINKS
 _Q_SUBJECTS = Q_SUBJECTS
 _Q_ADDRESSES = Q_ADDRESSES
 _Q_ALIASES = Q_ALIASES
@@ -787,6 +791,12 @@ def _flatten(subjects: List[Dict[str, Any]], child_key: str) -> List[Dict[str, A
     return rows
 
 
+def _allegation_type_keys(allegations: List[Dict[str, Any]]) -> List[str]:
+    """Normalized, de-duplicated, sorted allegation-type texts for Q_ALLEGATION_TYPE_LINKS."""
+    keys = {normalize_match_key(a.get("allegation_type")) for a in allegations}
+    return sorted(key for key in keys if key)
+
+
 def _tx_load(tx, data: Dict[str, Any]) -> Dict[str, Any]:
     case = data["case"]
     case_id = case["case_id"]
@@ -819,6 +829,11 @@ def _tx_load(tx, data: Dict[str, Any]) -> Dict[str, Any]:
         run(Q_ALLEGATIONS, "allegations", allegations=allegations)
     else:
         counts["allegations"] = 0
+
+    # Always both, even for a case with no allegations, so a link to a type
+    # the case no longer carries is always cleaned up.
+    run(UNLINK_ALLEGATION_TYPES, "allegation_type_links_removed")
+    run(Q_ALLEGATION_TYPE_LINKS, "allegation_type_links", type_keys=_allegation_type_keys(allegations))
 
     if subjects:
         run(Q_SUBJECTS, "subjects", subjects=subjects)

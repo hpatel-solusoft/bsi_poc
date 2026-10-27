@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 from config.prompts import (
     COPILOT_TOOL_PROMPT,
     EXTRACTION_STAGE_PROMPT,
+    FRAUD_PATTERNS_PROMPT,
     PLAN_PROMPT,
     REPORT_GENERATION_PROMPT,
     RISK_ASSESSMENT_PROMPT,
@@ -57,6 +58,21 @@ def build_similar_cases_prompt(case_data: dict) -> str:
         SIMILAR_CASES_PROMPT,
         {
             "case_context": json.dumps(case_data, indent=2),
+        },
+    )
+
+
+def build_fraud_patterns_prompt(case_data: dict) -> str:
+    """
+    ON-DEMAND /fraud_patterns prompt.
+    Injects the case context as JSON; the caller puts the deterministic
+    graph result under the "fraud_patterns" key, so the agent only explains
+    what the graph already decided.
+    """
+    return _render_prompt(
+        FRAUD_PATTERNS_PROMPT,
+        {
+            "case_context": json.dumps(case_data, indent=2, default=str),
         },
     )
 

@@ -49,6 +49,8 @@ from api.models import (
     ConversationHistoryResponse,
     CopilotRequest,
     FraudNetworkResponse,
+    FraudPatternsRequest,
+    FraudPatternsResponse,
     GraphIngestRequest,
     InvestigationStepsResponse,
     ModifyInvestigationStepsRequest,
@@ -79,6 +81,7 @@ from api.pipeline_execution import run_similar_cases_pipeline  # noqa: F401
 from api.response_builders import validate_ai_summary_contract
 from api.services import (
     copilot_service,
+    fraud_patterns_service,
     intake_service,
     plan_service,
     report_service,
@@ -487,6 +490,23 @@ def similar_cases(
     refactor.
     """
     return similar_cases_service.run_similar_cases(req, username, token)
+
+
+@app.post("/fraud_patterns", response_model=FraudPatternsResponse)
+def fraud_patterns(
+    req: FraudPatternsRequest,
+    username: str = Depends(get_username),
+    token: str = Depends(get_token),
+) -> Dict[str, Any]:
+    """
+    ON-DEMAND — Fraud Patterns Route.
+    Thin HTTP adapter — all business logic lives in
+    api.services.fraud_patterns_service.run_fraud_patterns (prerequisite
+    resolution, cache lookup, graph read + LLM-explain pipeline, summary
+    caching, response shaping). The graph result is returned under
+    details.graph_findings.fraud_patterns and is never persisted.
+    """
+    return fraud_patterns_service.run_fraud_patterns(req, username, token)
 
 
 @app.post("/risk_assessment")

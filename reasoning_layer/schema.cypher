@@ -57,6 +57,16 @@ CREATE CONSTRAINT fraud_network_unique IF NOT EXISTS
 CREATE CONSTRAINT inference_rule_unique IF NOT EXISTS
   FOR (r:InferenceRule) REQUIRE r.rule_id IS UNIQUE;
 
+// The allegation taxonomy (config/taxonomy.yaml, loaded by
+// reasoning_layer/taxonomy_registry.py) is MERGEd on these keys on every
+// startup; the constraints make that idempotent and let the Fraud Patterns
+// queries reach a type by code without a label scan.
+CREATE CONSTRAINT category_name_unique IF NOT EXISTS
+  FOR (c:Category) REQUIRE c.name IS UNIQUE;
+
+CREATE CONSTRAINT allegation_type_code_unique IF NOT EXISTS
+  FOR (t:AllegationType) REQUIRE t.code IS UNIQUE;
+
 // ---------------------------------------------------------------
 // Indexes on rule match keys — the fields the rules filter or join on.
 // ---------------------------------------------------------------

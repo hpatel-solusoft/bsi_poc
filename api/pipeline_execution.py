@@ -29,7 +29,7 @@ from api.message_utils import (
     merge_provenance,
 )
 from api.response_builders import parse_bsi_section
-from core.case_store import get_case_ai_summary_cache_updated_at
+from core.case_store import get_case_ai_summary_cache_updated_at, get_complaint_number
 from core.investigation_plan_override_repository import (
     compute_plan_staleness,
     get_override,
@@ -41,6 +41,7 @@ from reasoning_layer.graph_queries import check_network_match
 from reasoning_layer.investigation_tasks import build_rule_aware_tasks, tag_step_sources
 from reasoning_layer.neo4j_client import GraphUnavailableError
 from reasoning_layer.risk_signals import apply_graph_risk_signals
+from reasoning_layer.network.fraud_patterns import empty_fraud_patterns, find_fraud_patterns
 from reasoning_layer.network.similar_cases import find_structural_matches
 from semantic_layer.entity_contracts import (
     InvestigationPlan as InvestigationPlanContract,
@@ -278,6 +279,24 @@ def fetch_live_similar_cases(case_id: str) -> Dict[str, Any]:
             "total_candidates_scored": 0,
             "unavailable_reason": str(exc),
         }
+
+
+def fetch_live_fraud_patterns(case_id: str) -> Dict[str, Any]:
+    """
+    Fetch THIS request's live Fraud Patterns result straight from Neo4j —
+    the Fraud Patterns tab's graph_findings block. Never cached or
+    persisted: called on every /fraud_patterns request, cache hit or not,
+    so the tab reflects the graph as it stands right now.
+
+    Non-blocking, same as fetch_live_similar_cases: a graph outage (or a
+    blank case id) degrades to an empty, clearly-unavailable result rather
+    than failing the request.
+    """
+    try:
+        return find_fraud_patterns(case_id)["result"]
+    except (ValueError, GraphUnavailableError, Neo4jError) as exc:
+        logger.warning("fraud patterns unavailable for case_id=%s — %s", case_id, exc)
+        return {**empty_fraud_patterns(), "unavailable_reason": str(exc)}
 
 
 def fetch_live_risk_signals(
@@ -531,6 +550,66 @@ def run_similar_cases_pipeline(
     return agent_summary, similar_cases_data, similar_section, merged_provenance
 
 
+def run_fraud_patterns_pipeline(
+    case_id: str,
+    case_data: Dict[str, Any],
+    runner,
+    build_fraud_patterns_prompt,
+    token: Optional[str] = None,
+) -> Tuple[str, Dict[str, Any], List[dict]]:
+    """
+    /fraud_patterns direct + LLM-explain pipeline work. Returns
+    (agent_summary, fraud_patterns_data, merged_provenance).
+
+    Same shape as run_similar_cases_pipeline with one deliberate
+    difference: no section is returned for CASE_STORE / ai_summary. The
+    graph result is never stored (Postgres or the warm store) — only the
+    written summary is cached, by the caller — so nothing here hands it
+    back as something to persist.
+
+    The graph result is computed first and injected into the prompt, so the
+    LLM explains what the graph found and never decides what is included.
+    The FRAUD_PATTERNS scope carries no tools.
+    """
+    structural = fetch_live_fraud_patterns(case_id)
+    # Deliberately NOT the whole case_data: it carries other complaint numbers
+    # (the case's own network, similar cases) that the LLM mixed into the
+    # Related Cases list. The agent gets only what it must explain.
+    case_data_for_prompt = {
+        "complaint_number": get_complaint_number(case_data),
+        "fraud_patterns": structural,
+    }
+
+    messages, new_provenance, _ = runner.run_scoped(
+        system_prompt=build_fraud_patterns_prompt(case_data_for_prompt),
+        user_message=(
+            f"Explain the fraud patterns already identified for case {case_id}: the related cases "
+            f"in the same category, the financial exposure, the outcomes of closed cases and the "
+            f"yearly trend. Do not add, remove or reorder cases; the graph has already decided "
+            f"what is included."
+        ),
+        scope="FRAUD_PATTERNS",
+        execution_context={"token": token},
+    )
+
+    sections: Dict[str, Any] = {}
+    new_provenance = merge_direct_result(
+        sections,
+        new_provenance,
+        "fraud_patterns",
+        {
+            "result": structural,
+            "provenance": {
+                "sources": ["Neo4j graph query"],
+                "retrieved_at": "",
+                "computed_by": "reasoning_layer.network.fraud_patterns",
+            },
+        },
+    )
+    merged_provenance = merge_provenance(case_data.get("provenance_trail", []), new_provenance)
+    return extract_agent_summary(messages), sections.get("fraud_patterns", {}), merged_provenance
+
+
 def run_risk_assessment_pipeline(
     case_id: str,
     case_data: Dict[str, Any],
@@ -775,9 +854,7 @@ def run_plan_pipeline(
         modified_on = None
 
     plan_stale = (
-        compute_plan_staleness(plan_generated_at_before_call, modified_on)
-        if override is not None
-        else False
+        compute_plan_staleness(plan_generated_at_before_call, modified_on) if override is not None else False
     )
 
     plan_section = {"investigation_plan": investigation_plan}

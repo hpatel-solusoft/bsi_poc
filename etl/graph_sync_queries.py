@@ -82,6 +82,39 @@ SET r.source_table = "Allegations_Workfolder_Id", r.retrieved_at = a.retrieved_a
 RETURN count(al) AS n
 """
 
+# (Case)-[:HAS_ALLEGATION_TYPE]->(:AllegationType) — the path Case ->
+# AllegationType -> Category that the Fraud Patterns tab reads. Today a case
+# only reaches its Allegation records, whose type is plain text; nothing
+# connects it to a category. $type_keys holds each allegation's text already
+# normalized by reasoning_layer.taxonomy_registry.normalize_match_key (the
+# same function that built AllegationType.match_keys), so both sides always
+# agree on what "the same text" means. An allegation whose text matches no
+# type (OTH, EEC, anything unrecognized) simply produces no link.
+Q_ALLEGATION_TYPE_LINKS = """
+MATCH (c:Case {case_id: $case_id})
+UNWIND $type_keys AS type_key
+MATCH (t:AllegationType)
+WHERE type_key IN t.match_keys
+MERGE (c)-[r:HAS_ALLEGATION_TYPE]->(t)
+SET r.source_table = "Allegations_Workfolder_Id", r.retrieved_at = $retrieved_at
+RETURN count(DISTINCT r) AS n
+"""
+
+# Runs BEFORE Q_ALLEGATION_TYPE_LINKS on every sync, for every case —
+# including one with no allegations. When an allegation's type changes in
+# AppWorks the old link must disappear, and a pure MERGE can never retire
+# anything. Deliberately not a Q_*/_Q_* name: those are audited as
+# MERGE-only write queries (tests/test_ai04_graph_sync.py), and this one is
+# a delete. The links are derived data rebuilt from this run's own fetch,
+# so a delete-then-recreate inside the one sync transaction is atomic and
+# needs no two-miss flagging like the RECONCILE queries do.
+UNLINK_ALLEGATION_TYPES = """
+MATCH (c:Case {case_id: $case_id})
+OPTIONAL MATCH (c)-[r:HAS_ALLEGATION_TYPE]->(:AllegationType)
+DELETE r
+RETURN count(r) AS n
+"""
+
 Q_SUBJECTS = """
 MATCH (c:Case {case_id: $case_id})
 UNWIND $subjects AS s
