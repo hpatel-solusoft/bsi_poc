@@ -13,6 +13,8 @@ right rows. Run the WI-3 and WI-4 checks in Neo4j Browser for that.
 Run:  python -m pytest tests/test_fraud_patterns.py
 """
 
+
+
 from __future__ import annotations
 
 import os
@@ -524,7 +526,11 @@ def _full_session() -> FakeSession:
 
 
 def _find(session: FakeSession, **kwargs: Any) -> Dict[str, Any]:
-    registry = {"Rule_07_Prior_Guilty": {"params": {"guilty_outcome_values": GUILTY}}}
+    registry = {
+        "Rule_07_Prior_Guilty": {
+            "params": {"guilty_outcome_values": GUILTY, "closed_case_statuses": ["closed", "close"]}
+        }
+    }
     with (
         mock.patch.object(fraud_patterns, "get_session", session_factory(session)),
         mock.patch.object(fraud_patterns.rule_registry, "load_registry", return_value=registry),
@@ -576,7 +582,8 @@ def test_blank_case_id_raises_value_error(blank):
 def test_every_query_is_read_only_and_takes_only_the_case_id():
     session = _full_session()
     _find(session)
-    assert all(set(call["params"]) == {"case_id"} for call in session.calls)
+    allowed = {"case_id", "closed_statuses"}
+    assert all({"case_id"} <= set(call["params"]) <= allowed for call in session.calls)
     for text in (
         queries.OWN_TYPES,
         queries.RELATED_CASES,
@@ -781,3 +788,29 @@ def test_route_is_registered_with_a_response_model():
     route = next(r for r in server.app.routes if getattr(r, "path", None) == "/fraud_patterns")
     assert route.response_model is server.FraudPatternsResponse
     assert "POST" in route.methods
+
+
+def test_closed_outcomes_query_falls_back_to_case_and_allegation_status():
+    """Older AppWorks cases have no closed_date; closure must also be read from status (Rule 7 fallback)."""
+    text = queries.CLOSED_CASE_OUTCOMES
+    assert "$closed_statuses" in text
+    assert "c.closed_date" in text
+    assert "al.status" in text or "statuses" in text
+
+
+def test_closed_statuses_come_from_the_rule_7_registry_entry():
+    registry = {"Rule_07_Prior_Guilty": {"params": {"closed_case_statuses": ["Closed", " close "]}}}
+    with mock.patch.object(fraud_patterns.rule_registry, "load_registry", return_value=registry):
+        assert fraud_patterns._closed_statuses() == ["closed", "close"]
+
+
+def test_find_fraud_patterns_passes_closed_statuses_to_the_outcomes_query():
+    session = _full_session()
+    _find(session)
+    outcome_calls = [c for c in session.calls if c["query"] == queries.CLOSED_CASE_OUTCOMES]
+    assert outcome_calls and outcome_calls[0]["params"]["closed_statuses"] == ["closed", "close"]
+
+
+def test_trend_and_related_queries_fall_back_to_allegation_date_reported():
+    assert "al.date_reported" in queries.CATEGORY_CASES
+    assert "a2.date_reported" in queries.RELATED_CASES

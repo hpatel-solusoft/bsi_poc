@@ -48,11 +48,17 @@ OPTIONAL MATCH (c1)<-[:APPEARS_IN_CASE]-(:Subject)
       (:Subject)-[:APPEARS_IN_CASE]->(c2)
 WHERE coalesce(link.status, "active") <> "rejected"
 WITH c2, own_types, shared_categories, c2_types, count(link) AS people_link_count
+// Older AppWorks cases have no case-level status / opened date (see Rule 7's
+// header). Fall back to the case's allegations so the tab still has a value.
+OPTIONAL MATCH (c2)-[:HAS_ALLEGATION]->(a2:Allegation)
+WITH c2, own_types, shared_categories, c2_types, people_link_count,
+     head(collect(a2.status))   AS al_status,
+     min(a2.date_reported)      AS al_opened
 RETURN c2.case_id          AS case_id,
        c2.complaint_number AS complaint_no,
-       c2.status           AS status,
+       coalesce(c2.status, al_status)        AS status,
        c2.fraud_amount     AS fraud_amount,
-       c2.opened_date      AS date_opened,
+       coalesce(c2.opened_date, al_opened)   AS date_opened,
        [t IN c2_types | t.description]            AS case_types,
        shared_categories,
        any(t IN c2_types WHERE t IN own_types)    AS also_same_type,
@@ -67,28 +73,39 @@ CATEGORY_CASES = """
 MATCH (:Case {case_id: $case_id})-[:HAS_ALLEGATION_TYPE]->(:AllegationType)-[:BELONGS_TO]->(cat:Category)
 WITH DISTINCT cat
 MATCH (cat)<-[:BELONGS_TO]-(:AllegationType)<-[:HAS_ALLEGATION_TYPE]-(c:Case)
-RETURN DISTINCT cat.name AS category,
+WITH DISTINCT cat, c
+OPTIONAL MATCH (c)-[:HAS_ALLEGATION]->(al:Allegation)
+WITH cat, c, min(al.date_reported) AS al_opened
+RETURN cat.name          AS category,
        c.case_id         AS case_id,
        c.fraud_amount    AS fraud_amount,
-       c.opened_date     AS opened_date
+       coalesce(c.opened_date, al_opened) AS opened_date
 ORDER BY category, case_id
 """
 
-# Section 3 — closed cases (those with a closed_date) in each of this case's
-# categories, excluding this case, with every field Rule 7 inspects for a
-# guilty outcome: allegation outcome, allegation status, case disposition.
+# Section 3 — closed cases in each of this case's categories, excluding this
+# case, with every field Rule 7 inspects for a guilty outcome: allegation
+# outcome, allegation status, case disposition.
+# A case counts as closed when ANY of these says so (same fallback as Rule 7,
+# because on older AppWorks cases c.closed_date and c.status are never filled
+# and the closure signal lives on the allegation, e.g. al.status = "Close"):
+#   c.closed_date is set, c.status matches $closed_statuses, or any of its
+#   allegation statuses matches $closed_statuses (case-insensitive CONTAINS).
 CLOSED_CASE_OUTCOMES = """
 MATCH (:Case {case_id: $case_id})-[:HAS_ALLEGATION_TYPE]->(:AllegationType)-[:BELONGS_TO]->(cat:Category)
 WITH DISTINCT cat
 MATCH (cat)<-[:BELONGS_TO]-(:AllegationType)<-[:HAS_ALLEGATION_TYPE]-(c:Case)
 WHERE toString(c.case_id) <> toString($case_id)
-  AND coalesce(trim(toString(c.closed_date)), "") <> ""
 WITH DISTINCT cat, c
 OPTIONAL MATCH (c)-[:HAS_ALLEGATION]->(al:Allegation)
+WITH cat, c, collect(al.outcome) AS outcomes, collect(al.status) AS statuses
+WHERE coalesce(trim(toString(c.closed_date)), "") <> ""
+   OR any(v IN $closed_statuses WHERE toLower(coalesce(c.status, "")) CONTAINS v)
+   OR any(s IN statuses WHERE any(v IN $closed_statuses WHERE toLower(s) CONTAINS v))
 RETURN cat.name AS category,
        c.case_id AS case_id,
        c.disposition AS disposition,
-       collect(al.outcome) AS outcomes,
-       collect(al.status)  AS statuses
+       outcomes,
+       statuses
 ORDER BY category, case_id
 """

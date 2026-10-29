@@ -274,7 +274,16 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
         # absent — never guessed.
         "is_dta_case": N.to_bool(_first(wf_props, "WorkfolderIsDTACase", "Workfolder_DTACase")),
         "disposition": N.clean_text(_first(wf_props, "WorkfolderDisposition", "Workfolder_Disposition")),
-        "opened_date": N.to_iso_date(_first(wf_props, "WorkfolderOpenDate", "S_CREATEDDATE")),
+        "opened_date": N.to_iso_date(
+            _first(
+                wf_props,
+                "WorkfolderOpenDate",
+                "WorkfolderDateReported",
+                "WorkfolderDateReceived",
+                "CREATION_DATE",
+                "S_CREATEDDATE",
+            )
+        ),
         "closed_date": N.to_iso_date(_first(wf_props, "WorkfolderCloseDate", "Workfolder_ClosedDate")),
         "merge_target_case_ids": _merge_target_case_ids(wf_props.get("Workfolder_MergeCases")),
         "source_table": "Workfolder",
@@ -343,6 +352,11 @@ def fetch_case_graph(case_id: str) -> Dict[str, Any]:
                             "Allegations_DateClosed",
                             "Allegations_ClosedDate",
                         )
+                    ),
+                    # Fallback "opened" date for the Fraud Patterns trend when
+                    # the workfolder carries none (older AppWorks cases).
+                    "date_reported": N.to_iso_date(
+                        _first(props, "Allegations_DateReported", "Allegations_DateReceived")
                     ),
                     "comment_text": comment_text,
                     "source_table": "Allegations",

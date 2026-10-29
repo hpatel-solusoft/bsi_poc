@@ -221,20 +221,28 @@ def build_trend(rows: List[_Row]) -> List[_Row]:
     return trend
 
 
-def _guilty_values() -> List[str]:
-    """Rule 7's guilty outcome vocabulary, read live so operator tuning applies."""
+def _rule_vocab(param: str) -> List[str]:
+    """One of Rule 7's vocabulary lists, lower-cased, read live so operator tuning applies."""
     params = rule_registry.load_registry().get(FRAUD_PATTERNS_OUTCOME_RULE_ID, {}).get("params", {})
-    values = [
-        str(v).strip().lower() for v in params.get(FRAUD_PATTERNS_OUTCOME_PARAM) or [] if str(v).strip()
-    ]
+    values = [str(v).strip().lower() for v in params.get(param) or [] if str(v).strip()]
     if not values:
-        raise ValueError(f"{FRAUD_PATTERNS_OUTCOME_RULE_ID}.{FRAUD_PATTERNS_OUTCOME_PARAM} is not configured")
+        raise ValueError(f"{FRAUD_PATTERNS_OUTCOME_RULE_ID}.{param} is not configured")
     return values
 
 
-def _run(session, query: str, case_id: str) -> List[_Row]:
+def _guilty_values() -> List[str]:
+    """Rule 7's guilty outcome vocabulary."""
+    return _rule_vocab(FRAUD_PATTERNS_OUTCOME_PARAM)
+
+
+def _closed_statuses() -> List[str]:
+    """Rule 7's closed-status vocabulary (decides which cases count as closed)."""
+    return _rule_vocab("closed_case_statuses")
+
+
+def _run(session, query: str, case_id: str, **params: Any) -> List[_Row]:
     """Run one read-only query for this case and return its rows."""
-    return session.run(query, case_id=case_id).data()
+    return session.run(query, case_id=case_id, **params).data()
 
 
 def _build_sections(session, case_id: str, limit: int) -> Dict[str, Any]:
@@ -243,7 +251,10 @@ def _build_sections(session, case_id: str, limit: int) -> Dict[str, Any]:
     return {
         "precedents": build_precedents(_run(session, queries.RELATED_CASES, case_id), limit),
         "financial_exposure": build_financial_exposure(category_cases),
-        "outcomes": build_outcomes(_run(session, queries.CLOSED_CASE_OUTCOMES, case_id), _guilty_values()),
+        "outcomes": build_outcomes(
+            _run(session, queries.CLOSED_CASE_OUTCOMES, case_id, closed_statuses=_closed_statuses()),
+            _guilty_values(),
+        ),
         "trend": build_trend(category_cases),
     }
 
